@@ -1182,3 +1182,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [added release checklist/runbook covering preflight quality gates, packaging steps, tag/version flow, post-publish validation, and explicit rollback procedure with failure classifications]
 - residual_risk: runbook references packaging workflows/scripts introduced in later release tickets and should remain synchronized with workflow names and script paths
+
+- timestamp: 2026-03-03T20:01:31Z
+- session: session-2026-03-03-a
+- ticket: REL-003
+- action: done
+- evidence:
+  - files: [scripts/release-package-cli.sh, package.json, tickets.csv, run-state.json]
+  - commands: [./scripts/release-package-cli.sh, bun run util:check]
+- outcomes: [added deterministic CLI/TUI release packaging script that builds release binaries, installs them into target output directory, validates executable health, and emits compressed release bundle at `dist/obs-cli-bundle.tar.gz`; wired script into `package.json` as `util:release:cli`]
+- residual_risk: script currently performs local install/package only; external distribution signing/notarization for binaries remains out of scope

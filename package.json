@@ -11,6 +11,7 @@
     "prepare": "husky",
     "obs:dev": "cargo run -p obs-cli --",
     "build": "cargo build --workspace --release && OUT_DIR=\"${OBS_HOME:-${TOOLS_HOME:-$HOME/.tools}/obs}\" && mkdir -p \"$OUT_DIR\" && cp target/release/obs \"$OUT_DIR/obs\" && cp target/release/obs-tui \"$OUT_DIR/obs-tui\"",
+    "util:release:cli": "./scripts/release-package-cli.sh",
     "util:format": "cargo fmt --all",
     "util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "util:types": "cargo check --workspace",

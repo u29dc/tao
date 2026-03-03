@@ -120,7 +120,7 @@
 "PERF-008","Lock perf budgets in CI gate","perf","phase5","DOC-006|PERF-007","done","P2","codex","3","0","","CI fails on budget regressions"
 "REL-001","Define versioning policy for sdk/cli/app","rel","phase5","ARC-006","done","P2","codex","3","0","","semver + compatibility rules documented"
 "REL-002","Create release checklist and runbook","rel","phase5","DOC-001","done","P2","codex","3","0","","runbook includes rollback plan"
-"REL-003","Package CLI install artifact flow","rel","phase5","CLI-006","todo","P2","unassigned","3","0","","release build installs binary to target path"
+"REL-003","Package CLI install artifact flow","rel","phase5","CLI-006","done","P2","codex","3","0","","release build installs binary to target path"
 "REL-004","Package macOS app artifact flow","rel","phase5","APP-012","todo","P2","unassigned","3","0","","signed app artifact produced in CI"
 "REL-005","Add migration preflight checks","rel","phase5","DB-002","todo","P2","unassigned","3","0","","release validates schema migration before startup"
 "REL-006","Cut v1.0.0 release candidate","rel","phase5","REL-001|REL-002|REL-003|REL-004|REL-005|QA-008|PERF-008","todo","P2","unassigned","3","0","","RC build and acceptance report published"
