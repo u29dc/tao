@@ -347,11 +347,12 @@ public struct TaoBridgeClient {
     private let repositoryRoot: URL
 
     public init(
-        bridgeCommand: [String] = ["cargo", "run", "--quiet", "-p", "tao-sdk-bridge", "--"],
+        bridgeCommand: [String]? = nil,
         repositoryRoot: URL? = nil
     ) {
-        self.bridgeCommand = bridgeCommand
-        self.repositoryRoot = repositoryRoot ?? Self.defaultRepositoryRoot()
+        let resolvedRepositoryRoot = repositoryRoot ?? Self.defaultRepositoryRoot()
+        self.repositoryRoot = resolvedRepositoryRoot
+        self.bridgeCommand = bridgeCommand ?? Self.defaultBridgeCommand(repositoryRoot: resolvedRepositoryRoot)
     }
 
     public func vaultStats(vaultRoot: String, dbPath: String) throws -> BridgeVaultStats {
@@ -529,6 +530,12 @@ public struct TaoBridgeClient {
     }
 
     private func runProcess(arguments: [String]) throws -> Data {
+        if let missingExecutable = missingExecutablePath(for: arguments.first) {
+            throw TaoBridgeClientError.launchFailed(
+                "bridge executable not found at \(missingExecutable); run `bun run build` or set TAO_BRIDGE_BIN"
+            )
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = arguments
@@ -595,5 +602,33 @@ public struct TaoBridgeClient {
             root.deleteLastPathComponent()
         }
         return root
+    }
+
+    private static func defaultBridgeCommand(repositoryRoot: URL) -> [String] {
+        let env = ProcessInfo.processInfo.environment
+        if let configured = env["TAO_BRIDGE_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty
+        {
+            return [configured]
+        }
+
+        let bridgePath = repositoryRoot
+            .appendingPathComponent("target")
+            .appendingPathComponent("release")
+            .appendingPathComponent("tao-sdk-bridge")
+            .path
+        return [bridgePath]
+    }
+
+    private func missingExecutablePath(for command: String?) -> String? {
+        guard let command else {
+            return "<empty command>"
+        }
+
+        if command.contains("/") {
+            return FileManager.default.isExecutableFile(atPath: command) ? nil : command
+        }
+
+        return nil
     }
 }

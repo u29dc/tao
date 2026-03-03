@@ -9,7 +9,7 @@
   },
   "scripts": {
     "prepare": "husky",
-    "tao:dev": "cargo run -p tao-cli --",
+    "tao:dev": "./target/release/tao",
     "build": "cargo build --workspace --release && OUT_DIR=\"${TAO_HOME:-${TOOLS_HOME:-$HOME/.tools}/tao}\" && mkdir -p \"$OUT_DIR\" && cp target/release/tao \"$OUT_DIR/tao\" && cp target/release/tao-tui \"$OUT_DIR/tao-tui\"",
     "util:release:cli": "./scripts/release-package-cli.sh",
     "util:release:mac": "./scripts/package-macos-app.sh",
@@ -20,7 +20,7 @@
     "util:test": "cargo test --workspace --release",
     "util:build": "cargo build --workspace --release && swift build --configuration release --package-path apps/tao-macos --product TaoMacOSApp",
     "util:audit": "cargo audit",
-    "util:bench:bridge": "cargo run --release -p tao-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
+    "util:bench:bridge": "./target/release/tao-bench --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
     "util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build"
   },
   "devDependencies": {

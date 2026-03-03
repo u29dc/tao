@@ -12,7 +12,7 @@ Use this runbook for `rc` and stable releases of `tao` workspace artifacts.
 4. Run `./scripts/check-perf-budgets.sh`.
 5. Run `swift test --package-path apps/tao-macos`.
 6. Validate migration preflight path:
-   - `cargo run -p tao-cli -- --json vault preflight --vault-root <vault> --db-path <db>`
+   - `./target/release/tao --json vault preflight --vault-root <vault> --db-path <db>`
 7. Verify release docs are present:
    - `docs/release/versioning-policy.md`
    - `docs/release/release-runbook.md`

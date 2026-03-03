@@ -4,11 +4,17 @@ set -euo pipefail
 REPORT_DIR="bench/reports"
 BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
+BENCH_BIN="target/release/tao-bench"
 
 mkdir -p "${REPORT_DIR}"
 
+if [ ! -x "${BENCH_BIN}" ]; then
+  echo "Building release benchmark binary..."
+  cargo build --release -p tao-bench
+fi
+
 echo "Running bridge latency budget gate..."
-cargo run --release -p tao-bench -- \
+"${BENCH_BIN}" \
   --scenario bridge \
   --iterations 200 \
   --enforce-budgets \
@@ -17,7 +23,7 @@ cargo run --release -p tao-bench -- \
   --json-out "${BRIDGE_REPORT}"
 
 echo "Running startup latency budget gate..."
-cargo run --release -p tao-bench -- \
+"${BENCH_BIN}" \
   --scenario startup \
   --iterations 50 \
   --bridge-notes 1000 \

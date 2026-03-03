@@ -1392,3 +1392,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [default rust and swift build/test scripts now run release configuration, perf budget script runs release bench binary, ci definitions aligned to release build defaults]
 - residual_risk: workflows are disabled manually at repository level; file-level workflow defaults are ready for future re-enable
+
+- timestamp: 2026-03-03T23:41:00Z
+- session: session-2026-03-03-b
+- ticket: BUILD-002
+- action: done
+- evidence:
+  - files: [package.json, scripts/check-perf-budgets.sh, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [bun run util:check, swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [runtime defaults now execute built release binaries for cli and bridge paths, no cargo-run runtime default path remains for app/cli execution flows]
+- residual_risk: release bridge binary must exist before swift runtime/tests; workflows now build tao-sdk-bridge release binary before swift steps
