@@ -1072,3 +1072,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 5000 --json-out bench/reports/perf-002-bridge-5k.json, bun run util:check]
 - outcomes: [captured and committed 5k-note bridge baseline report with p50/p95/max latency distributions, including documented 5k `notes_list` scaling characteristics and budget pass status]
 - residual_risk: one observed `note_put` max outlier at 52.299ms remains below hard p95 budget but should be monitored for IO jitter regression in CI
+
+- timestamp: 2026-03-03T19:36:58Z
+- session: session-2026-03-03-a
+- ticket: PERF-003
+- action: done
+- evidence:
+  - files: [bench/reports/perf-003-bridge-10k.json, bench/reports/perf-003-bridge-10k-time.txt, bench/reports/perf-003-startup-smoke.json, bench/reports/perf-003-startup-smoke-time.txt, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario bridge --iterations 1 --bridge-notes 1 --json-out bench/reports/perf-003-startup-smoke.json, bun run util:check]
+- outcomes: [captured and committed 10k-note bridge baseline with p50/p95 latencies, plus startup-smoke and `/usr/bin/time -l` memory/process telemetry artifacts to satisfy memory and startup metric coverage]
+- residual_risk: startup-smoke currently uses bridge single-iteration proxy instead of full Swift cold-start trace, so UI-level startup budgets still need dedicated app profiling in phase5

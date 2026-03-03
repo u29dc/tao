@@ -1,0 +1,34 @@
+{
+  "budgets": {
+    "max_p50_ms": 50.0,
+    "max_p95_ms": 120.0
+  },
+  "generated_at_unix": 1772565895,
+  "iterations": 1,
+  "metrics": {
+    "events_poll": {
+      "max_ms": 0.093,
+      "p50_ms": 0.093,
+      "p95_ms": 0.093
+    },
+    "note_get": {
+      "max_ms": 0.068,
+      "p50_ms": 0.068,
+      "p95_ms": 0.068
+    },
+    "note_put": {
+      "max_ms": 1.707,
+      "p50_ms": 1.707,
+      "p95_ms": 1.707
+    },
+    "notes_list": {
+      "max_ms": 0.161,
+      "p50_ms": 0.161,
+      "p95_ms": 0.161
+    }
+  },
+  "notes_seeded": 1,
+  "scenario": "bridge",
+  "status": "pass",
+  "violations": []
+}

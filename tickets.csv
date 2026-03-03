@@ -112,7 +112,7 @@
 "QA-008","Add CLI JSON contract tests","qa","phase5","CLI-006","todo","P2","unassigned","3","0","","schema validations for all `--json` commands"
 "PERF-001","Capture baseline benchmarks on 1k vault","perf","phase4","INFRA-007","done","P2","codex","3","0","","baseline report committed"
 "PERF-002","Capture baseline benchmarks on 5k vault","perf","phase4","PERF-001","done","P2","codex","3","0","","report includes p50/p95 latencies"
-"PERF-003","Capture baseline benchmarks on 10k vault","perf","phase4","PERF-002","todo","P2","unassigned","3","0","","report includes memory and startup metrics"
+"PERF-003","Capture baseline benchmarks on 10k vault","perf","phase4","PERF-002","done","P2","codex","3","0","","report includes memory and startup metrics"
 "PERF-004","Tune sqlite pragmas for workload","perf","phase4","DB-008|PERF-003","todo","P2","unassigned","3","0","","selected pragma profile documented"
 "PERF-005","Optimize link resolution hot paths","perf","phase4","LINK-006|PERF-003","todo","P2","unassigned","3","0","","resolver throughput improves vs baseline"
 "PERF-006","Optimize bridge call batching","perf","phase5","FFI-008|PERF-003","todo","P2","unassigned","3","0","","boundary call count reduced in key flows"
