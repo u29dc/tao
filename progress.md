@@ -632,3 +632,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [backlink graph service added with outgoing/backlink/unresolved queries mapped to typed edges, preserving deterministic ordering from repository queries]
 - residual_risk: link graph service currently provides query views only and does not yet expose pagination for very large backlink sets
+
+- timestamp: 2026-03-03T17:15:42Z
+- session: session-2026-03-03-a
+- ticket: PROP-004
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [default property mapping layer added to normalize and merge tag/tags, alias/aliases, and cssclass/cssclasses into canonical list-based typed properties]
+- residual_risk: default mapping merge order follows YAML entry iteration and canonical list normalization; future compatibility checks may still be needed for full Obsidian plugin-specific property conventions
