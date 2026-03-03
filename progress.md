@@ -692,3 +692,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [base table query planner added to compile registry view configs into deterministic query plans with normalized pagination, required property key extraction, and per-key property-query hints aligned to PROP-006 sort/filter capabilities]
 - residual_risk: planner currently emits metadata plans only; execution semantics for non-contains operators and multi-key joins are deferred to BASE-004 executor logic
+
+- timestamp: 2026-03-03T17:33:25Z
+- session: session-2026-03-03-a
+- ticket: BASE-004
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [service-level base table executor added to run compiled plans against sqlite metadata with source scoping, filter evaluation, deterministic sort, pagination, column projection, and typed error handling for malformed property payloads]
+- residual_risk: current executor computes row sets in-memory from repository scans, so very large vaults may require future SQL-pushdown optimization for tighter latency/memory budgets

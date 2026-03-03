@@ -66,7 +66,7 @@
 "BASE-001","Implement `.base` file parser","base","phase2","DB-006","done","P1","codex","3","0","","valid syntax parsed into typed model"
 "BASE-002","Implement base view registry","base","phase2","BASE-001","done","P1","codex","3","0","","list views with type and config"
 "BASE-003","Implement table query planner","base","phase2","BASE-001|PROP-006","done","P1","codex","3","0","","table view query compiles to db query plan"
-"BASE-004","Implement table row executor","base","phase2","BASE-003","todo","P1","unassigned","3","0","","rows returned with paging and sort"
+"BASE-004","Implement table row executor","base","phase2","BASE-003","done","P1","codex","3","0","","rows returned with paging and sort"
 "BASE-005","Implement table column config support","base","phase2","BASE-004","todo","P1","unassigned","3","0","","column order/visibility persisted"
 "BASE-006","Implement basic summaries","base","phase2","BASE-004","todo","P1","unassigned","3","0","","count/min/max/avg summary rows supported"
 "BASE-007","Implement base validation API","base","phase2","BASE-001","todo","P1","unassigned","3","0","","clear diagnostics for invalid base config"

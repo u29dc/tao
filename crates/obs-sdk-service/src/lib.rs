@@ -1,5 +1,6 @@
 //! Service-layer orchestration entrypoints over SDK subsystem crates.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -30,6 +31,10 @@ pub use indexing::{
 };
 pub use tracing_hooks::ServiceTraceContext;
 
+use obs_sdk_bases::{
+    BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseSortClause, BaseSortDirection,
+    TableQueryPlan,
+};
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
     MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,
@@ -1218,6 +1223,336 @@ pub enum PropertyQueryError {
     },
 }
 
+/// One row returned from base table execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseTableRow {
+    /// Stable file id.
+    pub file_id: String,
+    /// Normalized file path.
+    pub file_path: String,
+    /// Projected column values keyed by column key.
+    pub values: serde_json::Map<String, JsonValue>,
+}
+
+/// Paged table result from executing one base query plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseTablePage {
+    /// Total rows that matched filters before pagination.
+    pub total: u64,
+    /// Rows in this page.
+    pub rows: Vec<BaseTableRow>,
+}
+
+/// Executor service that runs compiled base table plans against SQLite metadata.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BaseTableExecutorService;
+
+impl BaseTableExecutorService {
+    /// Execute one compiled table query plan and return a paged result.
+    pub fn execute(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+    ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        if plan.limit == 0 {
+            return Err(BaseTableExecutorError::InvalidPlan {
+                reason: "limit must be greater than zero".to_string(),
+            });
+        }
+
+        let files = FilesRepository::list_all(connection)
+            .map_err(|source| BaseTableExecutorError::FilesRepository { source })?;
+        let mut candidates = files
+            .into_iter()
+            .filter(|file| {
+                matches_source_prefix(&file.normalized_path, plan.source_prefix.as_deref())
+            })
+            .map(|file| TableRowCandidate {
+                file_id: file.file_id,
+                file_path: file.normalized_path,
+                properties: HashMap::new(),
+            })
+            .collect::<Vec<_>>();
+        let candidate_indices = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.file_id.clone(), index))
+            .collect::<HashMap<_, _>>();
+
+        for key in &plan.required_property_keys {
+            let rows = PropertiesRepository::list_by_key_with_paths(connection, key).map_err(
+                |source| BaseTableExecutorError::PropertiesRepository {
+                    key: key.clone(),
+                    source,
+                },
+            )?;
+            for row in rows {
+                let Some(candidate_index) = candidate_indices.get(&row.file_id).copied() else {
+                    continue;
+                };
+                let value =
+                    serde_json::from_str::<JsonValue>(&row.value_json).map_err(|source| {
+                        BaseTableExecutorError::ParsePropertyValue {
+                            file_id: row.file_id.clone(),
+                            key: key.clone(),
+                            source,
+                        }
+                    })?;
+                candidates[candidate_index]
+                    .properties
+                    .insert(key.clone(), value);
+            }
+        }
+
+        candidates.retain(|row| row_matches_filters(row, &plan.filters));
+        candidates.sort_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+
+        let total = candidates.len() as u64;
+        let rows = candidates
+            .into_iter()
+            .skip(plan.offset)
+            .take(plan.limit)
+            .map(|row| project_table_row(row, &plan.columns))
+            .collect::<Vec<_>>();
+
+        Ok(BaseTablePage { total, rows })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TableRowCandidate {
+    file_id: String,
+    file_path: String,
+    properties: HashMap<String, JsonValue>,
+}
+
+impl TableRowCandidate {
+    fn lookup_value(&self, key: &str) -> Option<JsonValue> {
+        if key.eq_ignore_ascii_case("path") || key.eq_ignore_ascii_case("file_path") {
+            return Some(JsonValue::String(self.file_path.clone()));
+        }
+        if key.eq_ignore_ascii_case("title") {
+            return Some(JsonValue::String(note_title_from_path(&self.file_path)));
+        }
+
+        self.properties.get(key).cloned()
+    }
+}
+
+fn note_title_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(|| path.to_string(), |stem| stem.to_string())
+}
+
+fn matches_source_prefix(path: &str, source_prefix: Option<&str>) -> bool {
+    let Some(source_prefix) = source_prefix else {
+        return true;
+    };
+    if path == source_prefix {
+        return true;
+    }
+
+    path.strip_prefix(source_prefix)
+        .is_some_and(|remainder| remainder.starts_with('/'))
+}
+
+fn row_matches_filters(row: &TableRowCandidate, filters: &[BaseFilterClause]) -> bool {
+    filters.iter().all(|filter| row_matches_filter(row, filter))
+}
+
+fn row_matches_filter(row: &TableRowCandidate, filter: &BaseFilterClause) -> bool {
+    let row_value = row.lookup_value(&filter.key);
+
+    match filter.op {
+        BaseFilterOp::Eq => row_value
+            .as_ref()
+            .is_some_and(|value| value == &filter.value),
+        BaseFilterOp::NotEq => row_value
+            .as_ref()
+            .is_none_or(|value| value != &filter.value),
+        BaseFilterOp::Gt => row_value
+            .as_ref()
+            .is_some_and(|value| compare_json_values(value, &filter.value).is_gt()),
+        BaseFilterOp::Gte => row_value
+            .as_ref()
+            .is_some_and(|value| compare_json_values(value, &filter.value).is_ge()),
+        BaseFilterOp::Lt => row_value
+            .as_ref()
+            .is_some_and(|value| compare_json_values(value, &filter.value).is_lt()),
+        BaseFilterOp::Lte => row_value
+            .as_ref()
+            .is_some_and(|value| compare_json_values(value, &filter.value).is_le()),
+        BaseFilterOp::Contains => row_value
+            .as_ref()
+            .is_some_and(|value| value_contains(value, &filter.value)),
+        BaseFilterOp::In => row_value
+            .as_ref()
+            .is_some_and(|value| filter_contains_value(&filter.value, value)),
+        BaseFilterOp::NotIn => row_value
+            .as_ref()
+            .is_none_or(|value| !filter_contains_value(&filter.value, value)),
+        BaseFilterOp::Exists => {
+            let expected_exists = filter.value.as_bool().unwrap_or(true);
+            row_value.is_some() == expected_exists
+        }
+    }
+}
+
+fn value_contains(value: &JsonValue, filter_value: &JsonValue) -> bool {
+    let Some(needle) = json_scalar_to_string(filter_value) else {
+        return false;
+    };
+    let needle = needle.to_lowercase();
+
+    match value {
+        JsonValue::Array(values) => values
+            .iter()
+            .any(|entry| value_contains(entry, filter_value)),
+        _ => json_scalar_to_string(value)
+            .unwrap_or_else(|| value.to_string())
+            .to_lowercase()
+            .contains(&needle),
+    }
+}
+
+fn filter_contains_value(filter_value: &JsonValue, row_value: &JsonValue) -> bool {
+    match filter_value {
+        JsonValue::Array(values) => values.iter().any(|value| value == row_value),
+        _ => false,
+    }
+}
+
+fn compare_table_rows(
+    left: &TableRowCandidate,
+    right: &TableRowCandidate,
+    sorts: &[BaseSortClause],
+) -> Ordering {
+    for sort in sorts {
+        let ordering = compare_optional_json_values(
+            left.lookup_value(&sort.key).as_ref(),
+            right.lookup_value(&sort.key).as_ref(),
+        );
+        let ordering = match sort.direction {
+            BaseSortDirection::Asc => ordering,
+            BaseSortDirection::Desc => ordering.reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+
+    left.file_path
+        .cmp(&right.file_path)
+        .then_with(|| left.file_id.cmp(&right.file_id))
+}
+
+fn compare_optional_json_values(left: Option<&JsonValue>, right: Option<&JsonValue>) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => compare_json_values(left, right),
+    }
+}
+
+fn compare_json_values(left: &JsonValue, right: &JsonValue) -> Ordering {
+    let left_rank = json_type_rank(left);
+    let right_rank = json_type_rank(right);
+    if left_rank != right_rank {
+        return left_rank.cmp(&right_rank);
+    }
+
+    match (left, right) {
+        (JsonValue::Null, JsonValue::Null) => Ordering::Equal,
+        (JsonValue::Bool(left), JsonValue::Bool(right)) => left.cmp(right),
+        (JsonValue::Number(left), JsonValue::Number(right)) => {
+            let left = left.as_f64().unwrap_or(0.0);
+            let right = right.as_f64().unwrap_or(0.0);
+            left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+        }
+        (JsonValue::String(left), JsonValue::String(right)) => left.cmp(right),
+        (JsonValue::Array(left), JsonValue::Array(right)) => left.len().cmp(&right.len()),
+        (JsonValue::Object(left), JsonValue::Object(right)) => left.len().cmp(&right.len()),
+        _ => left.to_string().cmp(&right.to_string()),
+    }
+}
+
+fn json_type_rank(value: &JsonValue) -> u8 {
+    match value {
+        JsonValue::Null => 0,
+        JsonValue::Bool(_) => 1,
+        JsonValue::Number(_) => 2,
+        JsonValue::String(_) => 3,
+        JsonValue::Array(_) => 4,
+        JsonValue::Object(_) => 5,
+    }
+}
+
+fn project_table_row(row: TableRowCandidate, columns: &[BaseColumnConfig]) -> BaseTableRow {
+    let mut values = serde_json::Map::new();
+    for column in columns {
+        values.insert(
+            column.key.clone(),
+            row.lookup_value(&column.key).unwrap_or(JsonValue::Null),
+        );
+    }
+
+    BaseTableRow {
+        file_id: row.file_id,
+        file_path: row.file_path,
+        values,
+    }
+}
+
+fn json_scalar_to_string(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(value) => Some(value.clone()),
+        JsonValue::Number(value) => Some(value.to_string()),
+        JsonValue::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+/// Base table execution failures.
+#[derive(Debug, Error)]
+pub enum BaseTableExecutorError {
+    /// Plan payload was invalid for execution.
+    #[error("invalid base table plan: {reason}")]
+    InvalidPlan {
+        /// Validation message.
+        reason: String,
+    },
+    /// Listing file rows failed.
+    #[error("failed to list file metadata for base table execution: {source}")]
+    FilesRepository {
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::FilesRepositoryError,
+    },
+    /// Listing property rows by key failed.
+    #[error("failed to list property rows for key '{key}' during base table execution: {source}")]
+    PropertiesRepository {
+        /// Property key.
+        key: String,
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::PropertiesRepositoryError,
+    },
+    /// Stored property JSON payload could not be decoded.
+    #[error("failed to parse property json for file '{file_id}' key '{key}': {source}")]
+    ParsePropertyValue {
+        /// File id.
+        file_id: String,
+        /// Property key.
+        key: String,
+        /// JSON parse error.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
 /// Reconcile run result over files metadata and on-disk vault contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileResult {
@@ -1723,6 +2058,10 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use obs_sdk_bases::{
+        BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseSortClause, BaseSortDirection,
+        TableQueryPlan,
+    };
     use obs_sdk_properties::TypedPropertyValue;
     use obs_sdk_storage::{
         FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
@@ -1732,10 +2071,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BacklinkGraphService, CasePolicy, HealthSnapshotService, MarkdownIngestPipeline,
-        NoteCrudError, NoteCrudService, PropertyQueryRequest, PropertyQueryService,
-        PropertyQuerySort, PropertyUpdateService, ReconcileService, SdkTransactionCoordinator,
-        ServiceTraceContext, StorageWriteService, WatcherStatus,
+        BacklinkGraphService, BaseTableExecutorError, BaseTableExecutorService, CasePolicy,
+        HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
+        PropertyQueryRequest, PropertyQueryService, PropertyQuerySort, PropertyUpdateService,
+        ReconcileService, SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService,
+        WatcherStatus,
     };
 
     fn file_record(
@@ -2688,6 +3028,260 @@ mod tests {
         assert!(matches!(
             zero_limit,
             super::PropertyQueryError::InvalidLimit { limit: 0 }
+        ));
+    }
+
+    #[test]
+    fn base_table_executor_filters_sorts_and_projects_rows() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert f1");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f2",
+                "notes/projects/beta.md",
+                "notes/projects/beta.md",
+                "/vault/notes/projects/beta.md",
+            ),
+        )
+        .expect("insert f2");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f3",
+                "notes/archive/gamma.md",
+                "notes/archive/gamma.md",
+                "/vault/notes/archive/gamma.md",
+            ),
+        )
+        .expect("insert f3");
+
+        for (property_id, file_id, key, value_json) in [
+            ("p1", "f1", "status", "\"active\""),
+            ("p2", "f1", "due", "2"),
+            ("p3", "f1", "assignee", "\"han\""),
+            ("p4", "f2", "status", "\"active\""),
+            ("p5", "f2", "due", "1"),
+            ("p6", "f2", "assignee", "\"sam\""),
+            ("p7", "f3", "status", "\"active\""),
+            ("p8", "f3", "due", "3"),
+            ("p9", "f3", "assignee", "\"han\""),
+        ] {
+            PropertiesRepository::upsert(
+                &connection,
+                &PropertyRecordInput {
+                    property_id: property_id.to_string(),
+                    file_id: file_id.to_string(),
+                    key: key.to_string(),
+                    value_type: "string".to_string(),
+                    value_json: value_json.to_string(),
+                },
+            )
+            .expect("upsert property");
+        }
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec![
+                "status".to_string(),
+                "due".to_string(),
+                "assignee".to_string(),
+            ],
+            filters: vec![
+                BaseFilterClause {
+                    key: "status".to_string(),
+                    op: BaseFilterOp::Eq,
+                    value: serde_json::json!("active"),
+                },
+                BaseFilterClause {
+                    key: "assignee".to_string(),
+                    op: BaseFilterOp::Contains,
+                    value: serde_json::json!("ha"),
+                },
+            ],
+            sorts: vec![BaseSortClause {
+                key: "due".to_string(),
+                direction: BaseSortDirection::Desc,
+            }],
+            columns: vec![
+                BaseColumnConfig {
+                    key: "title".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+                BaseColumnConfig {
+                    key: "status".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+                BaseColumnConfig {
+                    key: "due".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+            ],
+            limit: 25,
+            offset: 0,
+            property_queries: Vec::new(),
+        };
+
+        let page = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute table plan");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].file_path, "notes/projects/alpha.md");
+        assert_eq!(
+            page.rows[0].values.get("title"),
+            Some(&serde_json::json!("alpha"))
+        );
+        assert_eq!(
+            page.rows[0].values.get("status"),
+            Some(&serde_json::json!("active"))
+        );
+        assert_eq!(page.rows[0].values.get("due"), Some(&serde_json::json!(2)));
+    }
+
+    #[test]
+    fn base_table_executor_applies_sort_and_pagination_offset() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert f1");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f2",
+                "notes/projects/beta.md",
+                "notes/projects/beta.md",
+                "/vault/notes/projects/beta.md",
+            ),
+        )
+        .expect("insert f2");
+
+        for (property_id, file_id, key, value_json) in
+            [("p1", "f1", "due", "2"), ("p2", "f2", "due", "1")]
+        {
+            PropertiesRepository::upsert(
+                &connection,
+                &PropertyRecordInput {
+                    property_id: property_id.to_string(),
+                    file_id: file_id.to_string(),
+                    key: key.to_string(),
+                    value_type: "number".to_string(),
+                    value_json: value_json.to_string(),
+                },
+            )
+            .expect("upsert property");
+        }
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec!["due".to_string()],
+            filters: Vec::new(),
+            sorts: vec![BaseSortClause {
+                key: "due".to_string(),
+                direction: BaseSortDirection::Asc,
+            }],
+            columns: vec![BaseColumnConfig {
+                key: "path".to_string(),
+                label: None,
+                width: None,
+                hidden: false,
+            }],
+            limit: 1,
+            offset: 1,
+            property_queries: Vec::new(),
+        };
+
+        let page = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute paged table");
+        assert_eq!(page.total, 2);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].file_id, "f1");
+        assert_eq!(
+            page.rows[0].values.get("path"),
+            Some(&serde_json::json!("notes/projects/alpha.md"))
+        );
+    }
+
+    #[test]
+    fn base_table_executor_reports_invalid_property_json_payloads() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert f1");
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p1".to_string(),
+                file_id: "f1".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "{bad-json".to_string(),
+            },
+        )
+        .expect("upsert malformed property");
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec!["status".to_string()],
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            columns: vec![BaseColumnConfig {
+                key: "status".to_string(),
+                label: None,
+                width: None,
+                hidden: false,
+            }],
+            limit: 10,
+            offset: 0,
+            property_queries: Vec::new(),
+        };
+
+        let error = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect_err("malformed json should fail");
+        assert!(matches!(
+            error,
+            BaseTableExecutorError::ParsePropertyValue { file_id, key, .. }
+            if file_id == "f1" && key == "status"
         ));
     }
 }
