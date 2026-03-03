@@ -63,3 +63,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [stable sdk error code registry added]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:21:00Z
+- session: session-2026-03-03-a
+- ticket: DOC-006
+- action: done
+- evidence:
+  - files: [docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+  - commands: [write performance budget contract]
+  - outcomes: [latency throughput memory and ci perf gate policy defined]
+- residual_risk: none
+
