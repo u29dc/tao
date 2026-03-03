@@ -1,5 +1,7 @@
 //! `.base` parsing and typed document models.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Map as JsonMap;
 use serde_yaml::{Mapping, Value};
@@ -162,6 +164,110 @@ pub struct BaseColumnConfig {
     pub width: Option<u16>,
     /// Hidden column marker.
     pub hidden: bool,
+}
+
+/// One registered base view entry with typed kind and serialized config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseViewRegistryEntry {
+    /// Stable view name.
+    pub name: String,
+    /// View kind.
+    pub kind: BaseViewKind,
+    /// Normalized configuration payload.
+    pub config: serde_json::Value,
+}
+
+/// Registry over parsed base views.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BaseViewRegistry {
+    views: Vec<BaseViewRegistryEntry>,
+}
+
+impl BaseViewRegistry {
+    /// Build one registry from a parsed `.base` document.
+    pub fn from_document(document: &BaseDocument) -> Result<Self, BaseViewRegistryError> {
+        let mut views = Vec::with_capacity(document.views.len());
+        let mut seen_names = HashSet::new();
+
+        for view in &document.views {
+            let dedupe_key = view.name.to_ascii_lowercase();
+            if !seen_names.insert(dedupe_key) {
+                return Err(BaseViewRegistryError::DuplicateViewName {
+                    name: view.name.clone(),
+                });
+            }
+
+            views.push(BaseViewRegistryEntry {
+                name: view.name.clone(),
+                kind: view.kind,
+                config: serialize_view_config(view)?,
+            });
+        }
+
+        Ok(Self { views })
+    }
+
+    /// Return all views in deterministic definition order.
+    #[must_use]
+    pub fn list(&self) -> &[BaseViewRegistryEntry] {
+        &self.views
+    }
+
+    /// Lookup one view by name using case-insensitive matching.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&BaseViewRegistryEntry> {
+        self.views
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+    }
+}
+
+fn serialize_view_config(
+    view: &BaseViewDefinition,
+) -> Result<serde_json::Value, BaseViewRegistryError> {
+    let mut config = JsonMap::new();
+    if let Some(source) = &view.source {
+        config.insert(
+            "source".to_string(),
+            serde_json::Value::String(source.clone()),
+        );
+    }
+
+    config.insert(
+        "filters".to_string(),
+        serde_json::to_value(&view.filters).map_err(|source| {
+            BaseViewRegistryError::SerializeConfig {
+                view_name: view.name.clone(),
+                source,
+            }
+        })?,
+    );
+    config.insert(
+        "sorts".to_string(),
+        serde_json::to_value(&view.sorts).map_err(|source| {
+            BaseViewRegistryError::SerializeConfig {
+                view_name: view.name.clone(),
+                source,
+            }
+        })?,
+    );
+    config.insert(
+        "columns".to_string(),
+        serde_json::to_value(&view.columns).map_err(|source| {
+            BaseViewRegistryError::SerializeConfig {
+                view_name: view.name.clone(),
+                source,
+            }
+        })?,
+    );
+    if !view.extras.is_empty() {
+        config.insert(
+            "extras".to_string(),
+            serde_json::Value::Object(view.extras.clone()),
+        );
+    }
+
+    Ok(serde_json::Value::Object(config))
 }
 
 /// Parse one `.base` document from YAML text.
@@ -632,13 +738,34 @@ pub enum BaseParseError {
     },
 }
 
+/// View registry construction failures.
+#[derive(Debug, Error)]
+pub enum BaseViewRegistryError {
+    /// Duplicate names are not allowed in one `.base` document.
+    #[error("duplicate base view name '{name}'")]
+    DuplicateViewName {
+        /// Duplicated name.
+        name: String,
+    },
+    /// View config serialization failed.
+    #[error("failed to serialize config for base view '{view_name}': {source}")]
+    SerializeConfig {
+        /// View name.
+        view_name: String,
+        /// JSON serialization error.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::{
         BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseParseError, BaseSortClause,
-        BaseSortDirection, BaseViewKind, parse_base_document,
+        BaseSortDirection, BaseViewKind, BaseViewRegistry, BaseViewRegistryError,
+        parse_base_document,
     };
 
     #[test]
@@ -770,6 +897,69 @@ views:
                 field,
                 expected
             } if field == "columns[0].width" && expected == "unsigned integer"
+        ));
+    }
+
+    #[test]
+    fn view_registry_lists_views_with_kind_and_config() {
+        let document = parse_base_document(
+            r#"
+views:
+  - name: Projects
+    type: table
+    source: notes/projects
+    filters:
+      - key: status
+        op: eq
+        value: active
+    sorts:
+      - key: due
+        direction: asc
+    columns:
+      - title
+    sticky: true
+  - table
+"#,
+        )
+        .expect("parse document");
+
+        let registry = BaseViewRegistry::from_document(&document).expect("build registry");
+        assert_eq!(registry.list().len(), 2);
+
+        let projects = registry.get("projects").expect("lookup projects");
+        assert_eq!(projects.kind, BaseViewKind::Table);
+        assert_eq!(
+            projects.config.get("source"),
+            Some(&json!("notes/projects"))
+        );
+        assert_eq!(projects.config["filters"][0]["key"], json!("status"));
+        assert_eq!(projects.config["sorts"][0]["direction"], json!("asc"));
+        assert_eq!(projects.config["columns"][0]["key"], json!("title"));
+        assert_eq!(projects.config["extras"]["sticky"], json!(true));
+
+        let shorthand = registry.get("table-2").expect("lookup shorthand view");
+        assert_eq!(shorthand.kind, BaseViewKind::Table);
+        assert_eq!(shorthand.config["filters"], json!([]));
+    }
+
+    #[test]
+    fn view_registry_rejects_duplicate_view_names_case_insensitively() {
+        let document = parse_base_document(
+            r#"
+views:
+  - name: Projects
+    type: table
+  - name: projects
+    type: table
+"#,
+        )
+        .expect("parse document");
+
+        let error =
+            BaseViewRegistry::from_document(&document).expect_err("duplicate names should fail");
+        assert!(matches!(
+            error,
+            BaseViewRegistryError::DuplicateViewName { name } if name == "projects"
         ));
     }
 }

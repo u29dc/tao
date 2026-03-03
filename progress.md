@@ -672,3 +672,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [obs-sdk-bases now provides a typed `.base` parser with structured view/filter/sort/column models, deterministic validation errors, and parser tests for valid shorthand+mapping syntax and invalid schema cases]
 - residual_risk: parser currently supports table views only by design for v1 scope, so non-table view types remain explicit unsupported values
+
+- timestamp: 2026-03-03T17:26:45Z
+- session: session-2026-03-03-a
+- ticket: BASE-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [base view registry added to expose deterministic view listing and name lookup with typed kind plus serialized config payload, including duplicate-name validation and registry tests]
+- residual_risk: registry currently validates duplicate names case-insensitively but does not yet enforce stricter naming conventions beyond non-empty normalized strings
