@@ -43,6 +43,8 @@ pub const BRIDGE_ERROR_NOTE_LINKS_LOOKUP_FAILED: &str = "bridge.note_links.looku
 pub const BRIDGE_ERROR_NOTE_LINKS_NOT_FOUND: &str = "bridge.note_links.not_found";
 /// Bridge error code when note-links query fails.
 pub const BRIDGE_ERROR_NOTE_LINKS_QUERY_FAILED: &str = "bridge.note_links.query_failed";
+/// Bridge error code when note-context envelope assembly fails unexpectedly.
+pub const BRIDGE_ERROR_NOTE_CONTEXT_MISSING_VALUE: &str = "bridge.note_context.missing_value";
 /// Bridge error code when bases-list lookup fails.
 pub const BRIDGE_ERROR_BASES_LIST_QUERY_FAILED: &str = "bridge.bases_list.query_failed";
 /// Bridge error code when bases-list config decode fails.
@@ -275,6 +277,15 @@ pub struct BridgeLinkPanels {
     pub outgoing: Vec<BridgeLinkRef>,
     /// Backlinks into selected note.
     pub backlinks: Vec<BridgeLinkRef>,
+}
+
+/// Bridge note context payload combining note content and link panels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeNoteContext {
+    /// Note read payload.
+    pub note: BridgeNoteView,
+    /// Outgoing/backlink graph payload.
+    pub links: BridgeLinkPanels,
 }
 
 /// Base metadata reference row exposed by `bases-list`.
@@ -601,6 +612,50 @@ impl BridgeKernel {
             outgoing,
             backlinks,
         })
+    }
+
+    /// Return note payload and link panels in one bridge response.
+    #[must_use]
+    pub fn note_context(&self, normalized_path: &str) -> BridgeEnvelope<BridgeNoteContext> {
+        let note = match self.note_get(normalized_path) {
+            BridgeEnvelope {
+                ok: true,
+                value: Some(value),
+                ..
+            } => value,
+            BridgeEnvelope {
+                ok: false,
+                error: Some(error),
+                ..
+            } => return BridgeEnvelope::failure(error),
+            _ => {
+                return BridgeEnvelope::failure(BridgeError::with_code(
+                    BRIDGE_ERROR_NOTE_CONTEXT_MISSING_VALUE,
+                    "note context note payload missing",
+                ));
+            }
+        };
+
+        let links = match self.note_links(normalized_path) {
+            BridgeEnvelope {
+                ok: true,
+                value: Some(value),
+                ..
+            } => value,
+            BridgeEnvelope {
+                ok: false,
+                error: Some(error),
+                ..
+            } => return BridgeEnvelope::failure(error),
+            _ => {
+                return BridgeEnvelope::failure(BridgeError::with_code(
+                    BRIDGE_ERROR_NOTE_CONTEXT_MISSING_VALUE,
+                    "note context links payload missing",
+                ));
+            }
+        };
+
+        BridgeEnvelope::success(BridgeNoteContext { note, links })
     }
 
     /// List indexed bases with available view names.
@@ -1422,6 +1477,45 @@ mod tests {
         );
         assert_eq!(value.backlinks.len(), 1);
         assert_eq!(value.backlinks[0].source_path.as_str(), "notes/incoming.md");
+    }
+
+    #[test]
+    fn bridge_kernel_note_context_returns_note_and_links() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let source = kernel.note_put("notes/source.md", "# Source");
+        let source_id = source.value.expect("source").file_id;
+        let target = kernel.note_put("notes/target.md", "# Target");
+        let target_id = target.value.expect("target").file_id;
+
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-note-context".to_string(),
+                source_file_id: source_id,
+                raw_target: "target".to_string(),
+                resolved_file_id: Some(target_id),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert link");
+
+        let context = kernel.note_context("notes/source.md");
+        assert!(context.ok);
+        let value = context.value.expect("note context value");
+        assert_eq!(value.note.path, "notes/source.md");
+        assert_eq!(value.note.title, "Source");
+        assert_eq!(value.links.outgoing.len(), 1);
+        assert_eq!(
+            value.links.outgoing[0].target_path.as_deref(),
+            Some("notes/target.md")
+        );
     }
 
     #[test]

@@ -41,6 +41,18 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Return one note context envelope (note + links) by normalized path.
+    NoteContext {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Note normalized path.
+        #[arg(long)]
+        path: String,
+    },
     /// Return one paged markdown note list window.
     NotesList {
         /// Absolute vault root path.
@@ -144,6 +156,11 @@ fn main() {
             db_path,
             path,
         } => with_kernel(vault_root, db_path, |kernel| kernel.note_get(&path)),
+        Commands::NoteContext {
+            vault_root,
+            db_path,
+            path,
+        } => with_kernel(vault_root, db_path, |kernel| kernel.note_context(&path)),
         Commands::NotesList {
             vault_root,
             db_path,

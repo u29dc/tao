@@ -891,20 +891,19 @@ private struct ObsRootSplitView: View {
 
         Task {
             do {
-                let note = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().noteGet(vaultRoot: root, dbPath: db, path: path)
+                let context = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().noteContext(vaultRoot: root, dbPath: db, path: path)
                 }.value
                 await MainActor.run {
-                    selectedNote = note
-                    frontMatterDraft = note.frontMatter ?? ""
+                    selectedNote = context.note
+                    frontMatterDraft = context.note.frontMatter ?? ""
                     propertiesStatus = nil
                     propertiesError = nil
-                    linkPanels = nil
+                    linkPanels = context.links
                     linksError = nil
                     appErrorState = nil
                     isLoadingNote = false
-                    persistStartupState(notePathOverride: note.path)
-                    loadLinkPanels(path: note.path)
+                    persistStartupState(notePathOverride: context.note.path)
                 }
             } catch {
                 await MainActor.run {

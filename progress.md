@@ -1132,3 +1132,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-cli, bun run util:check]
 - outcomes: [added CLI contract coverage that exercises every grouped `--json` command route (`vault`, `note`, `links`, `properties`, `bases`, `search`) and validates stable envelope schema (`ok/value/error`) plus payload shape (`command/summary/args`) for each command]
 - residual_risk: tests currently validate successful envelopes; explicit JSON error-envelope behavior is pending future CLI error contract hardening
+
+- timestamp: 2026-03-03T19:49:44Z
+- session: session-2026-03-03-a
+- ticket: PERF-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, bench/reports/perf-006-bridge-call-batching.json, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-sdk-bridge, swift test --package-path apps/obs-macos, bun run util:check]
+- outcomes: [added batched bridge endpoint `note-context` (single call for note+links), switched note open flow to one boundary invocation, increased tree page size from 256 to 1024 to reduce list paging calls, and documented call-count reduction evidence for key app flows]
+- residual_risk: call-count report is deterministic path analysis and should be supplemented by runtime telemetry counters once app-level perf instrumentation ticket lands

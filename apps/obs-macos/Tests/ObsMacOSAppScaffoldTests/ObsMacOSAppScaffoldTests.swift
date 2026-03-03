@@ -120,6 +120,46 @@ import Foundation
     #expect(note.body.contains("bridge test"))
 }
 
+@Test func bridge_client_note_context_returns_note_and_links_in_single_call() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-note-context-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = ObsBridgeClient()
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/target.md",
+        content: "# Target"
+    )
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/source.md",
+        content: "# Source\n[[target]]"
+    )
+    _ = try client.vaultStats(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path
+    )
+
+    let context = try client.noteContext(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/source.md"
+    )
+    #expect(context.note.path == "notes/source.md")
+    #expect(context.note.title == "Source")
+    #expect(context.links.outgoing.count >= 0)
+    #expect(context.links.backlinks.count >= 0)
+}
+
 @Test func bridge_client_note_put_creates_and_updates_notes() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory

@@ -30,6 +30,11 @@ public struct BridgeNoteView: Decodable {
     public let headingsTotal: UInt64
 }
 
+public struct BridgeNoteContext: Decodable {
+    public let note: BridgeNoteView
+    public let links: BridgeLinkPanels
+}
+
 public struct BridgeNoteSummary: Decodable {
     public let fileId: String
     public let path: String
@@ -369,6 +374,22 @@ public struct ObsBridgeClient {
                 "--path", path
             ],
             as: BridgeNoteView.self
+        )
+    }
+
+    public func noteContext(
+        vaultRoot: String,
+        dbPath: String,
+        path: String
+    ) throws -> BridgeNoteContext {
+        try invoke(
+            subcommand: [
+                "note-context",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath,
+                "--path", path
+            ],
+            as: BridgeNoteContext.self
         )
     }
 

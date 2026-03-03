@@ -63,7 +63,7 @@ final class FileTreeViewModel: ObservableObject {
                         vaultRoot: requestVaultRoot,
                         dbPath: requestDbPath,
                         afterPath: requestCursor,
-                        limit: 256
+                        limit: 1024
                     )
                 }.value
 

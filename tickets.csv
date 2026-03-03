@@ -115,7 +115,7 @@
 "PERF-003","Capture baseline benchmarks on 10k vault","perf","phase4","PERF-002","done","P2","codex","3","0","","report includes memory and startup metrics"
 "PERF-004","Tune sqlite pragmas for workload","perf","phase4","DB-008|PERF-003","done","P2","codex","3","0","","selected pragma profile documented"
 "PERF-005","Optimize link resolution hot paths","perf","phase4","LINK-006|PERF-003","done","P2","codex","3","0","","resolver throughput improves vs baseline"
-"PERF-006","Optimize bridge call batching","perf","phase5","FFI-008|PERF-003","todo","P2","unassigned","3","0","","boundary call count reduced in key flows"
+"PERF-006","Optimize bridge call batching","perf","phase5","FFI-008|PERF-003","done","P2","codex","3","0","","boundary call count reduced in key flows"
 "PERF-007","Optimize app startup pipeline","perf","phase5","APP-012|PERF-003","todo","P2","unassigned","3","0","","startup p95 meets budget"
 "PERF-008","Lock perf budgets in CI gate","perf","phase5","DOC-006|PERF-007","todo","P2","unassigned","3","0","","CI fails on budget regressions"
 "REL-001","Define versioning policy for sdk/cli/app","rel","phase5","ARC-006","todo","P2","unassigned","3","0","","semver + compatibility rules documented"
