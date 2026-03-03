@@ -123,3 +123,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [deterministic ambiguity and fragment resolution policy added]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:35:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-006
+- action: done
+- evidence:
+  - files: [docs/architecture/migration-versioning-strategy.md, docs/db/migration-runbook.md, tickets.csv, run-state.json]
+  - commands: [write migration strategy and runbook]
+  - outcomes: [schema versioning and migration policy contract documented]
+- residual_risk: none
+
