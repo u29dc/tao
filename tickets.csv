@@ -5,7 +5,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "DOC-004","Write SDK API surface spec","doc","phase0","DOC-001","done","P0","codex","3","0","","Typed interface doc for all read/write/system APIs"
 "DOC-005","Write error code catalog","doc","phase0","DOC-004","done","P0","codex","3","0","","Stable error code table with remediation hints"
 "DOC-006","Write performance budget contract","doc","phase0","DOC-001","done","P0","codex","3","0","","Budget doc checked into repo and referenced by CI"
-"ARC-001","Define workspace crate boundaries","arc","phase0","DOC-002","todo","P0","unassigned","3","0","","`Cargo.toml` workspace members and crate docs committed"
+"ARC-001","Define workspace crate boundaries","arc","phase0","DOC-002","done","P0","codex","3","0","","`Cargo.toml` workspace members and crate docs committed"
 "ARC-002","Define Swift app module boundaries","arc","phase0","DOC-002","todo","P0","unassigned","3","0","","Xcode project module map documented"
 "ARC-003","Define bridge DTO contracts","arc","phase0","DOC-004","todo","P0","unassigned","3","0","","Shared DTO schema and versioning policy committed"
 "ARC-004","Define event model for index updates","arc","phase0","ARC-003","todo","P0","unassigned","3","0","","Event types and payload contracts documented"

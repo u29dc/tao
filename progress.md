@@ -73,3 +73,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [latency throughput memory and ci perf gate policy defined]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:25:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-001
+- action: done
+- evidence:
+  - files: [Cargo.toml, docs/architecture/workspace-boundaries.md, crates/*/README.md, tickets.csv, run-state.json]
+  - commands: [write workspace members and crate boundary docs]
+  - outcomes: [workspace member map and crate responsibility docs committed]
+- residual_risk: none
+

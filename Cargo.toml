@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/obs-sdk-core",
+  "crates/obs-sdk-vault",
+  "crates/obs-sdk-markdown",
+  "crates/obs-sdk-links",
+  "crates/obs-sdk-properties",
+  "crates/obs-sdk-bases",
+  "crates/obs-sdk-storage",
+  "crates/obs-sdk-search",
+  "crates/obs-sdk-watch",
+  "crates/obs-sdk-service",
+  "crates/obs-sdk-bridge",
+  "crates/obs-cli",
+  "crates/obs-tui",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+rust-version = "1.88.0"
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.32", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+notify = "8.2.0"
+uuid = { version = "1.16.0", features = ["v4", "serde"] }
