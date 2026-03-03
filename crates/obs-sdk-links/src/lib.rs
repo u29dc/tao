@@ -1,6 +1,6 @@
 //! Wikilink parsing and extraction primitives.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use thiserror::Error;
 
@@ -90,6 +90,15 @@ pub struct HeadingResolution {
     /// Normalized heading slug when fragment exists on the resolved target file.
     pub resolved_heading_slug: Option<String>,
     /// True when heading requirement is satisfied.
+    pub is_resolved: bool,
+}
+
+/// Block fragment resolution result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockResolution {
+    /// Normalized block id when fragment exists on the resolved target file.
+    pub resolved_block_id: Option<String>,
+    /// True when block requirement is satisfied.
     pub is_resolved: bool,
 }
 
@@ -216,6 +225,83 @@ pub fn resolve_heading_target(
 
     HeadingResolution {
         resolved_heading_slug: matched.clone(),
+        is_resolved: matched.is_some(),
+    }
+}
+
+/// Extract unique block identifiers from markdown body text.
+#[must_use]
+pub fn extract_block_ids(markdown: &str) -> Vec<String> {
+    let mut block_ids = BTreeSet::new();
+
+    for line in markdown.lines() {
+        let trimmed = line.trim_end();
+        let Some(caret_index) = trimmed.rfind('^') else {
+            continue;
+        };
+
+        let boundary_ok = trimmed[..caret_index]
+            .chars()
+            .last()
+            .is_none_or(char::is_whitespace);
+        if !boundary_ok {
+            continue;
+        }
+
+        let candidate = trimmed[(caret_index + 1)..].trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if candidate
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        {
+            block_ids.insert(candidate.to_string());
+        }
+    }
+
+    block_ids.into_iter().collect()
+}
+
+/// Resolve block fragment against target block id index.
+#[must_use]
+pub fn resolve_block_target(
+    block_fragment: Option<&str>,
+    resolved_path: Option<&str>,
+    block_index: &HashMap<String, Vec<String>>,
+) -> BlockResolution {
+    let Some(fragment) = block_fragment else {
+        return BlockResolution {
+            resolved_block_id: None,
+            is_resolved: true,
+        };
+    };
+    let Some(path) = resolved_path else {
+        return BlockResolution {
+            resolved_block_id: None,
+            is_resolved: false,
+        };
+    };
+
+    let requested = fragment.trim().trim_start_matches('^');
+    if requested.is_empty() {
+        return BlockResolution {
+            resolved_block_id: None,
+            is_resolved: false,
+        };
+    }
+
+    let matched = block_index
+        .get(path)
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|block_id| block_id.eq_ignore_ascii_case(requested))
+        })
+        .cloned();
+
+    BlockResolution {
+        resolved_block_id: matched.clone(),
         is_resolved: matched.is_some(),
     }
 }
@@ -351,8 +437,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        WikiLinkParseError, extract_wikilinks, parse_wikilink, resolve_heading_target,
-        resolve_target, slugify_heading,
+        WikiLinkParseError, extract_block_ids, extract_wikilinks, parse_wikilink,
+        resolve_block_target, resolve_heading_target, resolve_target, slugify_heading,
     };
 
     #[test]
@@ -462,5 +548,29 @@ mod tests {
         let missing = resolve_heading_target(Some("Unknown"), Some("notes/a.md"), &heading_index);
         assert!(!missing.is_resolved);
         assert_eq!(missing.resolved_heading_slug, None);
+    }
+
+    #[test]
+    fn extract_block_ids_finds_unique_markdown_block_markers() {
+        let markdown = "line one ^block-a\nline two ^block-b\nline three ^block-a\nignored^inline";
+        let blocks = extract_block_ids(markdown);
+        assert_eq!(blocks, vec!["block-a", "block-b"]);
+    }
+
+    #[test]
+    fn resolve_block_target_matches_indexed_block_ids() {
+        let mut block_index = HashMap::new();
+        block_index.insert(
+            "notes/a.md".to_string(),
+            vec!["intro".to_string(), "block-1".to_string()],
+        );
+
+        let found = resolve_block_target(Some("block-1"), Some("notes/a.md"), &block_index);
+        assert!(found.is_resolved);
+        assert_eq!(found.resolved_block_id.as_deref(), Some("block-1"));
+
+        let missing = resolve_block_target(Some("missing"), Some("notes/a.md"), &block_index);
+        assert!(!missing.is_resolved);
+        assert_eq!(missing.resolved_block_id, None);
     }
 }

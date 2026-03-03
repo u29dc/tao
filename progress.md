@@ -602,3 +602,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [heading slug normalization and heading-fragment resolver added; indexing now validates heading fragments against indexed heading slugs and marks missing headings unresolved]
 - residual_risk: heading slugging follows current local normalization rules and may diverge from exact Obsidian edge-case slug behavior for uncommon punctuation/unicode sequences
+
+- timestamp: 2026-03-03T17:10:26Z
+- session: session-2026-03-03-a
+- ticket: LINK-004
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-links/src/lib.rs, crates/obs-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [block-id extraction and block-fragment resolver added; indexing now validates block fragments against indexed block ids and marks missing blocks unresolved]
+- residual_risk: block-id extraction currently follows inline marker parsing rules and may miss atypical/escaped markdown edge cases that need full markdown AST support

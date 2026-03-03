@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use obs_sdk_links::{
-    WikiLink, extract_wikilinks, resolve_heading_target, resolve_target, slugify_heading,
+    WikiLink, extract_block_ids, extract_wikilinks, resolve_block_target, resolve_heading_target,
+    resolve_target, slugify_heading,
 };
 use obs_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
 use obs_sdk_properties::{
@@ -146,12 +147,14 @@ impl FullIndexService {
                     .map(|heading| slugify_heading(&heading.text))
                     .filter(|slug| !slug.is_empty())
                     .collect::<Vec<_>>();
+                let block_ids = extract_block_ids(&parsed.body);
 
                 markdown_docs.push(MarkdownIndexDocument {
                     file_id,
                     source_path: fingerprint.normalized,
                     links,
                     heading_slugs,
+                    block_ids,
                     properties: property_records,
                 });
             } else if fingerprint.normalized.ends_with(".base") {
@@ -184,6 +187,10 @@ impl FullIndexService {
             .iter()
             .map(|document| (document.source_path.clone(), document.heading_slugs.clone()))
             .collect::<HashMap<_, _>>();
+        let block_index = markdown_docs
+            .iter()
+            .map(|document| (document.source_path.clone(), document.block_ids.clone()))
+            .collect::<HashMap<_, _>>();
 
         for markdown_doc in markdown_docs {
             property_records.extend(markdown_doc.properties.clone());
@@ -200,6 +207,7 @@ impl FullIndexService {
                     .as_ref()
                     .and_then(|path| file_id_by_path.get(path).cloned());
                 let mut heading_slug = link.heading.as_deref().map(slugify_heading);
+                let mut block_id = link.block.clone();
                 let heading_resolution = resolve_heading_target(
                     link.heading.as_deref(),
                     resolution.resolved_path.as_deref(),
@@ -209,6 +217,17 @@ impl FullIndexService {
                     heading_slug = Some(resolved_heading_slug);
                 }
                 if link.heading.is_some() && !heading_resolution.is_resolved {
+                    resolved_file_id = None;
+                }
+                let block_resolution = resolve_block_target(
+                    link.block.as_deref(),
+                    resolution.resolved_path.as_deref(),
+                    &block_index,
+                );
+                if let Some(resolved_block_id) = block_resolution.resolved_block_id {
+                    block_id = Some(resolved_block_id);
+                }
+                if link.block.is_some() && !block_resolution.is_resolved {
                     resolved_file_id = None;
                 }
 
@@ -226,7 +245,7 @@ impl FullIndexService {
                     raw_target: link.target.clone(),
                     resolved_file_id,
                     heading_slug,
-                    block_id: link.block.clone(),
+                    block_id,
                     is_unresolved,
                 });
             }
@@ -515,6 +534,7 @@ impl IncrementalIndexService {
                         .map(|record| record.normalized_path)
                         .collect::<Vec<_>>();
                     let heading_index = build_heading_index(vault_root, &candidates, &self.parser)?;
+                    let block_index = build_block_index(vault_root, &candidates, &self.parser)?;
 
                     for (index, link) in extract_wikilinks(&parsed.body).iter().enumerate() {
                         let resolution = resolve_target(&link.raw, Some(&normalized), &candidates);
@@ -528,6 +548,7 @@ impl IncrementalIndexService {
                             })
                             .map(|record| record.file_id);
                         let mut heading_slug = link.heading.as_deref().map(slugify_heading);
+                        let mut block_id = link.block.clone();
                         let heading_resolution = resolve_heading_target(
                             link.heading.as_deref(),
                             resolution.resolved_path.as_deref(),
@@ -539,6 +560,17 @@ impl IncrementalIndexService {
                             heading_slug = Some(resolved_heading_slug);
                         }
                         if link.heading.is_some() && !heading_resolution.is_resolved {
+                            resolved_file_id = None;
+                        }
+                        let block_resolution = resolve_block_target(
+                            link.block.as_deref(),
+                            resolution.resolved_path.as_deref(),
+                            &block_index,
+                        );
+                        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
+                            block_id = Some(resolved_block_id);
+                        }
+                        if link.block.is_some() && !block_resolution.is_resolved {
                             resolved_file_id = None;
                         }
 
@@ -555,7 +587,7 @@ impl IncrementalIndexService {
                                 raw_target: link.target.clone(),
                                 resolved_file_id,
                                 heading_slug,
-                                block_id: link.block.clone(),
+                                block_id,
                                 is_unresolved,
                             },
                         )
@@ -1846,6 +1878,7 @@ struct MarkdownIndexDocument {
     source_path: String,
     links: Vec<WikiLink>,
     heading_slugs: Vec<String>,
+    block_ids: Vec<String>,
     properties: Vec<PropertyRecordInput>,
 }
 
@@ -1933,6 +1966,42 @@ fn build_heading_index(
     }
 
     Ok(heading_index)
+}
+
+fn build_block_index(
+    vault_root: &Path,
+    candidates: &[String],
+    parser: &MarkdownParser,
+) -> Result<HashMap<String, Vec<String>>, FullIndexError> {
+    let mut block_index = HashMap::new();
+
+    for normalized in candidates {
+        let absolute = vault_root.join(normalized);
+        let markdown = match fs::read_to_string(&absolute) {
+            Ok(markdown) => markdown,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(FullIndexError::ReadFile {
+                    path: absolute,
+                    source,
+                });
+            }
+        };
+
+        let parsed = parser
+            .parse(MarkdownParseRequest {
+                normalized_path: normalized.clone(),
+                raw: markdown,
+            })
+            .map_err(|source| FullIndexError::ParseMarkdown {
+                path: absolute.clone(),
+                source: Box::new(source),
+            })?;
+
+        block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
+    }
+
+    Ok(block_index)
 }
 
 fn typed_value_kind(value: &TypedPropertyValue) -> &'static str {
@@ -2620,6 +2689,45 @@ mod tests {
             .expect("missing heading link");
         assert!(missing_heading.is_unresolved);
         assert_eq!(missing_heading.resolved_path, None);
+    }
+
+    #[test]
+    fn block_fragment_links_only_resolve_when_target_block_exists() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "# A\n[[b#^block-a]]\n[[b#^missing-block]]",
+        )
+        .expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "Paragraph ^block-a").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+            .expect("list outgoing");
+        assert_eq!(outgoing.len(), 2);
+
+        let resolved_block = outgoing
+            .iter()
+            .find(|row| row.block_id.as_deref() == Some("block-a"))
+            .expect("resolved block link");
+        assert!(!resolved_block.is_unresolved);
+        assert_eq!(resolved_block.resolved_path.as_deref(), Some("notes/b.md"));
+
+        let missing_block = outgoing
+            .iter()
+            .find(|row| row.block_id.as_deref() == Some("missing-block"))
+            .expect("missing block link");
+        assert!(missing_block.is_unresolved);
+        assert_eq!(missing_block.resolved_path, None);
     }
 
     #[test]
