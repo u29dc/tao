@@ -50,7 +50,7 @@ Define non-negotiable latency, throughput, and memory budgets for v1.
 ## CI Integration
 
 - `PERF-008` gates enforce budget checks on tracked benchmarks.
-- `scripts/check-perf-budgets.sh` is the canonical budget gate entrypoint in `rust-ci`.
+- `scripts/budgets.sh` is the canonical budget gate entrypoint in `rust-ci`.
 - Bridge boundary benchmarks are emitted to `bench/reports/bridge-call-budgets.json`.
 - Startup benchmark budgets are emitted to `bench/reports/startup-budgets.json`.
 - Flaky benchmarks require quarantine annotation and follow-up fix ticket.

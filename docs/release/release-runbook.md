@@ -9,7 +9,7 @@ Use this runbook for `rc` and stable releases of `tao` workspace artifacts.
 1. Confirm branch is `main` and clean.
 2. Confirm release ticket dependencies are `done` in `plan/tickets.csv`.
 3. Run `bun run util:check`.
-4. Run `./scripts/check-perf-budgets.sh`.
+4. Run `./scripts/budgets.sh`.
 5. Run `swift test --package-path apps/tao-macos`.
 6. Validate migration preflight path:
    - `./target/release/tao --json vault preflight --vault-root <vault> --db-path <db>`
@@ -20,7 +20,7 @@ Use this runbook for `rc` and stable releases of `tao` workspace artifacts.
 ## Build and Package
 
 1. CLI/TUI package:
-   - `./scripts/release-package-cli.sh`
+   - `./scripts/release.sh`
 2. macOS package (ad-hoc signed artifact):
    - CI workflow `swift-release-artifact` produces `.app.zip`.
 

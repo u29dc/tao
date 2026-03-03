@@ -38,7 +38,7 @@ jobs:
         run: cargo test --workspace
 
       - name: perf budget gate
-        run: ./scripts/check-perf-budgets.sh
+        run: ./scripts/budgets.sh
 
       - name: upload perf reports
         uses: actions/upload-artifact@v4

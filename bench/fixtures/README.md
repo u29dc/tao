@@ -14,7 +14,7 @@ This folder stores synthetic and sampled fixtures used by performance tickets.
 Run:
 
 ```bash
-scripts/generate-fixtures.sh
+scripts/fixtures.sh
 ```
 
 This script creates deterministic synthetic content for repeatable benchmarking.

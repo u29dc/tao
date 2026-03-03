@@ -56,5 +56,5 @@ This policy defines versioning and compatibility for:
 
 - `bun run util:check`
 - Swift build/test on macOS CI
-- perf budget gate (`scripts/check-perf-budgets.sh`)
+- perf budget gate (`scripts/budgets.sh`)
 - migration preflight check path green

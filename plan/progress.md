@@ -1402,3 +1402,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check, swift test --package-path apps/tao-macos --configuration release]
   - outcomes: [runtime defaults now execute built release binaries for cli and bridge paths, no cargo-run runtime default path remains for app/cli execution flows]
 - residual_risk: release bridge binary must exist before swift runtime/tests; workflows now build tao-sdk-bridge release binary before swift steps
+
+- timestamp: 2026-03-03T23:46:30Z
+- session: session-2026-03-03-b
+- ticket: BUILD-003
+- action: done
+- evidence:
+  - files: [scripts/budgets.sh, scripts/fixtures.sh, scripts/package.sh, scripts/release.sh, package.json, .github/workflows/rust-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, docs/release/versioning-policy.md, docs/specs/performance-budgets.md, bench/fixtures/README.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [bun run util:check, ./scripts/budgets.sh]
+  - outcomes: [scripts directory now uses single-word script filenames with active call sites and docs updated, perf budget gate validated via renamed entrypoint]
+- residual_risk: historical references remain in prior plan/progress evidence entries by design
