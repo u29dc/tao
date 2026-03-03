@@ -21,6 +21,11 @@ private enum SidebarItem: String, CaseIterable, Identifiable {
 
 private struct ObsRootSplitView: View {
     @State private var selectedSidebarItem: SidebarItem? = .notes
+    @State private var vaultRoot = ""
+    @State private var dbPath = ""
+    @State private var statsSummary = "Bridge read APIs not called yet."
+    @State private var bridgeError: String?
+    @State private var isLoadingStats = false
 
     var body: some View {
         NavigationSplitView {
@@ -35,6 +40,34 @@ private struct ObsRootSplitView: View {
                     .font(.headline)
                 Text(contentLabel(for: selectedSidebarItem))
                     .foregroundStyle(.secondary)
+                Divider()
+                Text("Bridge Integration")
+                    .font(.headline)
+                TextField("/absolute/path/to/vault", text: $vaultRoot)
+                    .textFieldStyle(.roundedBorder)
+                TextField("/absolute/path/to/obs.sqlite", text: $dbPath)
+                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 12) {
+                    Button("Load Vault Stats") {
+                        loadVaultStats()
+                    }
+                    .disabled(isLoadingStats)
+
+                    if isLoadingStats {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                Text(statsSummary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                if let bridgeError {
+                    Text(bridgeError)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                }
                 Divider()
                 Text("Bridge Module: \(ObsMacOSAppScaffold.moduleName())")
                     .font(.caption)
@@ -76,6 +109,37 @@ private struct ObsRootSplitView: View {
             return "Bases table pane placeholder"
         case .none:
             return "Select a section"
+        }
+    }
+
+    private func loadVaultStats() {
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            bridgeError = "Provide absolute vault and sqlite paths before loading stats."
+            return
+        }
+
+        bridgeError = nil
+        isLoadingStats = true
+
+        Task {
+            do {
+                let stats = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().vaultStats(vaultRoot: root, dbPath: db)
+                }.value
+
+                await MainActor.run {
+                    statsSummary =
+                        "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
+                    isLoadingStats = false
+                }
+            } catch {
+                await MainActor.run {
+                    bridgeError = "bridge read failed: \(error)"
+                    isLoadingStats = false
+                }
+            }
         }
     }
 }

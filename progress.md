@@ -832,3 +832,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [macOS executable target `ObsMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
 - residual_risk: app shell currently contains placeholder pane content and no persisted state, so feature tickets APP-002 onward fill bridge integration and workflow behavior
+
+- timestamp: 2026-03-03T18:17:09Z
+- session: session-2026-03-03-a
+- ticket: APP-002
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [app shell now directly invokes `ObsBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
+- residual_risk: bridge read invocation currently depends on manual vault/sqlite path entry, so APP-003 introduces guided vault-open UX and persisted session context
