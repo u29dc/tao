@@ -1212,3 +1212,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-sdk-storage, cargo test -p obs-cli, bun run util:check]
 - outcomes: [added SDK migration preflight API that validates migration table presence and checksum integrity before apply; wired CLI `vault preflight` JSON wrapper to surface migration health and pending count; extended CLI JSON contract matrix to include `vault.preflight`]
 - residual_risk: preflight validates known migration checksums but does not currently fail on unknown migration IDs present in `schema_migrations`
+
+- timestamp: 2026-03-03T20:12:44Z
+- session: session-2026-03-03-a
+- ticket: REL-006
+- action: done
+- evidence:
+  - files: [docs/release/v1.0.0-rc.1.md, docs/release/release-runbook.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/obs-macos, cargo run -p obs-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
+- outcomes: [published v1.0.0-rc.1 acceptance report with dependency verification, command evidence, perf budget metrics, migration preflight envelope, and artifact checksums; corrected release runbook migration preflight package target from `obs` to `obs-cli`]
+- residual_risk: rc report confirms ad-hoc signing and does not include Developer ID notarization
