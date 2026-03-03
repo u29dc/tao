@@ -1,12 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use obs_sdk_service::{
-    BacklinkGraphService, FullIndexService, HealthSnapshotService, WatcherStatus,
+use obs_sdk_bases::{
+    BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest, parse_base_document,
 };
-use obs_sdk_storage::{FilesRepository, PropertiesRepository, run_migrations};
+use obs_sdk_service::{
+    BacklinkGraphService, BaseTableExecutorService, FullIndexService, HealthSnapshotService,
+    WatcherStatus,
+};
+use obs_sdk_storage::{BasesRepository, FilesRepository, PropertiesRepository, run_migrations};
 use obs_sdk_vault::CasePolicy;
 use rusqlite::Connection;
+use serde_json::Value as JsonValue;
 
 fn fixture_vault_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -177,4 +182,94 @@ fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
     let properties = PropertiesRepository::list_for_file_with_path(&connection, &malformed.file_id)
         .expect("query properties for malformed note");
     assert!(properties.is_empty());
+}
+
+#[test]
+fn bases_parser_and_table_snapshot_match_fixture_expectations() {
+    let fixture = copy_fixture_vault();
+    let db_path = fixture.path().join("obs.sqlite");
+
+    let mut connection = Connection::open(db_path).expect("open sqlite");
+    run_migrations(&mut connection).expect("run migrations");
+
+    FullIndexService::default()
+        .rebuild(fixture.path(), &mut connection, CasePolicy::Sensitive)
+        .expect("rebuild fixture vault for base tests");
+
+    let bases = BasesRepository::list_with_paths(&connection).expect("list indexed bases");
+    let projects_base = bases
+        .iter()
+        .find(|base| base.file_path == "views/projects.base")
+        .expect("projects base indexed");
+    let projects_raw_value = serde_json::from_str::<JsonValue>(&projects_base.config_json)
+        .expect("decode base config json");
+    let projects_raw_yaml = projects_raw_value
+        .get("raw")
+        .and_then(JsonValue::as_str)
+        .expect("projects base stores raw yaml");
+    let projects_document =
+        parse_base_document(projects_raw_yaml).expect("parse projects base yaml");
+    let registry =
+        BaseViewRegistry::from_document(&projects_document).expect("build base registry");
+    let plan = BaseTableQueryPlanner
+        .compile(
+            &registry,
+            &TableQueryPlanRequest {
+                view_name: "ActiveProjects".to_string(),
+                page: 1,
+                page_size: 50,
+            },
+        )
+        .expect("compile base table plan");
+    let page = BaseTableExecutorService
+        .execute(&connection, &plan)
+        .expect("execute base table query");
+
+    let row_snapshot = page
+        .rows
+        .iter()
+        .map(|row| {
+            let status = row
+                .values
+                .get("status")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let priority = row
+                .values
+                .get("priority")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or_default() as i64;
+            (row.file_path.clone(), status, priority)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        row_snapshot,
+        vec![(
+            "notes/projects/project-a.md".to_string(),
+            "active".to_string(),
+            4
+        )]
+    );
+    assert_eq!(page.total, 1);
+
+    let invalid_base = bases
+        .iter()
+        .find(|base| base.file_path == "views/invalid.base")
+        .expect("invalid base indexed");
+    let invalid_raw_value = serde_json::from_str::<JsonValue>(&invalid_base.config_json)
+        .expect("decode invalid base json");
+    let invalid_raw_yaml = invalid_raw_value
+        .get("raw")
+        .and_then(JsonValue::as_str)
+        .expect("invalid base stores raw yaml");
+    let parse_error =
+        parse_base_document(invalid_raw_yaml).expect_err("invalid base should fail parse");
+    let parse_error_text = parse_error.to_string();
+    assert!(!parse_error_text.trim().is_empty());
+    assert!(
+        parse_error_text.contains("unsupported")
+            || parse_error_text.contains("invalid")
+            || parse_error_text.contains("type")
+    );
 }

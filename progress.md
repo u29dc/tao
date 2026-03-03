@@ -1040,5 +1040,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [crates/obs-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
   - commands: [bun run util:check]
-  - outcomes: [added malformed-frontmatter integration test asserting full index rebuild succeeds on the fixture vault, malformed note remains indexed as a file row, and no corrupt property rows are produced for malformed YAML content]
+- outcomes: [added malformed-frontmatter integration test asserting full index rebuild succeeds on the fixture vault, malformed note remains indexed as a file row, and no corrupt property rows are produced for malformed YAML content]
 - residual_risk: malformed coverage currently focuses on one representative broken YAML pattern and can be extended with additional malformed scalar/list/object variants
+
+- timestamp: 2026-03-03T19:22:47Z
+- session: session-2026-03-03-a
+- ticket: QA-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [added fixture-driven base parser/table snapshot test that decodes indexed base raw payloads, compiles `ActiveProjects` view plans, asserts exact table row snapshots, and verifies invalid base configs fail parser validation]
+- residual_risk: snapshot currently validates key projected cells and row set, but does not yet cover pagination window permutations for the same view
