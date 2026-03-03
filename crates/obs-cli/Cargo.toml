@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+obs-sdk-bridge = { path = "../obs-sdk-bridge" }
 obs-sdk-storage = { path = "../obs-sdk-storage" }
 obs-sdk-service = { path = "../obs-sdk-service" }
 obs-sdk-vault = { path = "../obs-sdk-vault" }

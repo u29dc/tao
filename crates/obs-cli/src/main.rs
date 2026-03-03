@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use obs_sdk_service::{FullIndexService, HealthSnapshotService, ReconcileService, WatcherStatus};
 use obs_sdk_storage::run_migrations;
 use obs_sdk_vault::CasePolicy;
@@ -358,13 +359,63 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
 fn handle_note(command: NoteCommands) -> Result<CommandResult> {
     match command {
         NoteCommands::Get(args) => {
-            placeholder_result("note.get", "note get is not implemented yet", args)
+            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let note = expect_bridge_value(kernel.note_get(&args.path), "note.get")?;
+            Ok(CommandResult {
+                command: "note.get".to_string(),
+                summary: "note get completed".to_string(),
+                args: serde_json::json!({
+                    "path": note.path,
+                    "title": note.title,
+                    "front_matter": note.front_matter,
+                    "body": note.body,
+                    "headings_total": note.headings_total,
+                }),
+            })
         }
         NoteCommands::Put(args) => {
-            placeholder_result("note.put", "note put is not implemented yet", args)
+            let mut kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let ack = expect_bridge_value(kernel.note_put(&args.path, &args.content), "note.put")?;
+            Ok(CommandResult {
+                command: "note.put".to_string(),
+                summary: "note put completed".to_string(),
+                args: serde_json::json!({
+                    "path": ack.path,
+                    "file_id": ack.file_id,
+                    "action": ack.action,
+                }),
+            })
         }
         NoteCommands::List(args) => {
-            placeholder_result("note.list", "note list is not implemented yet", args)
+            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let mut after_path: Option<String> = None;
+            let mut items = Vec::new();
+            loop {
+                let page = expect_bridge_value(
+                    kernel.notes_list(after_path.as_deref(), 1000),
+                    "note.list",
+                )?;
+                after_path = page.next_cursor;
+                items.extend(page.items.into_iter().map(|item| {
+                    serde_json::json!({
+                        "file_id": item.file_id,
+                        "path": item.path,
+                        "title": item.title,
+                        "updated_at": item.updated_at,
+                    })
+                }));
+                if after_path.is_none() {
+                    break;
+                }
+            }
+            Ok(CommandResult {
+                command: "note.list".to_string(),
+                summary: "note list completed".to_string(),
+                args: serde_json::json!({
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
         }
     }
 }
@@ -428,6 +479,30 @@ fn placeholder_result<A: Serialize>(
         summary: summary.to_string(),
         args: serde_json::to_value(args)?,
     })
+}
+
+fn open_bridge_kernel(vault_root: &str, db_path: &str) -> Result<BridgeKernel> {
+    BridgeKernel::open(vault_root, db_path)
+        .map_err(|source| anyhow!("open bridge kernel failed: {source}"))
+}
+
+fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str) -> Result<T> {
+    if envelope.ok {
+        return envelope
+            .value
+            .ok_or_else(|| anyhow!("{command} returned success without payload"));
+    }
+
+    match envelope.error {
+        Some(error) => {
+            let mut message = format!("{command} failed [{}]: {}", error.code, error.message);
+            if let Some(hint) = error.hint {
+                message.push_str(&format!("; hint: {hint}"));
+            }
+            Err(anyhow!(message))
+        }
+        None => Err(anyhow!("{command} failed without an error payload")),
+    }
 }
 
 fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {

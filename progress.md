@@ -970,5 +970,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
   - commands: [cargo run -p obs-cli -- --json vault open/reindex/stats/reconcile ..., bun run util:check]
-  - outcomes: [replaced vault command placeholders with SDK-backed wrappers that validate vault/db paths, run migrations, and execute open/stats/reindex/reconcile with stable JSON payloads; added test hardening with temporary vault paths so JSON envelope tests remain deterministic]
+- outcomes: [replaced vault command placeholders with SDK-backed wrappers that validate vault/db paths, run migrations, and execute open/stats/reindex/reconcile with stable JSON payloads; added test hardening with temporary vault paths so JSON envelope tests remain deterministic]
 - residual_risk: wrapper currently assumes case-sensitive policy for reindex/reconcile and fixed watcher/index-lag values for stats, so runtime flags for these knobs remain future work
+
+- timestamp: 2026-03-03T19:09:57Z
+- session: session-2026-03-03-a
+- ticket: CLI-004
+- action: done
+- evidence:
+  - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-cli -- --json note put/get/list ..., bun run util:check]
+  - outcomes: [replaced note command placeholders with SDK-backed bridge wrappers (`note.get`, `note.put`, `note.list`), added bridge envelope-to-cli error mapping, and implemented paged list aggregation for stable JSON note list output]
+- residual_risk: note list currently uses fixed page size 1000 per bridge call and does not expose cursor/limit flags yet, so very large vault windows are aggregated in-process
