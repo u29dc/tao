@@ -67,6 +67,7 @@ private struct AppErrorState: Identifiable {
 }
 
 private struct ObsRootSplitView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var quickOpenCommandNonce: Int
     @State private var selectedSidebarItem: SidebarItem? = .notes
     @State private var selectedTreePath: String?
@@ -318,6 +319,14 @@ private struct ObsRootSplitView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(20)
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: selectedSidebarItem)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: selectedTreePath)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: appErrorState?.id)
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.disablesAnimations = true
+            }
         }
         .onChange(of: selectedTreePath) { _, newValue in
             loadSelectedNote(path: newValue)
