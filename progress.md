@@ -1172,3 +1172,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [added release versioning policy with SemVer rules for sdk/cli/bridge/app, bridge DTO major/minor compatibility rules, migration compatibility constraints, release tagging policy, and mandatory pre-tag validation checks]
 - residual_risk: policy is documentation-only until release automation enforces every rule directly from CI/tag workflows
+
+- timestamp: 2026-03-03T20:00:13Z
+- session: session-2026-03-03-a
+- ticket: REL-002
+- action: done
+- evidence:
+  - files: [docs/release/release-runbook.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [added release checklist/runbook covering preflight quality gates, packaging steps, tag/version flow, post-publish validation, and explicit rollback procedure with failure classifications]
+- residual_risk: runbook references packaging workflows/scripts introduced in later release tickets and should remain synchronized with workflow names and script paths
