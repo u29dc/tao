@@ -372,6 +372,16 @@ dependencies = [
 [[package]]
 name = "obs-sdk-bridge"
 version = "0.1.0"
+dependencies = [
+ "obs-sdk-markdown",
+ "obs-sdk-service",
+ "obs-sdk-storage",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "obs-sdk-core"

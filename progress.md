@@ -742,3 +742,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [cached base table query service added with automatic metadata-digest invalidation and explicit invalidate API, ensuring cached base results refresh when files/properties/bases metadata changes]
 - residual_risk: metadata digest currently hashes full files/properties/bases row sets per execution, so very large datasets may need incremental digest tracking for lower cache-overhead in performance-sensitive paths
+
+- timestamp: 2026-03-03T17:47:27Z
+- session: session-2026-03-03-a
+- ticket: FFI-001
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/Cargo.toml, crates/obs-sdk-bridge/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [obs-sdk-bridge placeholder replaced with a concrete bridge kernel exposing versioned envelope DTOs plus minimal read shell APIs (`ping`, `vault_stats`, `note_get`) over SDK services]
+- residual_risk: bridge currently exposes Rust-native APIs and DTO envelopes but does not yet include generated Swift interop bindings, which are covered by FFI-002 and later bridge tickets
