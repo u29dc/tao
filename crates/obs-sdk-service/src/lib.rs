@@ -36,7 +36,7 @@ use obs_sdk_markdown::{
 };
 use obs_sdk_properties::{FrontMatterStatus, TypedPropertyValue, extract_front_matter};
 use obs_sdk_storage::{
-    FileRecordInput, FilesRepository, PropertiesRepository, PropertyRecordInput,
+    FileRecordInput, FilesRepository, LinksRepository, PropertiesRepository, PropertyRecordInput,
     StorageTransactionError, with_transaction,
 };
 use obs_sdk_vault::{
@@ -1388,6 +1388,114 @@ pub enum HealthSnapshotError {
     },
 }
 
+/// One link graph edge enriched with source/target path metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkGraphEdge {
+    /// Stable link row identifier.
+    pub link_id: String,
+    /// Source file id.
+    pub source_file_id: String,
+    /// Source normalized path.
+    pub source_path: String,
+    /// Raw link target payload.
+    pub raw_target: String,
+    /// Resolved target file id when available.
+    pub resolved_file_id: Option<String>,
+    /// Resolved target normalized path when available.
+    pub resolved_path: Option<String>,
+    /// Optional heading fragment slug.
+    pub heading_slug: Option<String>,
+    /// Optional block fragment id.
+    pub block_id: Option<String>,
+    /// Unresolved marker.
+    pub is_unresolved: bool,
+}
+
+/// Link graph query service for outgoing, backlink, and unresolved edges.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BacklinkGraphService;
+
+impl BacklinkGraphService {
+    /// List outgoing edges for one source note path.
+    pub fn outgoing_for_path(
+        &self,
+        connection: &Connection,
+        source_path: &str,
+    ) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
+        let Some(source_file) = FilesRepository::get_by_normalized_path(connection, source_path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let rows = LinksRepository::list_outgoing_with_paths(connection, &source_file.file_id)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok(map_link_edges(rows))
+    }
+
+    /// List backlinks for one target note path.
+    pub fn backlinks_for_path(
+        &self,
+        connection: &Connection,
+        target_path: &str,
+    ) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
+        let Some(target_file) = FilesRepository::get_by_normalized_path(connection, target_path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let rows = LinksRepository::list_backlinks_with_paths(connection, &target_file.file_id)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok(map_link_edges(rows))
+    }
+
+    /// List unresolved edges across vault.
+    pub fn unresolved_links(
+        &self,
+        connection: &Connection,
+    ) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
+        let rows = LinksRepository::list_unresolved_with_paths(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok(map_link_edges(rows))
+    }
+}
+
+fn map_link_edges(rows: Vec<obs_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdge> {
+    rows.into_iter()
+        .map(|row| LinkGraphEdge {
+            link_id: row.link_id,
+            source_file_id: row.source_file_id,
+            source_path: row.source_path,
+            raw_target: row.raw_target,
+            resolved_file_id: row.resolved_file_id,
+            resolved_path: row.resolved_path,
+            heading_slug: row.heading_slug,
+            block_id: row.block_id,
+            is_unresolved: row.is_unresolved,
+        })
+        .collect()
+}
+
+/// Link graph query failures.
+#[derive(Debug, Error)]
+pub enum LinkGraphServiceError {
+    /// File lookup by normalized path failed.
+    #[error("failed to query file metadata for link graph: {source}")]
+    FilesRepository {
+        /// Files repository error.
+        #[source]
+        source: obs_sdk_storage::FilesRepositoryError,
+    },
+    /// Link graph query failed.
+    #[error("failed to query link graph rows: {source}")]
+    LinksRepository {
+        /// Links repository error.
+        #[source]
+        source: obs_sdk_storage::LinksRepositoryError,
+    },
+}
+
 /// Errors returned by markdown ingest pipeline shell operations.
 #[derive(Debug, Error)]
 pub enum MarkdownIngestError {
@@ -1448,9 +1556,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        PropertyUpdateService, ReconcileService, SdkTransactionCoordinator, ServiceTraceContext,
-        StorageWriteService, WatcherStatus,
+        BacklinkGraphService, CasePolicy, HealthSnapshotService, MarkdownIngestPipeline,
+        NoteCrudError, NoteCrudService, PropertyUpdateService, ReconcileService,
+        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -1747,6 +1855,150 @@ mod tests {
             backlinks[0].resolved_path.as_deref(),
             Some("archive/renamed-target.md")
         );
+    }
+
+    #[test]
+    fn backlink_graph_service_returns_stable_outgoing_and_backlink_order() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "source-a",
+                "notes/source-a.md",
+                "notes/source-a.md",
+                "/vault/notes/source-a.md",
+            ),
+        )
+        .expect("insert source a");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "source-b",
+                "notes/source-b.md",
+                "notes/source-b.md",
+                "/vault/notes/source-b.md",
+            ),
+        )
+        .expect("insert source b");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "target",
+                "notes/target.md",
+                "notes/target.md",
+                "/vault/notes/target.md",
+            ),
+        )
+        .expect("insert target");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l2".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some("target".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert outgoing l2");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l1".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some("target".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert outgoing l1");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l3".to_string(),
+                source_file_id: "source-b".to_string(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some("target".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert outgoing l3");
+
+        let service = BacklinkGraphService;
+        let outgoing = service
+            .outgoing_for_path(&connection, "notes/source-a.md")
+            .expect("query outgoing");
+        assert_eq!(outgoing.len(), 2);
+        assert_eq!(outgoing[0].link_id, "l1");
+        assert_eq!(outgoing[1].link_id, "l2");
+
+        let backlinks = service
+            .backlinks_for_path(&connection, "notes/target.md")
+            .expect("query backlinks");
+        assert_eq!(backlinks.len(), 3);
+        assert_eq!(backlinks[0].source_path, "notes/source-a.md");
+        assert_eq!(backlinks[1].source_path, "notes/source-a.md");
+        assert_eq!(backlinks[2].source_path, "notes/source-b.md");
+    }
+
+    #[test]
+    fn backlink_graph_service_lists_unresolved_links() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "source-a",
+                "notes/source-a.md",
+                "notes/source-a.md",
+                "/vault/notes/source-a.md",
+            ),
+        )
+        .expect("insert source a");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-unresolved".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "missing".to_string(),
+                resolved_file_id: None,
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: true,
+            },
+        )
+        .expect("insert unresolved link");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-resolved".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "missing".to_string(),
+                resolved_file_id: None,
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert resolved marker link");
+
+        let unresolved = BacklinkGraphService
+            .unresolved_links(&connection)
+            .expect("query unresolved");
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].link_id, "l-unresolved");
+        assert!(unresolved[0].is_unresolved);
     }
 
     #[test]

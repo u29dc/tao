@@ -56,7 +56,7 @@
 "LINK-003","Implement heading target resolver","link","phase1","LINK-001","done","P1","codex","3","0","","heading links resolve to indexed headings"
 "LINK-004","Implement block target resolver","link","phase2","LINK-001","done","P1","codex","3","0","","block refs resolve to indexed blocks"
 "LINK-005","Implement unresolved link tracking","link","phase2","LINK-002","done","P1","codex","3","0","","unresolved links persisted and queryable"
-"LINK-006","Implement backlink graph service","link","phase2","LINK-002","todo","P1","unassigned","3","0","","outgoing/backlink queries return stable order"
+"LINK-006","Implement backlink graph service","link","phase2","LINK-002","done","P1","codex","3","0","","outgoing/backlink queries return stable order"
 "PROP-001","Implement front matter extraction","prop","phase1","SDK-004","done","P1","codex","3","0","","YAML block extraction with parse errors captured"
 "PROP-002","Implement typed property projection","prop","phase1","PROP-001","done","P1","codex","3","0","","bool/number/date/list types normalized"
 "PROP-003","Implement property update service","prop","phase1","SDK-008|PROP-002","done","P1","codex","3","0","","typed set operations persist and re-render"

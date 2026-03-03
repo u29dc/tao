@@ -622,3 +622,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [links repository now exposes unresolved-link listing with joined paths and deterministic ordering, with repository tests covering resolved/unresolved separation]
 - residual_risk: unresolved tracking remains table-driven and currently does not include explicit unresolved reason taxonomy (path vs heading vs block)
+
+- timestamp: 2026-03-03T17:13:42Z
+- session: session-2026-03-03-a
+- ticket: LINK-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-storage/src/links.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [backlink graph service added with outgoing/backlink/unresolved queries mapped to typed edges, preserving deterministic ordering from repository queries]
+- residual_risk: link graph service currently provides query views only and does not yet expose pagination for very large backlink sets
