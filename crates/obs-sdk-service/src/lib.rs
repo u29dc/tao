@@ -15,7 +15,7 @@ use obs_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
     VaultManifestEntry, VaultScanError, VaultScanService,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
 /// Parsed markdown note produced by the ingest pipeline shell.
@@ -545,6 +545,128 @@ pub enum NoteCrudError {
     },
 }
 
+/// Health snapshot status for watcher subsystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatcherStatus {
+    /// Filesystem watcher is active.
+    Running,
+    /// Filesystem watcher is disabled.
+    Stopped,
+    /// Filesystem watcher is active with degraded guarantees.
+    Degraded { reason: String },
+}
+
+impl WatcherStatus {
+    fn as_label(&self) -> &'static str {
+        match self {
+            WatcherStatus::Running => "running",
+            WatcherStatus::Stopped => "stopped",
+            WatcherStatus::Degraded { .. } => "degraded",
+        }
+    }
+}
+
+/// Consolidated SDK health snapshot payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthSnapshot {
+    /// Canonical vault root used for snapshot.
+    pub vault_root: String,
+    /// Database status flag.
+    pub db_healthy: bool,
+    /// Applied migration row count.
+    pub db_migrations: u64,
+    /// Current index lag count.
+    pub index_lag: u64,
+    /// Watcher status label.
+    pub watcher_status: String,
+    /// Total scanned files.
+    pub files_total: u64,
+    /// Total markdown files from latest scan.
+    pub markdown_files: u64,
+    /// Last index update timestamp when present.
+    pub last_index_updated_at: Option<String>,
+}
+
+/// Service that builds SDK health snapshot payloads.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HealthSnapshotService;
+
+impl HealthSnapshotService {
+    /// Build one health snapshot from vault scan + sqlite status + watcher state.
+    pub fn snapshot(
+        &self,
+        vault_root: &Path,
+        connection: &Connection,
+        index_lag: u64,
+        watcher_status: WatcherStatus,
+    ) -> Result<HealthSnapshot, HealthSnapshotError> {
+        let scanner = VaultScanService::from_root(vault_root, CasePolicy::Sensitive)
+            .map_err(|source| HealthSnapshotError::CreateScanner { source })?;
+        let manifest = scanner
+            .scan()
+            .map_err(|source| HealthSnapshotError::Scan { source })?;
+
+        let files_total = manifest.entries.len() as u64;
+        let markdown_files = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.normalized.ends_with(".md"))
+            .count() as u64;
+
+        let db_migrations = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
+
+        let last_index_updated_at = connection
+            .query_row(
+                "SELECT updated_at FROM index_state WHERE key = 'last_index_at'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
+
+        Ok(HealthSnapshot {
+            vault_root: manifest.root.to_string_lossy().to_string(),
+            db_healthy: true,
+            db_migrations,
+            index_lag,
+            watcher_status: watcher_status.as_label().to_string(),
+            files_total,
+            markdown_files,
+            last_index_updated_at,
+        })
+    }
+}
+
+/// Errors returned by health snapshot service operations.
+#[derive(Debug, Error)]
+pub enum HealthSnapshotError {
+    /// Scanner initialization failed.
+    #[error("failed to initialize vault scanner for health snapshot: {source}")]
+    CreateScanner {
+        /// Scanner path initialization error.
+        #[source]
+        source: PathCanonicalizationError,
+    },
+    /// Vault scan failed.
+    #[error("failed to scan vault for health snapshot: {source}")]
+    Scan {
+        /// Vault scan error.
+        #[source]
+        source: VaultScanError,
+    },
+    /// Database status query failed.
+    #[error("failed to query database status for health snapshot: {source}")]
+    DatabaseStatus {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+}
+
 /// Errors returned by markdown ingest pipeline shell operations.
 #[derive(Debug, Error)]
 pub enum MarkdownIngestError {
@@ -603,8 +725,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        SdkTransactionCoordinator, StorageWriteService,
+        CasePolicy, HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
+        SdkTransactionCoordinator, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -875,5 +997,36 @@ mod tests {
             backlinks[0].resolved_path.as_deref(),
             Some("archive/renamed-target.md")
         );
+    }
+
+    #[test]
+    fn health_snapshot_reports_vault_db_and_watcher_status() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+        fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+        fs::write(vault_root.join("notes/b.md"), "# B").expect("write b");
+        fs::write(vault_root.join("notes/c.png"), "png").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        connection
+            .execute(
+                "INSERT INTO index_state (key, value_json) VALUES (?1, ?2)",
+                rusqlite::params!["last_index_at", "\"2026-03-03T19:00:00Z\""],
+            )
+            .expect("seed index_state");
+
+        let snapshot = HealthSnapshotService
+            .snapshot(&vault_root, &connection, 3, WatcherStatus::Running)
+            .expect("build health snapshot");
+
+        assert!(snapshot.db_healthy);
+        assert_eq!(snapshot.db_migrations, 1);
+        assert_eq!(snapshot.index_lag, 3);
+        assert_eq!(snapshot.watcher_status, "running");
+        assert_eq!(snapshot.files_total, 3);
+        assert_eq!(snapshot.markdown_files, 2);
+        assert!(snapshot.last_index_updated_at.is_some());
     }
 }

@@ -362,3 +362,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [note rename/move service flows implemented with link-resolution consistency integration tests]
 - residual_risk: rename currently assumes local filesystem rename semantics; cross-device moves would need copy+fsync fallback handling
+
+- timestamp: 2026-03-03T19:25:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-010
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [health snapshot service implemented reporting index lag, db status, watcher status, and scan counts]
+- residual_risk: watcher status currently supplied by caller state; deeper watcher diagnostics will be provided once watch module is fully implemented
