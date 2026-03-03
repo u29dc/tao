@@ -712,3 +712,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [base column config persistence service added to update and persist ordered column layouts plus visibility flags in stored base config json, with tests covering successful updates, missing views, and invalid legacy payload handling]
 - residual_risk: persistence currently expects base config json to decode into the typed BaseDocument schema, so legacy non-conforming payloads need migration or normalization before edit operations
+
+- timestamp: 2026-03-03T17:38:12Z
+- session: session-2026-03-03-a
+- ticket: BASE-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [base table executor now emits per-column summary rows with count/min/max/avg over filtered datasets while preserving paged row delivery and deterministic ordering]
+- residual_risk: summary computation currently runs in-memory over filtered candidates, so high-cardinality base views may need SQL aggregation pushdown in later performance tickets

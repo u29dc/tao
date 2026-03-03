@@ -1236,9 +1236,26 @@ pub struct BaseTableRow {
 
 /// Paged table result from executing one base query plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseTableSummary {
+    /// Column key.
+    pub key: String,
+    /// Non-null value count.
+    pub count: u64,
+    /// Minimum value across matching rows.
+    pub min: Option<JsonValue>,
+    /// Maximum value across matching rows.
+    pub max: Option<JsonValue>,
+    /// Average value for numeric cells only.
+    pub avg: Option<JsonValue>,
+}
+
+/// Paged table result from executing one base query plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseTablePage {
     /// Total rows that matched filters before pagination.
     pub total: u64,
+    /// Summary rows for configured columns over the filtered result set.
+    pub summaries: Vec<BaseTableSummary>,
     /// Rows in this page.
     pub rows: Vec<BaseTableRow>,
 }
@@ -1308,6 +1325,7 @@ impl BaseTableExecutorService {
         candidates.sort_by(|left, right| compare_table_rows(left, right, &plan.sorts));
 
         let total = candidates.len() as u64;
+        let summaries = compute_table_summaries(&candidates, &plan.columns);
         let rows = candidates
             .into_iter()
             .skip(plan.offset)
@@ -1315,7 +1333,11 @@ impl BaseTableExecutorService {
             .map(|row| project_table_row(row, &plan.columns))
             .collect::<Vec<_>>();
 
-        Ok(BaseTablePage { total, rows })
+        Ok(BaseTablePage {
+            total,
+            summaries,
+            rows,
+        })
     }
 }
 
@@ -1504,6 +1526,64 @@ fn project_table_row(row: TableRowCandidate, columns: &[BaseColumnConfig]) -> Ba
         file_path: row.file_path,
         values,
     }
+}
+
+fn compute_table_summaries(
+    rows: &[TableRowCandidate],
+    columns: &[BaseColumnConfig],
+) -> Vec<BaseTableSummary> {
+    columns
+        .iter()
+        .map(|column| {
+            let mut count = 0_u64;
+            let mut min: Option<JsonValue> = None;
+            let mut max: Option<JsonValue> = None;
+            let mut numeric_sum = 0_f64;
+            let mut numeric_count = 0_u64;
+
+            for row in rows {
+                let Some(value) = row.lookup_value(&column.key) else {
+                    continue;
+                };
+                if value.is_null() {
+                    continue;
+                }
+
+                count += 1;
+                if min
+                    .as_ref()
+                    .is_none_or(|current| compare_json_values(&value, current).is_lt())
+                {
+                    min = Some(value.clone());
+                }
+                if max
+                    .as_ref()
+                    .is_none_or(|current| compare_json_values(&value, current).is_gt())
+                {
+                    max = Some(value.clone());
+                }
+                if let Some(number) = value.as_f64() {
+                    numeric_sum += number;
+                    numeric_count += 1;
+                }
+            }
+
+            let avg = if numeric_count > 0 {
+                serde_json::Number::from_f64(numeric_sum / (numeric_count as f64))
+                    .map(JsonValue::Number)
+            } else {
+                None
+            };
+
+            BaseTableSummary {
+                key: column.key.clone(),
+                count,
+                min,
+                max,
+                avg,
+            }
+        })
+        .collect()
 }
 
 fn json_scalar_to_string(value: &JsonValue) -> Option<String> {
@@ -3284,6 +3364,12 @@ mod tests {
             .execute(&connection, &plan)
             .expect("execute table plan");
         assert_eq!(page.total, 1);
+        assert_eq!(page.summaries.len(), 3);
+        assert_eq!(page.summaries[2].key, "due");
+        assert_eq!(page.summaries[2].count, 1);
+        assert_eq!(page.summaries[2].min, Some(serde_json::json!(2)));
+        assert_eq!(page.summaries[2].max, Some(serde_json::json!(2)));
+        assert_eq!(page.summaries[2].avg, Some(serde_json::json!(2.0)));
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].file_path, "notes/projects/alpha.md");
         assert_eq!(
@@ -3363,6 +3449,18 @@ mod tests {
             .execute(&connection, &plan)
             .expect("execute paged table");
         assert_eq!(page.total, 2);
+        assert_eq!(page.summaries.len(), 1);
+        assert_eq!(page.summaries[0].key, "path");
+        assert_eq!(page.summaries[0].count, 2);
+        assert_eq!(
+            page.summaries[0].min,
+            Some(serde_json::json!("notes/projects/alpha.md"))
+        );
+        assert_eq!(
+            page.summaries[0].max,
+            Some(serde_json::json!("notes/projects/beta.md"))
+        );
+        assert_eq!(page.summaries[0].avg, None);
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].file_id, "f1");
         assert_eq!(
