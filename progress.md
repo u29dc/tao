@@ -562,3 +562,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [checkpointed incremental indexing service added with persisted progress state, resumable execution after interruption, and summary checkpoint metrics]
 - residual_risk: checkpointed runs currently serialize checkpoint progress per batch and may add index_state write overhead on very high-frequency change streams
+
+- timestamp: 2026-03-03T16:58:59Z
+- session: session-2026-03-03-a
+- ticket: IDX-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [reconciliation scanner detects inserted/updated/removed drift paths from vault-vs-index comparison and repairs missed watcher events using bounded coalesced incremental batches]
+- residual_risk: path ordering now prioritizes inserts before updates to improve same-run link resolution, but highly interdependent multi-hop link graphs may still need a second incremental pass for full convergence

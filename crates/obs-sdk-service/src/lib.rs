@@ -22,8 +22,9 @@ pub use import_export::{
 pub use indexing::{
     CheckpointedIndexError, CheckpointedIndexResult, CheckpointedIndexService,
     CoalescedBatchIndexResult, CoalescedBatchIndexService, FullIndexError, FullIndexResult,
-    FullIndexService, IncrementalIndexResult, IncrementalIndexService, StaleCleanupError,
-    StaleCleanupResult, StaleCleanupService,
+    FullIndexService, IncrementalIndexResult, IncrementalIndexService, ReconciliationScanError,
+    ReconciliationScanResult, ReconciliationScannerService, StaleCleanupError, StaleCleanupResult,
+    StaleCleanupService,
 };
 pub use tracing_hooks::ServiceTraceContext;
 

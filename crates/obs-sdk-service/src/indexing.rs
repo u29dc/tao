@@ -15,8 +15,8 @@ use obs_sdk_storage::{
     PropertyRecordInput,
 };
 use obs_sdk_vault::{
-    CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
-    VaultScanError, VaultScanService,
+    CasePolicy, FileFingerprint, FileFingerprintError, FileFingerprintService,
+    PathCanonicalizationError, VaultScanError, VaultScanService,
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -1056,6 +1056,181 @@ fn parse_checkpoint_case_policy(label: &str) -> Result<CasePolicy, CheckpointedI
     }
 }
 
+/// Result payload for drift reconciliation scanner workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationScanResult {
+    /// Number of files discovered in current vault scan.
+    pub scanned_files: u64,
+    /// Number of paths detected as inserted.
+    pub inserted_paths: u64,
+    /// Number of paths detected as updated.
+    pub updated_paths: u64,
+    /// Number of paths detected as removed.
+    pub removed_paths: u64,
+    /// Total drift path count submitted for repair.
+    pub drift_paths: u64,
+    /// Number of incremental repair batches applied.
+    pub batches_applied: u64,
+    /// Number of file rows upserted by repair batches.
+    pub upserted_files: u64,
+    /// Number of file rows removed by repair batches.
+    pub removed_files: u64,
+    /// Number of links rebuilt by repair batches.
+    pub links_reindexed: u64,
+    /// Number of properties rebuilt by repair batches.
+    pub properties_reindexed: u64,
+    /// Number of bases rebuilt by repair batches.
+    pub bases_reindexed: u64,
+}
+
+/// Scanner that detects drift and repairs it via bounded incremental index batches.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReconciliationScannerService {
+    coalesced: CoalescedBatchIndexService,
+}
+
+impl ReconciliationScannerService {
+    /// Scan vault vs index metadata and repair missed watcher events.
+    pub fn scan_and_repair(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+        max_batch_size: usize,
+    ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
+        if max_batch_size == 0 {
+            return Err(ReconciliationScanError::InvalidBatchSize { value: 0 });
+        }
+
+        let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
+            ReconciliationScanError::CreateScanner {
+                source: Box::new(source),
+            }
+        })?;
+        let manifest = scanner
+            .scan()
+            .map_err(|source| ReconciliationScanError::Scan {
+                source: Box::new(source),
+            })?;
+
+        let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
+            .map_err(|source| ReconciliationScanError::CreateFingerprintService {
+                source: Box::new(source),
+            })?;
+
+        let existing = FilesRepository::list_all(connection).map_err(|source| {
+            ReconciliationScanError::ListIndexedFiles {
+                source: Box::new(source),
+            }
+        })?;
+        let mut existing_by_path = HashMap::new();
+        for record in existing {
+            existing_by_path.insert(record.normalized_path.clone(), record);
+        }
+
+        let mut seen_paths = std::collections::HashSet::new();
+        let mut inserted_changed_paths = Vec::new();
+        let mut updated_changed_paths = Vec::new();
+        let mut removed_changed_paths = Vec::new();
+        let mut inserted_paths = 0_u64;
+        let mut updated_paths = 0_u64;
+
+        for entry in &manifest.entries {
+            let fingerprint =
+                fingerprint_service
+                    .fingerprint(&entry.relative)
+                    .map_err(|source| ReconciliationScanError::Fingerprint {
+                        path: entry.absolute.clone(),
+                        source: Box::new(source),
+                    })?;
+
+            seen_paths.insert(fingerprint.normalized.clone());
+
+            if let Some(indexed) = existing_by_path.get(&fingerprint.normalized) {
+                if !indexed_record_matches_fingerprint(indexed, &fingerprint) {
+                    updated_changed_paths.push(PathBuf::from(fingerprint.normalized));
+                    updated_paths += 1;
+                }
+            } else {
+                inserted_changed_paths.push(PathBuf::from(fingerprint.normalized));
+                inserted_paths += 1;
+            }
+        }
+
+        let mut removed_paths = 0_u64;
+        for normalized_path in existing_by_path.keys() {
+            if !seen_paths.contains(normalized_path) {
+                removed_changed_paths.push(PathBuf::from(normalized_path));
+                removed_paths += 1;
+            }
+        }
+
+        let mut changed_paths = Vec::new();
+        changed_paths.extend(inserted_changed_paths);
+        changed_paths.extend(updated_changed_paths);
+        changed_paths.extend(removed_changed_paths);
+
+        if changed_paths.is_empty() {
+            return Ok(ReconciliationScanResult {
+                scanned_files: manifest.entries.len() as u64,
+                inserted_paths,
+                updated_paths,
+                removed_paths,
+                drift_paths: 0,
+                batches_applied: 0,
+                upserted_files: 0,
+                removed_files: 0,
+                links_reindexed: 0,
+                properties_reindexed: 0,
+                bases_reindexed: 0,
+            });
+        }
+
+        let batch_result = self
+            .coalesced
+            .apply_coalesced(
+                vault_root,
+                connection,
+                &changed_paths,
+                max_batch_size,
+                case_policy,
+            )
+            .map_err(|source| ReconciliationScanError::RepairBatch {
+                source: Box::new(source),
+            })?;
+
+        Ok(ReconciliationScanResult {
+            scanned_files: manifest.entries.len() as u64,
+            inserted_paths,
+            updated_paths,
+            removed_paths,
+            drift_paths: batch_result.unique_paths,
+            batches_applied: batch_result.batches_applied,
+            upserted_files: batch_result.upserted_files,
+            removed_files: batch_result.removed_files,
+            links_reindexed: batch_result.links_reindexed,
+            properties_reindexed: batch_result.properties_reindexed,
+            bases_reindexed: batch_result.bases_reindexed,
+        })
+    }
+}
+
+fn indexed_record_matches_fingerprint(
+    indexed: &obs_sdk_storage::FileRecord,
+    fingerprint: &FileFingerprint,
+) -> bool {
+    let Ok(modified_unix_ms) = i64::try_from(fingerprint.modified_unix_ms) else {
+        return false;
+    };
+
+    indexed.normalized_path == fingerprint.normalized
+        && indexed.match_key == fingerprint.match_key
+        && indexed.absolute_path == fingerprint.absolute.to_string_lossy()
+        && indexed.size_bytes == fingerprint.size_bytes
+        && indexed.modified_unix_ms == modified_unix_ms
+        && indexed.hash_blake3 == fingerprint.hash_blake3
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -1527,6 +1702,61 @@ pub enum CheckpointedIndexError {
     },
 }
 
+/// Reconciliation scanner failures.
+#[derive(Debug, Error)]
+pub enum ReconciliationScanError {
+    /// Provided batch size is invalid.
+    #[error("invalid reconciliation scan batch size: {value}")]
+    InvalidBatchSize {
+        /// Invalid batch size value.
+        value: usize,
+    },
+    /// Scanner initialization failed.
+    #[error("failed to initialize reconciliation scanner: {source}")]
+    CreateScanner {
+        /// Scanner path error.
+        #[source]
+        source: Box<PathCanonicalizationError>,
+    },
+    /// Vault scan failed.
+    #[error("failed to scan vault during reconciliation: {source}")]
+    Scan {
+        /// Scan error.
+        #[source]
+        source: Box<VaultScanError>,
+    },
+    /// Fingerprint service initialization failed.
+    #[error("failed to initialize fingerprint service during reconciliation: {source}")]
+    CreateFingerprintService {
+        /// Fingerprint service path error.
+        #[source]
+        source: Box<PathCanonicalizationError>,
+    },
+    /// Fingerprinting one file failed.
+    #[error("failed to fingerprint file during reconciliation '{path}': {source}")]
+    Fingerprint {
+        /// Absolute file path.
+        path: PathBuf,
+        /// Fingerprint error.
+        #[source]
+        source: Box<FileFingerprintError>,
+    },
+    /// Loading current indexed file rows failed.
+    #[error("failed to list indexed file rows during reconciliation: {source}")]
+    ListIndexedFiles {
+        /// Files repository error.
+        #[source]
+        source: Box<obs_sdk_storage::FilesRepositoryError>,
+    },
+    /// Applying incremental repair batches failed.
+    #[error("failed to repair reconciliation drift via incremental batches: {source}")]
+    RepairBatch {
+        /// Incremental indexing error.
+        #[source]
+        source: Box<FullIndexError>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1542,7 +1772,7 @@ mod tests {
 
     use super::{
         CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, FullIndexService,
-        IncrementalIndexService, StaleCleanupService,
+        IncrementalIndexService, ReconciliationScannerService, StaleCleanupService,
     };
 
     #[test]
@@ -1891,6 +2121,78 @@ mod tests {
         assert_eq!(result.processed_paths, 0);
         assert_eq!(result.remaining_paths, 0);
         assert!(result.checkpoint_completed);
+    }
+
+    #[test]
+    fn reconciliation_scanner_repairs_missed_add_update_delete_events() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A\n[[b]]").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::write(temp.path().join("notes/a.md"), "# A updated\n[[c]]").expect("update a");
+        fs::remove_file(temp.path().join("notes/b.md")).expect("remove b");
+        fs::write(temp.path().join("notes/c.md"), "# C").expect("write c");
+
+        let result = ReconciliationScannerService::default()
+            .scan_and_repair(temp.path(), &mut connection, CasePolicy::Sensitive, 2)
+            .expect("scan and repair");
+
+        assert_eq!(result.scanned_files, 2);
+        assert_eq!(result.inserted_paths, 1);
+        assert_eq!(result.updated_paths, 1);
+        assert_eq!(result.removed_paths, 1);
+        assert_eq!(result.drift_paths, 3);
+
+        assert!(
+            FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+                .expect("get removed b")
+                .is_none()
+        );
+        let c_file = FilesRepository::get_by_normalized_path(&connection, "notes/c.md")
+            .expect("get c")
+            .expect("c exists");
+        assert_eq!(c_file.normalized_path, "notes/c.md");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+            .expect("list outgoing links");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].raw_target, "c");
+        assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/c.md"));
+        assert!(!outgoing[0].is_unresolved);
+    }
+
+    #[test]
+    fn reconciliation_scanner_returns_noop_when_no_drift_detected() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let result = ReconciliationScannerService::default()
+            .scan_and_repair(temp.path(), &mut connection, CasePolicy::Sensitive, 4)
+            .expect("scan without drift");
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(result.inserted_paths, 0);
+        assert_eq!(result.updated_paths, 0);
+        assert_eq!(result.removed_paths, 0);
+        assert_eq!(result.drift_paths, 0);
+        assert_eq!(result.batches_applied, 0);
     }
 
     #[test]
