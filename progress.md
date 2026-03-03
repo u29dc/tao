@@ -752,3 +752,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [obs-sdk-bridge placeholder replaced with a concrete bridge kernel exposing versioned envelope DTOs plus minimal read shell APIs (`ping`, `vault_stats`, `note_get`) over SDK services]
 - residual_risk: bridge currently exposes Rust-native APIs and DTO envelopes but does not yet include generated Swift interop bindings, which are covered by FFI-002 and later bridge tickets
+
+- timestamp: 2026-03-03T17:50:40Z
+- session: session-2026-03-03-a
+- ticket: FFI-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [Swift bridge client bindings added for `vault_stats` and `note_get`, backed by bridge shell command output and typed envelope decoding; Swift test confirms both read calls succeed end-to-end]
+- residual_risk: current Swift bridge binding path invokes the Rust bridge shell via subprocess, so direct in-process FFI transport and zero-copy optimization remain for later bridge hardening tickets

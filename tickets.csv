@@ -72,7 +72,7 @@
 "BASE-007","Implement base validation API","base","phase2","BASE-001","done","P1","codex","3","0","","clear diagnostics for invalid base config"
 "BASE-008","Implement base refresh invalidation","base","phase2","BASE-004","done","P1","codex","3","0","","base results update on related metadata changes"
 "FFI-001","Create bridge crate and export shell","ffi","phase3","ARC-003|INFRA-001","done","P1","codex","3","0","","bridge crate compiles and exports minimal API"
-"FFI-002","Generate Swift bindings for read APIs","ffi","phase3","FFI-001|SDK-010","todo","P1","unassigned","3","0","","Swift calls `vault_stats` and `note_get` successfully"
+"FFI-002","Generate Swift bindings for read APIs","ffi","phase3","FFI-001|SDK-010","done","P1","codex","3","0","","Swift calls `vault_stats` and `note_get` successfully"
 "FFI-003","Generate Swift bindings for write APIs","ffi","phase3","FFI-002|SDK-009","todo","P1","unassigned","3","0","","Swift write calls update SDK state safely"
 "FFI-004","Implement DTO versioning strategy","ffi","phase3","ARC-003","todo","P1","unassigned","3","0","","versioned DTOs with backward-compat checks"
 "FFI-005","Implement bridge error mapping","ffi","phase3","DOC-005|FFI-002","todo","P1","unassigned","3","0","","Rust errors map to Swift typed errors"

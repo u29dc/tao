@@ -1,0 +1,91 @@
+use clap::{Parser, Subcommand};
+use obs_sdk_bridge::{BridgeEnvelope, BridgeError, BridgeKernel};
+use serde_json::Value as JsonValue;
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "obs-sdk-bridge",
+    version,
+    about = "Bridge shell for Swift-to-Rust read APIs"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Return bridge ping envelope.
+    Ping,
+    /// Return vault stats envelope.
+    VaultStats {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+    },
+    /// Return one note envelope by normalized path.
+    NoteGet {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Note normalized path.
+        #[arg(long)]
+        path: String,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    let output = match cli.command {
+        Commands::Ping => serialize_output(&BridgeKernelPing::envelope()),
+        Commands::VaultStats {
+            vault_root,
+            db_path,
+        } => with_kernel(vault_root, db_path, |kernel| kernel.vault_stats()),
+        Commands::NoteGet {
+            vault_root,
+            db_path,
+            path,
+        } => with_kernel(vault_root, db_path, |kernel| kernel.note_get(&path)),
+    };
+
+    println!("{output}");
+}
+
+struct BridgeKernelPing;
+
+impl BridgeKernelPing {
+    fn envelope() -> BridgeEnvelope<serde_json::Value> {
+        BridgeEnvelope::success(serde_json::json!({ "message": "ok" }))
+    }
+}
+
+fn with_kernel<T: serde::Serialize>(
+    vault_root: String,
+    db_path: String,
+    operation: impl FnOnce(&BridgeKernel) -> BridgeEnvelope<T>,
+) -> String {
+    match BridgeKernel::open(vault_root, db_path) {
+        Ok(kernel) => serialize_output(&operation(&kernel)),
+        Err(source) => serialize_output(&BridgeEnvelope::<JsonValue>::failure(
+            BridgeError::with_code("bridge.init.failed", source.to_string())
+                .with_hint("ensure vault and sqlite paths are valid"),
+        )),
+    }
+}
+
+fn serialize_output<T: serde::Serialize>(payload: &T) -> String {
+    serde_json::to_string(payload).unwrap_or_else(|source| {
+        format!(
+            "{{\"schema_version\":\"v1\",\"ok\":false,\"value\":null,\"error\":{{\"code\":\"bridge.serialize.failed\",\"message\":\"{}\",\"hint\":null,\"context\":{{}}}}}}",
+            source
+        )
+    })
+}
