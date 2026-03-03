@@ -1,0 +1,3 @@
+module ObsMacOSAppScaffold {
+    header "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/include/ObsMacOSAppScaffold-Swift.h"
+}

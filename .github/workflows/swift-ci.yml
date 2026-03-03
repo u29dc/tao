@@ -1,0 +1,27 @@
+name: swift-ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  swift-build-test:
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: swift build
+        run: swift build
+        working-directory: apps/obs-macos
+
+      - name: swift test
+        run: swift test
+        working-directory: apps/obs-macos

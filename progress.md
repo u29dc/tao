@@ -173,3 +173,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [github rust quality workflow added and local full gate passed]
 - residual_risk: ci runtime for cargo-audit install not benchmarked yet
 
+- timestamp: 2026-03-03T15:52:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-005
+- action: done
+- evidence:
+  - files: [.github/workflows/swift-ci.yml, apps/obs-macos/Package.swift, apps/obs-macos/Sources/*, apps/obs-macos/Tests/*, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [swift build/test ci scaffold added and validated locally]
+- residual_risk: full xcodeproj app shell still pending APP-001
+

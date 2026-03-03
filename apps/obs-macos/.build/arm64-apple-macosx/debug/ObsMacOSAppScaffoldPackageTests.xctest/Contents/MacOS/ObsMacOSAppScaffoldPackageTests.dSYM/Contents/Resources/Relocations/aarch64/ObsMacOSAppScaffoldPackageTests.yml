@@ -1,0 +1,57 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.xctest/Contents/MacOS/ObsMacOSAppScaffoldPackageTests'
+relocations:
+  - { offset: 0x91, size: 0x8, addend: 0x0, symName: '_$s19ObsMacOSAppScaffoldAAO10moduleNameSSyFZ', symObjAddr: 0x0, symBinAddr: 0xAF0, symSize: 0x2C }
+  - { offset: 0xC3, size: 0x8, addend: 0x0, symName: '_$s19ObsMacOSAppScaffoldAAOMa', symObjAddr: 0x2C, symBinAddr: 0xB1C, symSize: 0x14 }
+  - { offset: 0xF2, size: 0x8, addend: 0x0, symName: '_$s19ObsMacOSAppScaffoldAAO10moduleNameSSyFZ', symObjAddr: 0x0, symBinAddr: 0xAF0, symSize: 0x2C }
+  - { offset: 0x17B, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV14testingLibrary33_0CEF4C7753FFB04858991EBD55F6B041LLSSyFZ', symObjAddr: 0x0, symBinAddr: 0xB30, symSize: 0x230 }
+  - { offset: 0x278, size: 0x8, addend: 0x0, symName: ___swift_instantiateConcreteTypeFromMangledNameV2, symObjAddr: 0x230, symBinAddr: 0xD60, symSize: 0x80 }
+  - { offset: 0x28B, size: 0x8, addend: 0x0, symName: '_$sSaySSGSayxGSlsWl', symObjAddr: 0x2B0, symBinAddr: 0xDE0, symSize: 0x74 }
+  - { offset: 0x29E, size: 0x8, addend: 0x0, symName: ___swift_instantiateConcreteTypeFromMangledNameAbstractV2, symObjAddr: 0x324, symBinAddr: 0xE54, symSize: 0x78 }
+  - { offset: 0x2B1, size: 0x8, addend: 0x0, symName: '_$ss16IndexingIteratorVySaySSGGWOh', symObjAddr: 0x39C, symBinAddr: 0xECC, symSize: 0x28 }
+  - { offset: 0x2C4, size: 0x8, addend: 0x0, symName: '_$sS2cMScAsWl', symObjAddr: 0x624, symBinAddr: 0x1154, symSize: 0x6C }
+  - { offset: 0x2D7, size: 0x8, addend: 0x0, symName: '_$sIetH_yts5Error_pIegHrzo_TR', symObjAddr: 0x920, symBinAddr: 0x1450, symSize: 0x78 }
+  - { offset: 0x2F4, size: 0x8, addend: 0x0, symName: '_$sIetH_yts5Error_pIegHrzo_TRTQ0_', symObjAddr: 0x998, symBinAddr: 0x14C8, symSize: 0x64 }
+  - { offset: 0x311, size: 0x8, addend: 0x0, symName: '_$sIetH_yts5Error_pIegHrzo_TRTA', symObjAddr: 0xA24, symBinAddr: 0x1554, symSize: 0x9C }
+  - { offset: 0x324, size: 0x8, addend: 0x0, symName: '_$sIetH_yts5Error_pIegHrzo_TRTATQ0_', symObjAddr: 0xAC0, symBinAddr: 0x15F0, symSize: 0x60 }
+  - { offset: 0x337, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerVMa', symObjAddr: 0xB20, symBinAddr: 0x1650, symSize: 0x14 }
+  - { offset: 0x39E, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV14testingLibrary33_0CEF4C7753FFB04858991EBD55F6B041LLSSyFZ', symObjAddr: 0x0, symBinAddr: 0xB30, symSize: 0x230 }
+  - { offset: 0x41E, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV4mainyyYaFZ', symObjAddr: 0x3C4, symBinAddr: 0xEF4, symSize: 0xA8 }
+  - { offset: 0x45B, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV4mainyyYaFZTY0_', symObjAddr: 0x46C, symBinAddr: 0xF9C, symSize: 0x15C }
+  - { offset: 0x49B, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV4mainyyYaFZTQ1_', symObjAddr: 0x5C8, symBinAddr: 0x10F8, symSize: 0x5C }
+  - { offset: 0x4DC, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV5$mainyyYaFZ', symObjAddr: 0x690, symBinAddr: 0x11C0, symSize: 0x84 }
+  - { offset: 0x4F9, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV5$mainyyYaFZTQ0_', symObjAddr: 0x714, symBinAddr: 0x1244, symSize: 0x8C }
+  - { offset: 0x516, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerV5$mainyyYaFZTY1_', symObjAddr: 0x7A0, symBinAddr: 0x12D0, symSize: 0x40 }
+  - { offset: 0x533, size: 0x8, addend: 0x0, symName: '_$s31ObsMacOSAppScaffoldPackageTests6RunnerVACycfC', symObjAddr: 0x7E0, symBinAddr: 0x1310, symSize: 0x4 }
+  - { offset: 0x553, size: 0x8, addend: 0x0, symName: _async_Main, symObjAddr: 0x7E4, symBinAddr: 0x1314, symSize: 0x6C }
+  - { offset: 0x566, size: 0x8, addend: 0x0, symName: _async_MainTQ0_, symObjAddr: 0x850, symBinAddr: 0x1380, symSize: 0x48 }
+  - { offset: 0x579, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x898, symBinAddr: 0x13C8, symSize: 0x88 }
+  - { offset: 0x5EF, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF', symObjAddr: 0x0, symBinAddr: 0x1664, symSize: 0x20 }
+  - { offset: 0x611, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD67Tests21module_name_is_stable4TestfMp_24accessored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLySbSv_S2VSgSutXCvp', symObjAddr: 0xD80, symBinAddr: 0x4248, symSize: 0x0 }
+  - { offset: 0x62A, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD76Tests21module_name_is_stable4TestfMp_33testContentRecorded16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLs6UInt32V4kind_AE9reserved1SbSv_S2VSgSutXCSg8accessorSu7contextSu9reserved2tvp', symObjAddr: 0xD88, symBinAddr: 0x4250, symSize: 0x0 }
+  - { offset: 0x637, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF', symObjAddr: 0x0, symBinAddr: 0x1664, symSize: 0x20 }
+  - { offset: 0x654, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF0fabcdg1_h1_i1_jkl10_7__localfN1_L_yyScA_pSgYiYaYbKF', symObjAddr: 0x1B8, symBinAddr: 0x181C, symSize: 0xE0 }
+  - { offset: 0x686, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF0fabcdg1_h1_i1_jkl10_7__localfN1_L_yyScA_pSgYiYaYbKFTY0_', symObjAddr: 0x298, symBinAddr: 0x18FC, symSize: 0x9C }
+  - { offset: 0x6E2, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF0fabcdg1_h1_i1_jkl10_7__localfN1_L_yyScA_pSgYiYaYbKFTQ1_', symObjAddr: 0x334, symBinAddr: 0x1998, symSize: 0x7C }
+  - { offset: 0x717, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF0fabcdg1_h1_i1_jkl10_7__localfN1_L_yyScA_pSgYiYaYbKFTY2_', symObjAddr: 0x3B0, symBinAddr: 0x1A14, symSize: 0x11C }
+  - { offset: 0x751, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKFTY0_', symObjAddr: 0x20, symBinAddr: 0x1684, symSize: 0x84 }
+  - { offset: 0x774, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKFTQ1_', symObjAddr: 0xA4, symBinAddr: 0x1708, symSize: 0xB0 }
+  - { offset: 0x797, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKFTY2_', symObjAddr: 0x154, symBinAddr: 0x17B8, symSize: 0x50 }
+  - { offset: 0x7BA, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD59Tests21module_name_is_stable4TestfMp_16ed16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLyyYaYbKF0fabcdg1_h1_i1_jkl10_7__localfN1_L_yyScA_pSgYiYaYbKFfA_', symObjAddr: 0x1A4, symBinAddr: 0x1808, symSize: 0x14 }
+  - { offset: 0x7FD, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests21module_name_is_stableyyF', symObjAddr: 0x4CC, symBinAddr: 0x1B30, symSize: 0x378 }
+  - { offset: 0x82E, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests21module_name_is_stableyyFSbSS_SSyXEtXEfU0_', symObjAddr: 0xBA8, symBinAddr: 0x220C, symSize: 0x84 }
+  - { offset: 0x864, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests21module_name_is_stableyyFSSyXEfu1_', symObjAddr: 0xC2C, symBinAddr: 0x2290, symSize: 0x2C }
+  - { offset: 0x87B, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests21module_name_is_stableyyFSay7Testing7CommentVGyXEfu2_', symObjAddr: 0xC58, symBinAddr: 0x22BC, symSize: 0x30 }
+  - { offset: 0x893, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD68Tests21module_name_is_stable4TestfMp_25generatored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALL7Testing4TestVyYaYbF', symObjAddr: 0x844, symBinAddr: 0x1EA8, symSize: 0x78 }
+  - { offset: 0x8B0, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD68Tests21module_name_is_stable4TestfMp_25generatored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALL7Testing4TestVyYaYbFTY0_', symObjAddr: 0x8BC, symBinAddr: 0x1F20, symSize: 0x1AC }
+  - { offset: 0x8CD, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD67Tests21module_name_is_stable4TestfMp_24accessored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLySbSv_S2VSgSutXCvpfiSbSv_SVADSutcfU_', symObjAddr: 0xA68, symBinAddr: 0x20CC, symSize: 0x6C }
+  - { offset: 0x91F, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD67Tests21module_name_is_stable4TestfMp_24accessored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLySbSv_S2VSgSutXCvpfiSbSv_SVADSutcfU_To', symObjAddr: 0xAD4, symBinAddr: 0x2138, symSize: 0x18 }
+  - { offset: 0x936, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD67Tests21module_name_is_stable4TestfMp_24accessored16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLySbSv_S2VSgSutXCvau', symObjAddr: 0xAEC, symBinAddr: 0x2150, symSize: 0xC }
+  - { offset: 0x953, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests04$s24abcD76Tests21module_name_is_stable4TestfMp_33testContentRecorded16f0f96a55d0c1fMu_33_D8E49623FB2334DD5BA17736B8C7E1EALLs6UInt32V4kind_AE9reserved1SbSv_S2VSgSutXCSg8accessorSu7contextSu9reserved2tvau', symObjAddr: 0xAF8, symBinAddr: 0x215C, symSize: 0xC }
+  - { offset: 0x99F, size: 0x8, addend: 0x0, symName: '_$ss6ResultOyyts5Error_pGWOh', symObjAddr: 0xD08, symBinAddr: 0x22EC, symSize: 0x34 }
+  - { offset: 0x9B2, size: 0x8, addend: 0x0, symName: '_$ss6ResultOyyts5Error_pGWOe', symObjAddr: 0xD3C, symBinAddr: 0x2320, symSize: 0x30 }
+  - { offset: 0x9C5, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests0092$s24ObsMacOSAppScaffoldTests21module_name_is_stable4TestfMp_20__$ed16f0f96a55d0c1fMu__tFAGBgOMa', symObjAddr: 0xD6C, symBinAddr: 0x2350, symSize: 0x14 }
+  - { offset: 0xA10, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests0092$s24ObsMacOSAppScaffoldTests21module_name_is_stable4TestfMp_20__$ed16f0f96a55d0c1fMu__tFAGBgO19__testContentRecords6UInt32V4kind_AF9reserved1SbSv_S2VSgSutXCSg8accessorSu7contextSu9reserved2tvgZ', symObjAddr: 0xB04, symBinAddr: 0x2168, symSize: 0x40 }
+  - { offset: 0xA36, size: 0x8, addend: 0x0, symName: '_$s24ObsMacOSAppScaffoldTests0092$s24ObsMacOSAppScaffoldTests21module_name_is_stable4TestfMp_20__$ed16f0f96a55d0c1fMu__tFAGBgO7Testing28__TestContentRecordContainerAadEP06__testhI0s6UInt32V4kind_AI9reserved1SbSv_S2VSgSutXCSg8accessorSu7contextSu9reserved2tvgZTW', symObjAddr: 0xB44, symBinAddr: 0x21A8, symSize: 0x64 }
+...

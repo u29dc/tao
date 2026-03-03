@@ -1,0 +1,638 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.xctest/Contents/MacOS/ObsMacOSAppScaffoldPackageTests",
+      "packagePath" : "/Users/han/Git/obs/apps/obs-macos",
+      "productName" : "ObsMacOSAppScaffoldPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.ObsMacOSAppScaffold-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/sources",
+      "importPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsMacOSAppScaffold.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "ObsMacOSAppScaffold",
+      "moduleOutputPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffold.swiftmodule",
+      "objects" : [
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/ObsMacOSAppScaffold.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j16",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/include/ObsMacOSAppScaffold-Swift.h",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "obs_macos"
+      ],
+      "outputFileMapPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/ObsMacOSAppScaffold.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffold.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/han/Git/obs/apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsMacOSAppScaffold.swift"
+      ],
+      "tempsPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.ObsMacOSAppScaffoldPackageTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/sources",
+      "importPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffoldTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "ObsMacOSAppScaffoldPackageTests",
+      "moduleOutputPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffoldPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j16",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/include/ObsMacOSAppScaffoldPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "obs_macos"
+      ],
+      "outputFileMapPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffoldPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.ObsMacOSAppScaffoldTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/sources",
+      "importPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffold.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "ObsMacOSAppScaffoldTests",
+      "moduleOutputPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffoldTests.swiftmodule",
+      "objects" : [
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/ObsMacOSAppScaffoldTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j16",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "obs_macos"
+      ],
+      "outputFileMapPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/ObsMacOSAppScaffoldTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules/ObsMacOSAppScaffoldTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/han/Git/obs/apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift"
+      ],
+      "tempsPath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "ObsMacOSAppScaffold" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "ObsMacOSAppScaffold",
+      "-package-name",
+      "obs_macos",
+      "-c",
+      "/Users/han/Git/obs/apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsMacOSAppScaffold.swift",
+      "-I",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j16",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/include/ObsMacOSAppScaffold-Swift.h",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "obs_macos",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "ObsMacOSAppScaffoldPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "ObsMacOSAppScaffoldPackageTests",
+      "-package-name",
+      "obs_macos",
+      "-c",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j16",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/include/ObsMacOSAppScaffoldPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "obs_macos",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "ObsMacOSAppScaffoldTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "ObsMacOSAppScaffoldTests",
+      "-package-name",
+      "obs_macos",
+      "-c",
+      "/Users/han/Git/obs/apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift",
+      "-I",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j16",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "obs_macos",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "ObsMacOSAppScaffold" : [
+
+    ],
+    "ObsMacOSAppScaffoldPackageTests" : [
+      "ObsMacOSAppScaffoldTests",
+      "ObsMacOSAppScaffold"
+    ],
+    "ObsMacOSAppScaffoldTests" : [
+      "ObsMacOSAppScaffold"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsMacOSAppScaffold.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/sources"
+    },
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/sources"
+    },
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffold.build/ObsMacOSAppScaffold.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/ObsMacOSAppScaffoldTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldPackageTests.product/Objects.LinkFileList"
+    },
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/han/Git/obs/apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/ObsMacOSAppScaffoldTests.build/sources"
+    },
+    "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/han/Git/obs/apps/obs-macos/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}
