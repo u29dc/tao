@@ -323,6 +323,27 @@ pub struct IncrementalIndexResult {
     pub bases_reindexed: u64,
 }
 
+/// Result payload for coalesced batch indexing workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoalescedBatchIndexResult {
+    /// Number of raw path change events received.
+    pub input_events: u64,
+    /// Number of unique normalized paths after coalescing.
+    pub unique_paths: u64,
+    /// Number of batches applied.
+    pub batches_applied: u64,
+    /// Number of files inserted or updated.
+    pub upserted_files: u64,
+    /// Number of files removed from index.
+    pub removed_files: u64,
+    /// Number of links reindexed.
+    pub links_reindexed: u64,
+    /// Number of properties reindexed.
+    pub properties_reindexed: u64,
+    /// Number of bases reindexed.
+    pub bases_reindexed: u64,
+}
+
 /// Incremental indexing service for targeted path updates.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IncrementalIndexService {
@@ -595,6 +616,67 @@ impl IncrementalIndexService {
     }
 }
 
+/// Coalescing batch service for burst filesystem change events.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CoalescedBatchIndexService {
+    incremental: IncrementalIndexService,
+}
+
+impl CoalescedBatchIndexService {
+    /// Deduplicate changed paths and apply incremental indexing in bounded batches.
+    pub fn apply_coalesced(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changed_paths: &[PathBuf],
+        max_batch_size: usize,
+        case_policy: CasePolicy,
+    ) -> Result<CoalescedBatchIndexResult, FullIndexError> {
+        if max_batch_size == 0 {
+            return Err(FullIndexError::InvalidBatchSize { value: 0 });
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut unique_paths = Vec::new();
+        for path in changed_paths {
+            let normalized = normalize_changed_path(path)?;
+            if seen.insert(normalized.clone()) {
+                unique_paths.push(PathBuf::from(normalized));
+            }
+        }
+
+        let mut batches_applied = 0_u64;
+        let mut upserted_files = 0_u64;
+        let mut removed_files = 0_u64;
+        let mut links_reindexed = 0_u64;
+        let mut properties_reindexed = 0_u64;
+        let mut bases_reindexed = 0_u64;
+
+        for batch in unique_paths.chunks(max_batch_size) {
+            let batch_result =
+                self.incremental
+                    .apply_changes(vault_root, connection, batch, case_policy)?;
+            batches_applied += 1;
+            upserted_files += batch_result.upserted_files;
+            removed_files += batch_result.removed_files;
+            links_reindexed += batch_result.links_reindexed;
+            properties_reindexed += batch_result.properties_reindexed;
+            bases_reindexed += batch_result.bases_reindexed;
+        }
+
+        Ok(CoalescedBatchIndexResult {
+            input_events: changed_paths.len() as u64,
+            unique_paths: unique_paths.len() as u64,
+            batches_applied,
+            upserted_files,
+            removed_files,
+            links_reindexed,
+            properties_reindexed,
+            bases_reindexed,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -817,6 +899,12 @@ pub enum FullIndexError {
         /// Validation reason.
         reason: String,
     },
+    /// Provided batch size is invalid.
+    #[error("invalid coalesced batch size: {value}")]
+    InvalidBatchSize {
+        /// Invalid batch size value.
+        value: usize,
+    },
     /// Beginning sqlite transaction failed.
     #[error("failed to begin full index transaction: {source}")]
     BeginTransaction {
@@ -910,7 +998,9 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{CasePolicy, FullIndexService, IncrementalIndexService};
+    use super::{
+        CasePolicy, CoalescedBatchIndexService, FullIndexService, IncrementalIndexService,
+    };
 
     #[test]
     fn rebuild_populates_core_tables_for_files_links_properties_bases_and_state() {
@@ -1068,5 +1158,66 @@ mod tests {
                 .expect("get deleted file")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn coalesced_batch_apply_deduplicates_events_and_respects_batch_size() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::write(temp.path().join("notes/a.md"), "# A changed").expect("update a");
+        fs::write(temp.path().join("notes/b.md"), "# B changed").expect("update b");
+
+        let result = CoalescedBatchIndexService::default()
+            .apply_coalesced(
+                temp.path(),
+                &mut connection,
+                &[
+                    PathBuf::from("notes/a.md"),
+                    PathBuf::from("notes/a.md"),
+                    PathBuf::from("notes/b.md"),
+                ],
+                1,
+                CasePolicy::Sensitive,
+            )
+            .expect("apply coalesced batches");
+
+        assert_eq!(result.input_events, 3);
+        assert_eq!(result.unique_paths, 2);
+        assert_eq!(result.batches_applied, 2);
+        assert_eq!(result.upserted_files, 2);
+    }
+
+    #[test]
+    fn coalesced_batch_apply_rejects_zero_batch_size() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let error = CoalescedBatchIndexService::default()
+            .apply_coalesced(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/a.md")],
+                0,
+                CasePolicy::Sensitive,
+            )
+            .expect_err("zero batch size should fail");
+
+        assert!(matches!(
+            error,
+            super::FullIndexError::InvalidBatchSize { .. }
+        ));
     }
 }

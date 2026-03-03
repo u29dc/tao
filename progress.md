@@ -532,3 +532,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [incremental indexing service implemented for targeted path updates with per-file link/property/base refresh and deletion handling]
 - residual_risk: incremental link resolution currently recomputes only changed source files; cross-note backfill optimization remains for later coalescing/reconcile tickets
+
+- timestamp: 2026-03-03T16:47:47Z
+- session: session-2026-03-03-a
+- ticket: IDX-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [coalesced batch indexing implemented with path deduplication, bounded batch size enforcement, and aggregate batch metrics]
+- residual_risk: coalescing currently batches by normalized path keys only; advanced priority heuristics for high-churn paths can be added in watcher tuning work

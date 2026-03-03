@@ -45,7 +45,7 @@
 "DB-008","Implement index state repositories","db","phase2","DB-003","done","P1","codex","3","0","","state keys for checkpoint/reconcile persisted"
 "IDX-001","Implement initial full indexing workflow","idx","phase1","SDK-004|DB-005","done","P1","codex","3","0","","full vault index populates all core tables"
 "IDX-002","Implement incremental indexing workflow","idx","phase1","IDX-001|SDK-003","done","P1","codex","3","0","","single-file updates touch only impacted rows"
-"IDX-003","Implement coalesced batch apply","idx","phase1","IDX-002","todo","P1","unassigned","3","0","","burst edits processed in bounded batches"
+"IDX-003","Implement coalesced batch apply","idx","phase1","IDX-002","done","P1","codex","3","0","","burst edits processed in bounded batches"
 "IDX-004","Implement stale record cleanup","idx","phase1","IDX-002","todo","P1","unassigned","3","0","","deleted/moved files removed from index"
 "IDX-005","Implement checkpointed index progress","idx","phase2","DB-008","todo","P1","unassigned","3","0","","restart resumes without full rebuild"
 "IDX-006","Implement reconciliation scanner","idx","phase2","IDX-002","todo","P1","unassigned","3","0","","drift scan repairs missed watcher events"

@@ -20,8 +20,8 @@ pub use import_export::{
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
 pub use indexing::{
-    FullIndexError, FullIndexResult, FullIndexService, IncrementalIndexResult,
-    IncrementalIndexService,
+    CoalescedBatchIndexResult, CoalescedBatchIndexService, FullIndexError, FullIndexResult,
+    FullIndexService, IncrementalIndexResult, IncrementalIndexService,
 };
 pub use tracing_hooks::ServiceTraceContext;
 
