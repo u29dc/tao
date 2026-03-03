@@ -11,7 +11,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "ARC-004","Define event model for index updates","arc","phase0","ARC-003","done","P0","codex","3","0","","Event types and payload contracts documented"
 "ARC-005","Define resolver tie-break algorithm","arc","phase0","DOC-003","done","P0","codex","3","0","","Deterministic resolver spec with ambiguity policy"
 "ARC-006","Define migration/versioning strategy","arc","phase0","ARC-001","done","P0","codex","3","0","","DB schema semver + migration policy documented"
-"INFRA-001","Bootstrap Rust workspace skeleton","infra","phase0","ARC-001","todo","P0","unassigned","3","0","","All crates compile with placeholder code"
+"INFRA-001","Bootstrap Rust workspace skeleton","infra","phase0","ARC-001","done","P0","codex","3","0","","All crates compile with placeholder code"
 "INFRA-002","Add workspace lint policy","infra","phase0","INFRA-001","todo","P0","unassigned","3","0","","`unsafe_code = ""forbid""` and lint config active"
 "INFRA-003","Add root package scripts and hooks","infra","phase0","INFRA-001","todo","P0","unassigned","3","0","","`package.json`, husky, lint-staged, commitlint aligned"
 "INFRA-004","Add CI workflow for Rust gates","infra","phase0","INFRA-003","todo","P0","unassigned","3","0","","CI runs format/lint/check/test/build"
