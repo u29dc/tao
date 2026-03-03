@@ -362,6 +362,12 @@ dependencies = [
 [[package]]
 name = "obs-sdk-bases"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+]
 
 [[package]]
 name = "obs-sdk-bridge"

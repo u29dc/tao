@@ -63,7 +63,7 @@
 "PROP-004","Implement default property mappings","prop","phase2","PROP-002","done","P1","codex","3","0","","tags/aliases/css classes mapped consistently"
 "PROP-005","Implement malformed YAML tolerance","prop","phase2","PROP-001","done","P1","codex","3","0","","malformed docs do not crash indexing"
 "PROP-006","Implement property query API","prop","phase2","PROP-002","done","P1","codex","3","0","","filter/sort APIs for bases and cli"
-"BASE-001","Implement `.base` file parser","base","phase2","DB-006","todo","P1","unassigned","3","0","","valid syntax parsed into typed model"
+"BASE-001","Implement `.base` file parser","base","phase2","DB-006","done","P1","codex","3","0","","valid syntax parsed into typed model"
 "BASE-002","Implement base view registry","base","phase2","BASE-001","todo","P1","unassigned","3","0","","list views with type and config"
 "BASE-003","Implement table query planner","base","phase2","BASE-001|PROP-006","todo","P1","unassigned","3","0","","table view query compiles to db query plan"
 "BASE-004","Implement table row executor","base","phase2","BASE-003","todo","P1","unassigned","3","0","","rows returned with paging and sort"
