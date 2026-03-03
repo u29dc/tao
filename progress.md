@@ -1232,3 +1232,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [replaced raw print stub with explicit `AppState` and `Route` model, defaulted startup route to `placeholder`, and added unit test asserting placeholder boot route contract]
 - residual_risk: startup remains non-interactive until route shell/keymap ticket
+
+- timestamp: 2026-03-03T20:16:18Z
+- session: session-2026-03-03-a
+- ticket: TUI-002
+- action: done
+- evidence:
+  - files: [crates/obs-tui/src/main.rs, crates/obs-tui/Cargo.toml, crates/obs-tui/README.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [implemented alternate-screen TUI route shell with stable keymap-based route switching and quit handling; added command palette (`:`) with parsed `route <name>` and `quit` commands; added unit tests for keymap routing and palette parsing/flow]
+- residual_risk: route shell currently renders placeholders for notes/search/bases content pending integration tickets

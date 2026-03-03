@@ -13,4 +13,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
+crossterm = "0.29.0"
 obs-sdk-service = { path = "../obs-sdk-service" }
+ratatui = "0.29.0"
