@@ -772,3 +772,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge write DTO and `note_put` API added with deterministic id generation and safe create-or-update semantics; bridge shell exposes `note-put`; Swift client and tests now verify write+read round-trip behavior through the bridge]
 - residual_risk: bridge write path currently rewrites full note content per call and relies on subprocess json transport, so partial-update and in-process ffi optimization remain for later tickets
+
+- timestamp: 2026-03-03T17:57:57Z
+- session: session-2026-03-03-a
+- ticket: FFI-004
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [bridge schema version upgraded to `v1.0` with explicit parser and major-version compatibility checks in Rust and Swift; Swift client now rejects incompatible major versions at envelope decode time; compatibility tests cover `v1`/minor acceptance and `v2` rejection]
+- residual_risk: compatibility policy currently validates major version only, so richer feature-negotiation for optional capabilities is deferred to later bridge evolution tickets

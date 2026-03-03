@@ -12,7 +12,43 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror::Error;
 
 /// Current bridge DTO schema version.
-pub const BRIDGE_SCHEMA_VERSION: &str = "v1";
+pub const BRIDGE_SCHEMA_VERSION: &str = "v1.0";
+/// Supported bridge DTO major version for compatibility checks.
+pub const BRIDGE_SCHEMA_MAJOR: u16 = 1;
+
+/// Parsed bridge schema version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeSchemaVersion {
+    /// Major schema version.
+    pub major: u16,
+    /// Minor schema version.
+    pub minor: u16,
+}
+
+/// Parse bridge schema version from `v<major>[.<minor>]`.
+#[must_use]
+pub fn parse_bridge_schema_version(raw: &str) -> Option<BridgeSchemaVersion> {
+    let trimmed = raw.trim();
+    let without_prefix = trimmed.strip_prefix('v')?;
+    let (major_raw, minor_raw) = match without_prefix.split_once('.') {
+        Some((major, minor)) => (major, minor),
+        None => (without_prefix, "0"),
+    };
+
+    if major_raw.is_empty() || minor_raw.is_empty() {
+        return None;
+    }
+
+    let major = major_raw.parse::<u16>().ok()?;
+    let minor = minor_raw.parse::<u16>().ok()?;
+    Some(BridgeSchemaVersion { major, minor })
+}
+
+/// Return whether the provided schema version is compatible with the current bridge.
+#[must_use]
+pub fn is_bridge_schema_compatible(raw: &str) -> bool {
+    parse_bridge_schema_version(raw).is_some_and(|version| version.major == BRIDGE_SCHEMA_MAJOR)
+}
 
 /// Standard bridge envelope used for all boundary responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +84,12 @@ impl<T> BridgeEnvelope<T> {
             value: None,
             error: Some(error),
         }
+    }
+
+    /// Return whether the envelope schema version is compatible with this bridge client.
+    #[must_use]
+    pub fn schema_compatible(&self) -> bool {
+        is_bridge_schema_compatible(&self.schema_version)
     }
 }
 
@@ -359,7 +401,56 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{BRIDGE_SCHEMA_VERSION, BridgeKernel};
+    use super::{
+        BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel, BridgePing, BridgeSchemaVersion,
+        is_bridge_schema_compatible, parse_bridge_schema_version,
+    };
+
+    #[test]
+    fn schema_version_parser_and_compatibility_checks_are_stable() {
+        assert_eq!(
+            parse_bridge_schema_version("v1"),
+            Some(BridgeSchemaVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(
+            parse_bridge_schema_version("v1.7"),
+            Some(BridgeSchemaVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            parse_bridge_schema_version(" v3.14 "),
+            Some(BridgeSchemaVersion {
+                major: 3,
+                minor: 14
+            })
+        );
+        assert_eq!(parse_bridge_schema_version("v1."), None);
+        assert_eq!(parse_bridge_schema_version("v1.alpha"), None);
+        assert_eq!(parse_bridge_schema_version("1.0"), None);
+        assert_eq!(parse_bridge_schema_version(""), None);
+
+        assert!(is_bridge_schema_compatible("v1"));
+        assert!(is_bridge_schema_compatible("v1.99"));
+        assert!(!is_bridge_schema_compatible("v2"));
+        assert!(!is_bridge_schema_compatible("1"));
+    }
+
+    #[test]
+    fn bridge_envelope_exposes_schema_compatibility_check() {
+        let compatible = BridgeEnvelope::success(BridgePing {
+            message: "ok".to_string(),
+        });
+        assert!(compatible.schema_compatible());
+
+        let incompatible = BridgeEnvelope::<BridgePing> {
+            schema_version: "v2.0".to_string(),
+            ok: true,
+            value: Some(BridgePing {
+                message: "ok".to_string(),
+            }),
+            error: None,
+        };
+        assert!(!incompatible.schema_compatible());
+    }
 
     #[test]
     fn bridge_kernel_exposes_schema_version_and_ping() {

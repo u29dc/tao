@@ -92,3 +92,64 @@ import Foundation
     #expect(secondRead.title == "Swift Updated")
     #expect(secondRead.body.contains("two"))
 }
+
+@Test func bridge_client_accepts_compatible_minor_schema_versions() throws {
+    #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1"))
+    #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1.8"))
+    #expect(!ObsBridgeClient.isCompatibleSchemaVersion("v2"))
+    #expect(!ObsBridgeClient.isCompatibleSchemaVersion("v1.beta"))
+}
+
+@Test func bridge_client_rejects_incompatible_schema_from_bridge_output() throws {
+    let fixture = try makeMockBridgeScript(
+        payload: """
+        {"schema_version":"v2.0","ok":true,"value":{"path":"notes/mock.md","title":"Mock","front_matter":null,"body":"mock body","headings_total":0},"error":null}
+        """
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
+
+    let client = ObsBridgeClient(
+        bridgeCommand: [fixture.script.path],
+        repositoryRoot: fixture.tempRoot
+    )
+
+    do {
+        _ = try client.noteGet(
+            vaultRoot: fixture.tempRoot.path,
+            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path,
+            path: "notes/mock.md"
+        )
+        Issue.record("expected schema compatibility failure")
+    } catch let error as ObsBridgeClientError {
+        switch error {
+        case .incompatibleSchema(let expectedMajor, let actual):
+            #expect(expectedMajor == 1)
+            #expect(actual == "v2.0")
+        default:
+            Issue.record("unexpected bridge error: \(error)")
+        }
+    }
+}
+
+private struct MockBridgeScriptFixture {
+    let tempRoot: URL
+    let script: URL
+}
+
+private func makeMockBridgeScript(payload: String) throws -> MockBridgeScriptFixture {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-mock-\(UUID().uuidString)")
+    try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+
+    let script = tempRoot.appendingPathComponent("mock-bridge.sh")
+    let body = """
+    #!/bin/sh
+    cat <<'JSON'
+    \(payload)
+    JSON
+    """
+    try body.write(to: script, atomically: true, encoding: .utf8)
+    try fileManager.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: script.path)
+    return MockBridgeScriptFixture(tempRoot: tempRoot, script: script)
+}

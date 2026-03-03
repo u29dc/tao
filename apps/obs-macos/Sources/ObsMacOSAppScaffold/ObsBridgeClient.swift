@@ -40,6 +40,7 @@ public enum ObsBridgeClientError: Error, CustomStringConvertible {
     case launchFailed(String)
     case processFailed(Int32, String)
     case decodeFailed(String)
+    case incompatibleSchema(expectedMajor: Int, actual: String)
     case bridgeError(BridgeErrorDTO)
     case missingValue
 
@@ -51,6 +52,8 @@ public enum ObsBridgeClientError: Error, CustomStringConvertible {
             return "process failed (\(code)): \(stderr)"
         case .decodeFailed(let message):
             return "decode failed: \(message)"
+        case .incompatibleSchema(let expectedMajor, let actual):
+            return "incompatible schema version \(actual), expected major v\(expectedMajor)"
         case .bridgeError(let error):
             return "bridge error \(error.code): \(error.message)"
         case .missingValue:
@@ -60,6 +63,7 @@ public enum ObsBridgeClientError: Error, CustomStringConvertible {
 }
 
 public struct ObsBridgeClient {
+    private static let supportedSchemaMajor = 1
     private let bridgeCommand: [String]
     private let repositoryRoot: URL
 
@@ -124,6 +128,13 @@ public struct ObsBridgeClient {
             throw ObsBridgeClientError.decodeFailed(error.localizedDescription)
         }
 
+        guard Self.isCompatibleSchemaVersion(envelope.schemaVersion) else {
+            throw ObsBridgeClientError.incompatibleSchema(
+                expectedMajor: Self.supportedSchemaMajor,
+                actual: envelope.schemaVersion
+            )
+        }
+
         if envelope.ok {
             guard let value = envelope.value else {
                 throw ObsBridgeClientError.missingValue
@@ -163,6 +174,39 @@ public struct ObsBridgeClient {
             throw ObsBridgeClientError.processFailed(process.terminationStatus, stderr)
         }
         return stdout
+    }
+
+    static func isCompatibleSchemaVersion(_ schemaVersion: String) -> Bool {
+        guard let parsed = parseSchemaVersion(schemaVersion) else {
+            return false
+        }
+        return parsed.major == supportedSchemaMajor
+    }
+
+    private static func parseSchemaVersion(_ raw: String) -> (major: Int, minor: Int)? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("v") else {
+            return nil
+        }
+
+        let numeric = String(trimmed.dropFirst())
+        let parts = numeric.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 1 || parts.count == 2 else {
+            return nil
+        }
+
+        guard let major = Int(parts[0]) else {
+            return nil
+        }
+
+        if parts.count == 1 {
+            return (major: major, minor: 0)
+        }
+
+        guard let minor = Int(parts[1]) else {
+            return nil
+        }
+        return (major: major, minor: minor)
     }
 
     private static func defaultRepositoryRoot() -> URL {
