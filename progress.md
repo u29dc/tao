@@ -262,3 +262,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [markdown parser entrypoints and service-layer ingest pipeline shell implemented and validated]
 - residual_risk: markdown parser intentionally scopes to shell behavior (frontmatter/headings/title) and defers full ast/link extraction to later tickets
+
+- timestamp: 2026-03-03T17:27:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-005
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-markdown/Cargo.toml, crates/obs-sdk-markdown/src/lib.rs, crates/obs-sdk-markdown/src/render_cache.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [hash-keyed rendered HTML cache policy implemented with LRU eviction and deterministic unit tests]
+- residual_risk: cache is in-memory only for now; persistence and cross-process sharing are deferred

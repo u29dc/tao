@@ -4,6 +4,12 @@ use std::path::Path;
 
 use thiserror::Error;
 
+mod render_cache;
+
+pub use render_cache::{
+    CacheInsertOutcome, RenderCachePolicy, RenderCachePolicyError, RenderedHtmlCache,
+};
+
 /// Input payload for markdown parser entrypoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkdownParseRequest {

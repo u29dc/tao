@@ -331,6 +331,7 @@ version = "0.1.0"
 name = "obs-sdk-markdown"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "thiserror",
 ]
 
