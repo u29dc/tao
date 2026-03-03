@@ -20,6 +20,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 rusqlite.workspace = true
 clap.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"

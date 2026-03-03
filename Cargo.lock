@@ -373,6 +373,7 @@ dependencies = [
 name = "obs-sdk-bridge"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clap",
  "obs-sdk-markdown",
  "obs-sdk-service",

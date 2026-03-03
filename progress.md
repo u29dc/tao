@@ -762,3 +762,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [Swift bridge client bindings added for `vault_stats` and `note_get`, backed by bridge shell command output and typed envelope decoding; Swift test confirms both read calls succeed end-to-end]
 - residual_risk: current Swift bridge binding path invokes the Rust bridge shell via subprocess, so direct in-process FFI transport and zero-copy optimization remain for later bridge hardening tickets
+
+- timestamp: 2026-03-03T17:54:38Z
+- session: session-2026-03-03-a
+- ticket: FFI-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/Cargo.toml, crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, Cargo.lock, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [bridge write DTO and `note_put` API added with deterministic id generation and safe create-or-update semantics; bridge shell exposes `note-put`; Swift client and tests now verify write+read round-trip behavior through the bridge]
+- residual_risk: bridge write path currently rewrites full note content per call and relies on subprocess json transport, so partial-update and in-process ffi optimization remain for later tickets

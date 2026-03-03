@@ -30,6 +30,12 @@ public struct BridgeNoteView: Decodable {
     public let headingsTotal: UInt64
 }
 
+public struct BridgeWriteAck: Decodable {
+    public let path: String
+    public let fileId: String
+    public let action: String
+}
+
 public enum ObsBridgeClientError: Error, CustomStringConvertible {
     case launchFailed(String)
     case processFailed(Int32, String)
@@ -85,6 +91,24 @@ public struct ObsBridgeClient {
                 "--path", path
             ],
             as: BridgeNoteView.self
+        )
+    }
+
+    public func notePut(
+        vaultRoot: String,
+        dbPath: String,
+        path: String,
+        content: String
+    ) throws -> BridgeWriteAck {
+        try invoke(
+            subcommand: [
+                "note-put",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath,
+                "--path", path,
+                "--content", content
+            ],
+            as: BridgeWriteAck.self
         )
     }
 

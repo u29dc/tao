@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 #[command(
     name = "obs-sdk-bridge",
     version,
-    about = "Bridge shell for Swift-to-Rust read APIs"
+    about = "Bridge shell for Swift-to-Rust read/write APIs"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,6 +38,21 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Create or update one note and return write acknowledgement.
+    NotePut {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Note normalized path.
+        #[arg(long)]
+        path: String,
+        /// Full markdown content payload.
+        #[arg(long)]
+        content: String,
+    },
 }
 
 fn main() {
@@ -54,6 +69,14 @@ fn main() {
             db_path,
             path,
         } => with_kernel(vault_root, db_path, |kernel| kernel.note_get(&path)),
+        Commands::NotePut {
+            vault_root,
+            db_path,
+            path,
+            content,
+        } => with_kernel(vault_root, db_path, |kernel| {
+            kernel.note_put(&path, &content)
+        }),
     };
 
     println!("{output}");
@@ -70,10 +93,10 @@ impl BridgeKernelPing {
 fn with_kernel<T: serde::Serialize>(
     vault_root: String,
     db_path: String,
-    operation: impl FnOnce(&BridgeKernel) -> BridgeEnvelope<T>,
+    operation: impl FnOnce(&mut BridgeKernel) -> BridgeEnvelope<T>,
 ) -> String {
     match BridgeKernel::open(vault_root, db_path) {
-        Ok(kernel) => serialize_output(&operation(&kernel)),
+        Ok(mut kernel) => serialize_output(&operation(&mut kernel)),
         Err(source) => serialize_output(&BridgeEnvelope::<JsonValue>::failure(
             BridgeError::with_code("bridge.init.failed", source.to_string())
                 .with_hint("ensure vault and sqlite paths are valid"),

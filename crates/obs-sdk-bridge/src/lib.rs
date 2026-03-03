@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use obs_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
-use obs_sdk_service::{HealthSnapshotService, WatcherStatus};
-use obs_sdk_storage::run_migrations;
+use obs_sdk_service::{HealthSnapshotService, NoteCrudService, WatcherStatus};
+use obs_sdk_storage::{FilesRepository, run_migrations};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -125,6 +125,17 @@ pub struct BridgeNoteView {
     pub headings_total: u64,
 }
 
+/// Bridge write acknowledgement DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeWriteAck {
+    /// Path that was written.
+    pub path: String,
+    /// Stable file id.
+    pub file_id: String,
+    /// Write action label.
+    pub action: String,
+}
+
 /// Bridge runtime kernel with vault root and opened SQLite connection.
 #[derive(Debug)]
 pub struct BridgeKernel {
@@ -239,6 +250,82 @@ impl BridgeKernel {
             ),
         }
     }
+
+    /// Create or update one note safely through SDK write services.
+    #[must_use]
+    pub fn note_put(
+        &mut self,
+        normalized_path: &str,
+        content: &str,
+    ) -> BridgeEnvelope<BridgeWriteAck> {
+        let normalized_path = normalized_path.trim();
+        if normalized_path.is_empty() {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    "bridge.note_put.invalid_path",
+                    "normalized path must not be empty",
+                )
+                .with_hint("provide a vault-relative markdown path"),
+            );
+        }
+
+        let note_service = NoteCrudService::default();
+        let relative = Path::new(normalized_path);
+        let existing =
+            match FilesRepository::get_by_normalized_path(&self.connection, normalized_path) {
+                Ok(existing) => existing,
+                Err(source) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code("bridge.note_put.lookup_failed", source.to_string())
+                            .with_hint("ensure bridge database is available"),
+                    );
+                }
+            };
+
+        if let Some(existing) = existing {
+            match note_service.update_note(
+                &self.vault_root,
+                &mut self.connection,
+                &existing.file_id,
+                relative,
+                content,
+            ) {
+                Ok(result) => BridgeEnvelope::success(BridgeWriteAck {
+                    path: result.normalized_path,
+                    file_id: result.file_id,
+                    action: "updated".to_string(),
+                }),
+                Err(source) => BridgeEnvelope::failure(
+                    BridgeError::with_code("bridge.note_put.update_failed", source.to_string())
+                        .with_hint("fix note payload or path and retry"),
+                ),
+            }
+        } else {
+            let file_id = deterministic_file_id(normalized_path);
+            match note_service.create_note(
+                &self.vault_root,
+                &mut self.connection,
+                &file_id,
+                relative,
+                content,
+            ) {
+                Ok(result) => BridgeEnvelope::success(BridgeWriteAck {
+                    path: result.normalized_path,
+                    file_id: result.file_id,
+                    action: "created".to_string(),
+                }),
+                Err(source) => BridgeEnvelope::failure(
+                    BridgeError::with_code("bridge.note_put.create_failed", source.to_string())
+                        .with_hint("ensure vault path exists and target note path is valid"),
+                ),
+            }
+        }
+    }
+}
+
+fn deterministic_file_id(normalized_path: &str) -> String {
+    let hash = blake3::hash(normalized_path.as_bytes()).to_hex();
+    format!("f_{}", &hash[..16])
 }
 
 /// Bridge initialization failures.
@@ -328,5 +415,42 @@ mod tests {
         assert_eq!(value.front_matter.as_deref(), Some("status: draft"));
         assert_eq!(value.body, "# Alpha\ncontent");
         assert_eq!(value.headings_total, 1);
+    }
+
+    #[test]
+    fn bridge_kernel_note_put_creates_and_updates_notes() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let created = kernel.note_put("notes/a.md", "# A\nfirst");
+        assert!(created.ok);
+        assert_eq!(created.value.expect("created value").action, "created");
+
+        let created_note = kernel.note_get("notes/a.md");
+        assert!(created_note.ok);
+        assert!(
+            created_note
+                .value
+                .expect("created note")
+                .body
+                .contains("first")
+        );
+
+        let updated = kernel.note_put("notes/a.md", "# A\nsecond");
+        assert!(updated.ok);
+        assert_eq!(updated.value.expect("updated value").action, "updated");
+
+        let updated_note = kernel.note_get("notes/a.md");
+        assert!(updated_note.ok);
+        assert!(
+            updated_note
+                .value
+                .expect("updated note")
+                .body
+                .contains("second")
+        );
     }
 }
