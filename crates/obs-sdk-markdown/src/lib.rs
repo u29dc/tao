@@ -87,7 +87,11 @@ fn split_front_matter(raw: &str) -> Result<(Option<String>, String), MarkdownPar
         .enumerate()
         .skip(1)
         .find_map(|(index, line)| (*line == "---").then_some(index))
-        .ok_or(MarkdownParseError::UnclosedFrontMatter)?;
+        .unwrap_or(0);
+    if closing_index == 0 {
+        // Tolerate malformed front matter fences by treating the whole file as body.
+        return Ok((None, raw.to_string()));
+    }
 
     let front_matter = lines[1..closing_index].join("\n");
     let body = if closing_index + 1 < lines.len() {
@@ -192,10 +196,11 @@ mod tests {
             raw: "---\nkey: value".to_string(),
         };
 
-        let error = parser
+        let parsed = parser
             .parse(input)
-            .expect_err("unclosed front matter should fail");
-        assert_eq!(error, MarkdownParseError::UnclosedFrontMatter);
+            .expect("unclosed front matter should be tolerated");
+        assert_eq!(parsed.front_matter, None);
+        assert_eq!(parsed.body, "---\nkey: value");
     }
 
     #[test]

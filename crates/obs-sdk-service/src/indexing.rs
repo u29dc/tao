@@ -2731,6 +2731,41 @@ mod tests {
     }
 
     #[test]
+    fn malformed_front_matter_documents_do_not_break_indexing() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nstatus: [broken\n# A\n[[b]]",
+        )
+        .expect("write malformed a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let result = FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("full index should tolerate malformed front matter");
+        assert_eq!(result.indexed_files, 2);
+        assert_eq!(result.markdown_files, 2);
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let properties =
+            PropertiesRepository::list_for_file_with_path(&connection, &source_a.file_id)
+                .expect("list properties");
+        assert!(properties.is_empty());
+
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+            .expect("list outgoing links");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/b.md"));
+        assert!(!outgoing[0].is_unresolved);
+    }
+
+    #[test]
     fn incremental_apply_changes_reindexes_only_changed_markdown_file() {
         let temp = tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");

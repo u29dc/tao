@@ -642,3 +642,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [default property mapping layer added to normalize and merge tag/tags, alias/aliases, and cssclass/cssclasses into canonical list-based typed properties]
 - residual_risk: default mapping merge order follows YAML entry iteration and canonical list normalization; future compatibility checks may still be needed for full Obsidian plugin-specific property conventions
+
+- timestamp: 2026-03-03T17:17:04Z
+- session: session-2026-03-03-a
+- ticket: PROP-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-markdown/src/lib.rs, crates/obs-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [markdown parsing now tolerates unclosed front matter fences by treating content as body, and indexing tests verify malformed front matter does not crash indexing or link resolution]
+- residual_risk: tolerance currently prefers resilience over strict diagnostics, so malformed fence detection is not surfaced as an explicit runtime warning yet
