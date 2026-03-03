@@ -1,4 +1,8 @@
 # obs-tui
 
-Contract-only placeholder created by ARC-001.
-Implementation begins in INFRA-001 and later phase tickets.
+Terminal UI adapter over the Rust SDK stack.
+
+Current status (`TUI-001`):
+
+- startup route bootstrapped as `placeholder`
+- terminal launch output confirms active route

@@ -1,11 +1,11 @@
 {
   "plan_version": "2026-03-03",
   "manifest_path": "tickets.csv",
-  "phase": "phase5",
+  "phase": "phase6",
   "active_ticket": null,
-  "last_completed_ticket": "REL-006",
+  "last_completed_ticket": "TUI-001",
   "session_status": "running",
   "retry": {},
   "blockers": [],
-  "updated_at": "2026-03-03T20:12:44Z"
+  "updated_at": "2026-03-03T20:14:13Z"
 }

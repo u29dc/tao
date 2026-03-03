@@ -1222,3 +1222,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/obs-macos, cargo run -p obs-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
 - outcomes: [published v1.0.0-rc.1 acceptance report with dependency verification, command evidence, perf budget metrics, migration preflight envelope, and artifact checksums; corrected release runbook migration preflight package target from `obs` to `obs-cli`]
 - residual_risk: rc report confirms ad-hoc signing and does not include Developer ID notarization
+
+- timestamp: 2026-03-03T20:14:13Z
+- session: session-2026-03-03-a
+- ticket: TUI-001
+- action: done
+- evidence:
+  - files: [crates/obs-tui/src/main.rs, crates/obs-tui/README.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [replaced raw print stub with explicit `AppState` and `Route` model, defaulted startup route to `placeholder`, and added unit test asserting placeholder boot route contract]
+- residual_risk: startup remains non-interactive until route shell/keymap ticket
