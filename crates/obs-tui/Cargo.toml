@@ -14,6 +14,10 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 crossterm = "0.29.0"
-obs-sdk-service = { path = "../obs-sdk-service" }
+obs-sdk-bridge = { path = "../obs-sdk-bridge" }
 ratatui = "0.29.0"
+
+[dev-dependencies]
+tempfile = "3.26.0"

@@ -723,9 +723,11 @@ name = "obs-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "crossterm 0.29.0",
- "obs-sdk-service",
+ "obs-sdk-bridge",
  "ratatui",
+ "tempfile",
 ]
 
 [[package]]

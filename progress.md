@@ -1242,3 +1242,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [implemented alternate-screen TUI route shell with stable keymap-based route switching and quit handling; added command palette (`:`) with parsed `route <name>` and `quit` commands; added unit tests for keymap routing and palette parsing/flow]
 - residual_risk: route shell currently renders placeholders for notes/search/bases content pending integration tickets
+
+- timestamp: 2026-03-03T20:21:31Z
+- session: session-2026-03-03-a
+- ticket: TUI-003
+- action: done
+- evidence:
+  - files: [crates/obs-tui/src/main.rs, crates/obs-tui/Cargo.toml, crates/obs-tui/README.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [integrated notes route with SDK bridge-backed note list pagination and note viewer loading; added route-specific selection keymap (up/down/j/k/enter/r); added integration test that seeds notes through bridge writes and validates route selection/view rendering behavior]
+- residual_risk: notes route relies on bridge read envelopes and does not yet support inline editing in terminal

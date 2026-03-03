@@ -1,17 +1,32 @@
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel, BridgeNoteSummary, BridgeNoteView};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+
+#[derive(Debug, Parser)]
+#[command(name = "obs-tui", version, about = "obs terminal ui")]
+struct CliArgs {
+    /// Absolute vault root path for SDK-backed routes.
+    #[arg(long)]
+    vault_root: Option<PathBuf>,
+    /// SQLite database path for SDK-backed routes.
+    #[arg(long)]
+    db_path: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
@@ -37,11 +52,107 @@ impl Route {
                 "Placeholder route active. Use keymap or command palette to switch routes."
             }
             Self::Notes => {
-                "Notes route shell active. Note list/view integration arrives in TUI-003."
+                "Notes route active. Use up/down (or j/k) to select and enter to reload."
             }
             Self::Search => "Search route shell active. Search integration arrives in TUI-004.",
             Self::Bases => "Bases route shell active. Table integration arrives in TUI-005.",
         }
+    }
+}
+
+#[derive(Debug)]
+struct AppContext {
+    bridge: Option<BridgeKernel>,
+    startup_status: Option<String>,
+}
+
+impl AppContext {
+    fn from_args(args: &CliArgs) -> Self {
+        match (&args.vault_root, &args.db_path) {
+            (Some(vault_root), Some(db_path)) => match BridgeKernel::open(vault_root, db_path) {
+                Ok(bridge) => Self {
+                    bridge: Some(bridge),
+                    startup_status: Some(format!("bridge ready ({})", vault_root.display())),
+                },
+                Err(source) => Self {
+                    bridge: None,
+                    startup_status: Some(format!("bridge init failed: {source}")),
+                },
+            },
+            (None, None) => Self {
+                bridge: None,
+                startup_status: Some(
+                    "bridge disabled: pass --vault-root and --db-path for notes/search/bases"
+                        .to_string(),
+                ),
+            },
+            _ => Self {
+                bridge: None,
+                startup_status: Some(
+                    "bridge disabled: provide both --vault-root and --db-path".to_string(),
+                ),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn with_bridge(bridge: BridgeKernel) -> Self {
+        Self {
+            bridge: Some(bridge),
+            startup_status: None,
+        }
+    }
+
+    fn startup_status(&self) -> Option<&str> {
+        self.startup_status.as_deref()
+    }
+
+    fn load_notes(&self) -> std::result::Result<Vec<BridgeNoteSummary>, String> {
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            "notes route unavailable without --vault-root and --db-path".to_string()
+        })?;
+
+        let mut after_path: Option<String> = None;
+        let mut items = Vec::new();
+        loop {
+            let page =
+                expect_bridge_value(bridge.notes_list(after_path.as_deref(), 500), "notes.list")?;
+            after_path = page.next_cursor;
+            items.extend(page.items);
+            if after_path.is_none() {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    fn load_note_view(&self, normalized_path: &str) -> std::result::Result<BridgeNoteView, String> {
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            "note view unavailable without --vault-root and --db-path".to_string()
+        })?;
+        expect_bridge_value(bridge.note_get(normalized_path), "note.get")
+    }
+}
+
+fn expect_bridge_value<T>(
+    envelope: BridgeEnvelope<T>,
+    action: &str,
+) -> std::result::Result<T, String> {
+    if envelope.ok {
+        return envelope
+            .value
+            .ok_or_else(|| format!("{action} returned success without payload"));
+    }
+
+    match envelope.error {
+        Some(error) => {
+            let mut message = format!("{action} failed [{}]: {}", error.code, error.message);
+            if let Some(hint) = error.hint {
+                message.push_str(&format!("; hint: {hint}"));
+            }
+            Err(message)
+        }
+        None => Err(format!("{action} failed without an error payload")),
     }
 }
 
@@ -52,6 +163,9 @@ struct AppState {
     palette_open: bool,
     palette_input: String,
     should_quit: bool,
+    notes: Vec<BridgeNoteSummary>,
+    selected_note_index: usize,
+    selected_note_view: Option<BridgeNoteView>,
 }
 
 impl Default for AppState {
@@ -62,6 +176,9 @@ impl Default for AppState {
             palette_open: false,
             palette_input: String::new(),
             should_quit: false,
+            notes: Vec::new(),
+            selected_note_index: 0,
+            selected_note_view: None,
         }
     }
 }
@@ -73,9 +190,18 @@ enum PaletteCommand {
 }
 
 impl AppState {
-    fn switch_route(&mut self, route: Route) {
+    fn apply_startup_status(&mut self, context: &AppContext) {
+        if let Some(status) = context.startup_status() {
+            self.status = status.to_string();
+        }
+    }
+
+    fn switch_route(&mut self, route: Route, context: &AppContext) {
         self.route = route;
         self.status = format!("route switched to {}", route.as_str());
+        if route == Route::Notes {
+            self.refresh_notes(context);
+        }
     }
 
     fn open_palette(&mut self) {
@@ -89,9 +215,9 @@ impl AppState {
         self.palette_input.clear();
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    fn handle_key(&mut self, key: KeyEvent, context: &AppContext) {
         if self.palette_open {
-            self.handle_palette_key(key);
+            self.handle_palette_key(key, context);
             return;
         }
 
@@ -100,20 +226,34 @@ impl AppState {
                 self.should_quit = true;
                 self.status = "quit requested".to_string();
             }
-            KeyCode::Char('1') => self.switch_route(Route::Placeholder),
-            KeyCode::Char('2') => self.switch_route(Route::Notes),
-            KeyCode::Char('3') => self.switch_route(Route::Search),
-            KeyCode::Char('4') => self.switch_route(Route::Bases),
+            KeyCode::Char('1') => self.switch_route(Route::Placeholder, context),
+            KeyCode::Char('2') => self.switch_route(Route::Notes, context),
+            KeyCode::Char('3') => self.switch_route(Route::Search, context),
+            KeyCode::Char('4') => self.switch_route(Route::Bases, context),
             KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
                 self.status = "quit requested (ctrl-c)".to_string();
             }
+            _ => self.handle_route_key(key, context),
+        }
+    }
+
+    fn handle_route_key(&mut self, key: KeyEvent, context: &AppContext) {
+        if self.route != Route::Notes {
+            return;
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_note_selection(-1, context),
+            KeyCode::Down | KeyCode::Char('j') => self.move_note_selection(1, context),
+            KeyCode::Enter => self.reload_selected_note_view(context),
+            KeyCode::Char('r') => self.refresh_notes(context),
             _ => {}
         }
     }
 
-    fn handle_palette_key(&mut self, key: KeyEvent) {
+    fn handle_palette_key(&mut self, key: KeyEvent, context: &AppContext) {
         match key.code {
             KeyCode::Esc => {
                 self.close_palette();
@@ -126,7 +266,7 @@ impl AppState {
                 let raw = self.palette_input.trim().to_string();
                 match parse_palette_command(&raw) {
                     Ok(PaletteCommand::SwitchRoute(route)) => {
-                        self.switch_route(route);
+                        self.switch_route(route, context);
                     }
                     Ok(PaletteCommand::Quit) => {
                         self.should_quit = true;
@@ -142,6 +282,69 @@ impl AppState {
                 self.palette_input.push(ch);
             }
             _ => {}
+        }
+    }
+
+    fn refresh_notes(&mut self, context: &AppContext) {
+        match context.load_notes() {
+            Ok(notes) => {
+                self.notes = notes;
+                if self.notes.is_empty() {
+                    self.selected_note_index = 0;
+                    self.selected_note_view = None;
+                    self.status = "notes route active: no indexed markdown notes".to_string();
+                    return;
+                }
+
+                if self.selected_note_index >= self.notes.len() {
+                    self.selected_note_index = 0;
+                }
+                self.reload_selected_note_view(context);
+                self.status = format!("notes loaded: {}", self.notes.len());
+            }
+            Err(message) => {
+                self.notes.clear();
+                self.selected_note_index = 0;
+                self.selected_note_view = None;
+                self.status = format!("notes load error: {message}");
+            }
+        }
+    }
+
+    fn reload_selected_note_view(&mut self, context: &AppContext) {
+        let Some(path) = self.selected_note_path() else {
+            self.selected_note_view = None;
+            return;
+        };
+
+        match context.load_note_view(path) {
+            Ok(view) => {
+                self.selected_note_view = Some(view);
+            }
+            Err(message) => {
+                self.selected_note_view = None;
+                self.status = format!("note load error: {message}");
+            }
+        }
+    }
+
+    fn selected_note_path(&self) -> Option<&str> {
+        self.notes
+            .get(self.selected_note_index)
+            .map(|note| note.path.as_str())
+    }
+
+    fn move_note_selection(&mut self, delta: i32, context: &AppContext) {
+        if self.notes.is_empty() {
+            return;
+        }
+        let max_index = i32::try_from(self.notes.len().saturating_sub(1)).unwrap_or(i32::MAX);
+        let current = i32::try_from(self.selected_note_index).unwrap_or(0);
+        let next = (current + delta).clamp(0, max_index);
+        let next_index = usize::try_from(next).unwrap_or(0);
+        if next_index != self.selected_note_index {
+            self.selected_note_index = next_index;
+            self.reload_selected_note_view(context);
         }
     }
 }
@@ -189,10 +392,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
     .block(Block::default().borders(Borders::ALL).title("Route Shell"));
     frame.render_widget(header, chunks[0]);
 
-    let body = Paragraph::new(app.route.help_text())
-        .block(Block::default().borders(Borders::ALL).title("Route"))
-        .wrap(ratatui::widgets::Wrap { trim: true });
-    frame.render_widget(body, chunks[1]);
+    render_route_body(frame, chunks[1], app);
 
     let footer = Paragraph::new(app.status.as_str())
         .block(Block::default().borders(Borders::ALL).title("Status"));
@@ -208,6 +408,61 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
         );
         frame.render_widget(palette, popup);
     }
+}
+
+fn render_route_body(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    match app.route {
+        Route::Notes => render_notes_route(frame, area, app),
+        _ => {
+            let body = Paragraph::new(app.route.help_text())
+                .block(Block::default().borders(Borders::ALL).title("Route"))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(body, area);
+        }
+    }
+}
+
+fn render_notes_route(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    let list_items = app
+        .notes
+        .iter()
+        .map(|note| {
+            let updated = note.updated_at.as_deref().unwrap_or("unknown");
+            ListItem::new(Line::from(format!("{}  [{updated}]", note.path)))
+        })
+        .collect::<Vec<_>>();
+
+    let list_title = format!("Notes ({})", app.notes.len());
+    let list = List::new(list_items)
+        .block(Block::default().borders(Borders::ALL).title(list_title))
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let mut list_state = ListState::default();
+    if !app.notes.is_empty() {
+        list_state.select(Some(app.selected_note_index));
+    }
+    frame.render_stateful_widget(list, columns[0], &mut list_state);
+
+    let note_text = if let Some(view) = &app.selected_note_view {
+        format!(
+            "path: {}\ntitle: {}\nheadings: {}\n\n{}",
+            view.path, view.title, view.headings_total, view.body
+        )
+    } else if app.notes.is_empty() {
+        "No indexed notes available. Run vault reindex and reopen notes route.".to_string()
+    } else {
+        "No note selected.".to_string()
+    };
+
+    let viewer = Paragraph::new(note_text)
+        .block(Block::default().borders(Borders::ALL).title("Viewer"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(viewer, columns[1]);
 }
 
 fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> Rect {
@@ -246,8 +501,9 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-fn run(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+fn run(mut terminal: Terminal<CrosstermBackend<Stdout>>, context: AppContext) -> Result<()> {
     let mut app = AppState::default();
+    app.apply_startup_status(&context);
 
     loop {
         terminal.draw(|frame| render(frame, &app))?;
@@ -259,7 +515,7 @@ fn run(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            app.handle_key(key);
+            app.handle_key(key, &context);
         }
     }
 
@@ -268,8 +524,10 @@ fn run(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let args = CliArgs::parse();
+    let context = AppContext::from_args(&args);
     let terminal = init_terminal()?;
-    if let Err(source) = run(terminal) {
+    if let Err(source) = run(terminal, context) {
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         return Err(source);
@@ -279,12 +537,26 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{
-        AppState, KeyCode, KeyEvent, KeyModifiers, PaletteCommand, Route, parse_palette_command,
+        AppContext, AppState, BridgeEnvelope, BridgeKernel, KeyCode, KeyEvent, KeyModifiers,
+        PaletteCommand, Route, parse_palette_command,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn assert_bridge_ok<T>(envelope: BridgeEnvelope<T>) -> T {
+        assert!(
+            envelope.ok,
+            "bridge envelope expected ok=true, got error: {:?}",
+            envelope.error
+        );
+        envelope
+            .value
+            .expect("bridge envelope should contain value when ok=true")
     }
 
     #[test]
@@ -296,14 +568,18 @@ mod tests {
 
     #[test]
     fn keymap_switches_routes() {
+        let context = AppContext::from_args(&super::CliArgs {
+            vault_root: None,
+            db_path: None,
+        });
         let mut app = AppState::default();
-        app.handle_key(key(KeyCode::Char('2')));
+        app.handle_key(key(KeyCode::Char('2')), &context);
         assert_eq!(app.route, Route::Notes);
-        app.handle_key(key(KeyCode::Char('3')));
+        app.handle_key(key(KeyCode::Char('3')), &context);
         assert_eq!(app.route, Route::Search);
-        app.handle_key(key(KeyCode::Char('4')));
+        app.handle_key(key(KeyCode::Char('4')), &context);
         assert_eq!(app.route, Route::Bases);
-        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Char('1')), &context);
         assert_eq!(app.route, Route::Placeholder);
     }
 
@@ -328,13 +604,52 @@ mod tests {
 
     #[test]
     fn palette_route_switch_flow_updates_route() {
+        let context = AppContext::from_args(&super::CliArgs {
+            vault_root: None,
+            db_path: None,
+        });
         let mut app = AppState::default();
-        app.handle_key(key(KeyCode::Char(':')));
+        app.handle_key(key(KeyCode::Char(':')), &context);
         for ch in "route search".chars() {
-            app.handle_key(key(KeyCode::Char(ch)));
+            app.handle_key(key(KeyCode::Char(ch)), &context);
         }
-        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Enter), &context);
         assert_eq!(app.route, Route::Search);
         assert!(!app.palette_open);
+    }
+
+    #[test]
+    fn notes_route_loads_note_list_and_view_content() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        let db_path = tempdir.path().join("obs.sqlite");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut setup_kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let _ = assert_bridge_ok(setup_kernel.note_put("notes/alpha.md", "# Alpha\n\nBody A"));
+        let _ = assert_bridge_ok(setup_kernel.note_put("notes/beta.md", "# Beta\n\nBody B"));
+
+        let context = AppContext::with_bridge(setup_kernel);
+        let mut app = AppState::default();
+        app.switch_route(Route::Notes, &context);
+
+        assert_eq!(app.route, Route::Notes);
+        assert_eq!(app.notes.len(), 2);
+        assert_eq!(app.notes[0].path, "notes/alpha.md");
+        let view = app
+            .selected_note_view
+            .as_ref()
+            .expect("selected note view should be loaded");
+        assert_eq!(view.path, "notes/alpha.md");
+        assert!(view.body.contains("Body A"));
+
+        app.handle_key(key(KeyCode::Down), &context);
+        assert_eq!(app.selected_note_index, 1);
+        let second = app
+            .selected_note_view
+            .as_ref()
+            .expect("second selected note view should be loaded");
+        assert_eq!(second.path, "notes/beta.md");
+        assert!(second.body.contains("Body B"));
     }
 }
