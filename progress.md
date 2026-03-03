@@ -232,3 +232,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [path canonicalization service implemented with unicode normalization, symlink resolution, case-policy keys, and vault-boundary checks]
 - residual_risk: canonicalization currently requires on-disk path existence and does not normalize non-existent create-target paths yet
+
+- timestamp: 2026-03-03T16:52:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-002
+- action: done
+- evidence:
+  - files: [Cargo.toml, Cargo.lock, crates/obs-sdk-vault/Cargo.toml, crates/obs-sdk-vault/src/lib.rs, crates/obs-sdk-vault/src/path.rs, crates/obs-sdk-vault/src/scan.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [full vault scan service implemented with deterministic sorted manifest entries and stable canonical path metadata]
+- residual_risk: scan currently includes all files; markdown-only filtering is deferred to ingest pipeline tickets

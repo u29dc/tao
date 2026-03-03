@@ -35,6 +35,7 @@ rusqlite = { version = "0.37.0", features = ["bundled"] }
 notify = "8.2.0"
 uuid = { version = "1.16.0", features = ["v4", "serde"] }
 unicode-normalization = "0.1.25"
+walkdir = "2.5.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
