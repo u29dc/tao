@@ -103,3 +103,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [swift rust boundary dto and versioning rules documented]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:31:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-004
+- action: done
+- evidence:
+  - files: [docs/architecture/index-event-model.md, tickets.csv, run-state.json]
+  - commands: [write index event model spec]
+  - outcomes: [typed event kinds envelope and delivery rules documented]
+- residual_risk: none
+
