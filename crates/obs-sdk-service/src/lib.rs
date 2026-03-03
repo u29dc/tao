@@ -6,9 +6,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod config;
 mod import_export;
 mod tracing_hooks;
 
+pub use config::{SdkConfig, SdkConfigError, SdkConfigLoader, SdkConfigOverrides};
 pub use import_export::{
     FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
     TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,

@@ -462,3 +462,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [service-level tracing hooks added with structured operation/correlation context and traced wrappers for note/property/reconcile services]
 - residual_risk: hooks currently wrap service entrypoints but do not yet enforce context propagation across all nested internal calls
+
+- timestamp: 2026-03-03T16:32:42Z
+- session: session-2026-03-03-a
+- ticket: SDK-015
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/config.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [sdk config loader implemented with deterministic override/env/default precedence and validation tests for vault, case policy, and bool parsing]
+- residual_risk: config currently targets core runtime paths and tracing toggle; additional deployment-specific options may be added as SDK surface expands
