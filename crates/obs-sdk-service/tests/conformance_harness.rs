@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use obs_sdk_service::{
     BacklinkGraphService, FullIndexService, HealthSnapshotService, WatcherStatus,
 };
-use obs_sdk_storage::{FilesRepository, run_migrations};
+use obs_sdk_storage::{FilesRepository, PropertiesRepository, run_migrations};
 use obs_sdk_vault::CasePolicy;
 use rusqlite::Connection;
 
@@ -155,4 +155,26 @@ fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
                 && raw == "apple"
                 && resolved.as_deref() == Some("notes/apple.md"))
     );
+}
+
+#[test]
+fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
+    let fixture = copy_fixture_vault();
+    let db_path = fixture.path().join("obs.sqlite");
+
+    let mut connection = Connection::open(db_path).expect("open sqlite");
+    run_migrations(&mut connection).expect("run migrations");
+
+    let result = FullIndexService::default()
+        .rebuild(fixture.path(), &mut connection, CasePolicy::Sensitive)
+        .expect("rebuild fixture vault with malformed front matter");
+    assert!(result.markdown_files >= 7);
+
+    let malformed =
+        FilesRepository::get_by_normalized_path(&connection, "notes/malformed-frontmatter.md")
+            .expect("lookup malformed note")
+            .expect("malformed note should still be indexed as a file");
+    let properties = PropertiesRepository::list_for_file_with_path(&connection, &malformed.file_id)
+        .expect("query properties for malformed note");
+    assert!(properties.is_empty());
 }
