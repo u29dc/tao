@@ -1122,3 +1122,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test --package-path apps/obs-macos, bun run util:check]
 - outcomes: [added explicit Swift smoke test `app_smoke_launch_open_navigate_edit_flow` that validates launch health, note open, list/navigation across notes, edit via bridge write, and readback correctness in one end-to-end scenario]
 - residual_risk: smoke coverage currently validates bridge-backed UI workflows and not visual-level AppKit rendering assertions, so future UI automation can add screenshot/state verification
+
+- timestamp: 2026-03-03T19:46:20Z
+- session: session-2026-03-03-a
+- ticket: QA-008
+- action: done
+- evidence:
+  - files: [crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-cli, bun run util:check]
+- outcomes: [added CLI contract coverage that exercises every grouped `--json` command route (`vault`, `note`, `links`, `properties`, `bases`, `search`) and validates stable envelope schema (`ok/value/error`) plus payload shape (`command/summary/args`) for each command]
+- residual_risk: tests currently validate successful envelopes; explicit JSON error-envelope behavior is pending future CLI error contract hardening

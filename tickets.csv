@@ -109,7 +109,7 @@
 "QA-005","Add bases parser and table tests","qa","phase4","BASE-008|QA-001","done","P2","codex","3","0","","table outputs match expected snapshots"
 "QA-006","Add watcher/reconcile chaos tests","qa","phase5","IDX-006","done","P2","codex","3","0","","simulated burst changes remain consistent"
 "QA-007","Add Swift UI smoke tests","qa","phase5","APP-012","done","P2","codex","3","0","","launch/open/navigate/edit smoke suite passes"
-"QA-008","Add CLI JSON contract tests","qa","phase5","CLI-006","todo","P2","unassigned","3","0","","schema validations for all `--json` commands"
+"QA-008","Add CLI JSON contract tests","qa","phase5","CLI-006","done","P2","codex","3","0","","schema validations for all `--json` commands"
 "PERF-001","Capture baseline benchmarks on 1k vault","perf","phase4","INFRA-007","done","P2","codex","3","0","","baseline report committed"
 "PERF-002","Capture baseline benchmarks on 5k vault","perf","phase4","PERF-001","done","P2","codex","3","0","","report includes p50/p95 latencies"
 "PERF-003","Capture baseline benchmarks on 10k vault","perf","phase4","PERF-002","done","P2","codex","3","0","","report includes memory and startup metrics"

@@ -860,8 +860,11 @@ fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{Cli, dispatch, render_output};
     use clap::{CommandFactory, Parser};
+    use serde_json::Value as JsonValue;
 
     #[test]
     fn cli_help_contains_grouped_command_names() {
@@ -911,5 +914,289 @@ mod tests {
             Some("vault.open")
         );
         assert!(value.get("error").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn json_contract_is_stable_for_all_grouped_json_commands() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        let notes_dir = vault_root.join("notes");
+        let projects_dir = notes_dir.join("projects");
+        let views_dir = vault_root.join("views");
+        let db_path = tempdir.path().join("obs.sqlite");
+
+        fs::create_dir_all(&projects_dir).expect("create projects dir");
+        fs::create_dir_all(&views_dir).expect("create views dir");
+        fs::write(
+            projects_dir.join("project-a.md"),
+            "---\nstatus: active\npriority: 4\n---\n# Project A\n",
+        )
+        .expect("write project-a note");
+        fs::write(
+            projects_dir.join("project-b.md"),
+            "---\nstatus: paused\npriority: 2\n---\n# Project B\n",
+        )
+        .expect("write project-b note");
+        fs::write(notes_dir.join("alpha.md"), "# Alpha\n[[project-a]]\n")
+            .expect("write alpha note");
+        fs::write(
+            views_dir.join("projects.base"),
+            "views:\n  - name: ActiveProjects\n    type: table\n    source: notes/projects\n    filters:\n      - key: status\n        op: eq\n        value: active\n    sorts:\n      - key: priority\n        direction: desc\n    columns:\n      - title\n      - status\n      - priority\n",
+        )
+        .expect("write projects base");
+
+        let vault_root_string = vault_root.to_string_lossy().to_string();
+        let db_path_string = db_path.to_string_lossy().to_string();
+
+        let scenarios = [
+            (
+                "vault.open",
+                vec![
+                    "obs",
+                    "--json",
+                    "vault",
+                    "open",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "vault.stats",
+                vec![
+                    "obs",
+                    "--json",
+                    "vault",
+                    "stats",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "vault.reindex",
+                vec![
+                    "obs",
+                    "--json",
+                    "vault",
+                    "reindex",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "note.get",
+                vec![
+                    "obs",
+                    "--json",
+                    "note",
+                    "get",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/alpha.md",
+                ],
+            ),
+            (
+                "note.list",
+                vec![
+                    "obs",
+                    "--json",
+                    "note",
+                    "list",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "note.put",
+                vec![
+                    "obs",
+                    "--json",
+                    "note",
+                    "put",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/new.md",
+                    "--content",
+                    "# New\nbody",
+                ],
+            ),
+            (
+                "links.outgoing",
+                vec![
+                    "obs",
+                    "--json",
+                    "links",
+                    "outgoing",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/alpha.md",
+                ],
+            ),
+            (
+                "links.backlinks",
+                vec![
+                    "obs",
+                    "--json",
+                    "links",
+                    "backlinks",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/projects/project-a.md",
+                ],
+            ),
+            (
+                "properties.get",
+                vec![
+                    "obs",
+                    "--json",
+                    "properties",
+                    "get",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/projects/project-a.md",
+                ],
+            ),
+            (
+                "properties.set",
+                vec![
+                    "obs",
+                    "--json",
+                    "properties",
+                    "set",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path",
+                    "notes/projects/project-a.md",
+                    "--key",
+                    "status",
+                    "--value",
+                    "active",
+                ],
+            ),
+            (
+                "bases.list",
+                vec![
+                    "obs",
+                    "--json",
+                    "bases",
+                    "list",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "bases.view",
+                vec![
+                    "obs",
+                    "--json",
+                    "bases",
+                    "view",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--path-or-id",
+                    "views/projects.base",
+                    "--view-name",
+                    "ActiveProjects",
+                    "--page",
+                    "1",
+                    "--page-size",
+                    "10",
+                ],
+            ),
+            (
+                "search.query",
+                vec![
+                    "obs",
+                    "--json",
+                    "search",
+                    "query",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                    "--query",
+                    "project",
+                    "--limit",
+                    "10",
+                    "--offset",
+                    "0",
+                ],
+            ),
+            (
+                "vault.reconcile",
+                vec![
+                    "obs",
+                    "--json",
+                    "vault",
+                    "reconcile",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+        ];
+
+        for (expected_command, args) in scenarios {
+            let cli = Cli::parse_from(args);
+            let result = dispatch(cli.command).expect("dispatch json contract scenario");
+            let output = render_output(cli.json, &result).expect("render json output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse json output");
+            assert_json_contract(&envelope, expected_command);
+        }
+    }
+
+    fn assert_json_contract(value: &JsonValue, expected_command: &str) {
+        let envelope = value.as_object().expect("envelope must be object");
+        assert_eq!(envelope.len(), 3);
+        assert!(envelope.contains_key("ok"));
+        assert!(envelope.contains_key("value"));
+        assert!(envelope.contains_key("error"));
+        assert_eq!(
+            envelope.get("ok").and_then(JsonValue::as_bool),
+            Some(true),
+            "expected ok=true for command {expected_command}",
+        );
+        assert!(envelope.get("error").is_some_and(JsonValue::is_null));
+
+        let payload = envelope
+            .get("value")
+            .and_then(JsonValue::as_object)
+            .expect("value payload must be object");
+        assert_eq!(payload.len(), 3);
+        assert_eq!(
+            payload.get("command").and_then(JsonValue::as_str),
+            Some(expected_command)
+        );
+        assert!(payload.get("summary").is_some_and(JsonValue::is_string));
+        assert!(payload.get("args").is_some_and(JsonValue::is_object));
     }
 }
