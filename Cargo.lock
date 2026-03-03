@@ -405,6 +405,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "obs-sdk-core",
+ "obs-sdk-links",
  "obs-sdk-markdown",
  "obs-sdk-properties",
  "obs-sdk-storage",

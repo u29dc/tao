@@ -512,3 +512,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [index state repository implemented with checkpoint/reconcile key persistence and deterministic listing tests]
 - residual_risk: repository currently stores opaque JSON payloads; schema-level key/value contracts are enforced in higher-level index services
+
+- timestamp: 2026-03-03T16:42:57Z
+- session: session-2026-03-03-a
+- ticket: IDX-001
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-service/Cargo.toml, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [full indexing workflow implemented to rebuild files/links/properties/bases tables and persist index state summary in one transaction]
+- residual_risk: v1 full rebuild currently reparses all files and clears caches; incremental/coalesced indexing optimizations are tracked by IDX-002 and IDX-003

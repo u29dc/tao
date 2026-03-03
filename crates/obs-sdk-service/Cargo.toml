@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 obs-sdk-core = { path = "../obs-sdk-core" }
+obs-sdk-links = { path = "../obs-sdk-links" }
 obs-sdk-markdown = { path = "../obs-sdk-markdown" }
 obs-sdk-properties = { path = "../obs-sdk-properties" }
 obs-sdk-storage = { path = "../obs-sdk-storage" }

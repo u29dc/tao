@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 mod config;
 mod feature_flags;
 mod import_export;
+mod indexing;
 mod tracing_hooks;
 
 pub use config::{SdkConfig, SdkConfigError, SdkConfigLoader, SdkConfigOverrides};
@@ -18,6 +19,7 @@ pub use import_export::{
     TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
+pub use indexing::{FullIndexError, FullIndexResult, FullIndexService};
 pub use tracing_hooks::ServiceTraceContext;
 
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
