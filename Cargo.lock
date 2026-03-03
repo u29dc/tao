@@ -361,6 +361,8 @@ dependencies = [
  "anyhow",
  "clap",
  "obs-sdk-service",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

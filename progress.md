@@ -952,3 +952,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-cli, cargo run -p obs-cli -- --help, bun run util:check]
   - outcomes: [replaced CLI placeholder with grouped command tree (`vault`, `note`, `links`, `properties`, `bases`, `search`) and scaffolded typed subcommand argument structs with placeholder dispatch handlers; added CLI help test asserting grouped command presence]
 - residual_risk: scaffold handlers currently print placeholder output, so JSON envelope and SDK-backed command execution are implemented in subsequent CLI tickets
+
+- timestamp: 2026-03-03T18:58:39Z
+- session: session-2026-03-03-a
+- ticket: CLI-002
+- action: done
+- evidence:
+  - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-cli, cargo run -p obs-cli -- --json vault open --vault-root /tmp/vault --db-path /tmp/obs.sqlite, bun run util:check]
+  - outcomes: [added global `--json` flag with single-envelope stdout output (`ok/value/error`) for all scaffolded commands, refactored CLI dispatch to structured command results, and added tests covering grouped help + envelope JSON shape]
+- residual_risk: current envelope `error` branch is not exercised by command execution yet because handlers are still placeholders pending SDK-backed wrappers

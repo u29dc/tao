@@ -1,9 +1,16 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use serde::Serialize;
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Parser)]
 #[command(name = "obs", version, about = "obs cli")]
 struct Cli {
+    /// Emit one JSON envelope to stdout.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -94,7 +101,7 @@ enum SearchCommands {
     Query(SearchQueryArgs),
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct VaultPathArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -104,7 +111,7 @@ struct VaultPathArgs {
     db_path: String,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct NotePathArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -117,7 +124,7 @@ struct NotePathArgs {
     path: String,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct NotePutArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -133,7 +140,7 @@ struct NotePutArgs {
     content: String,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct PropertySetArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -152,7 +159,7 @@ struct PropertySetArgs {
     value: String,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct BaseViewArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -174,7 +181,7 @@ struct BaseViewArgs {
     page_size: u32,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Serialize)]
 struct SearchQueryArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -193,9 +200,48 @@ struct SearchQueryArgs {
     offset: u32,
 }
 
+#[derive(Debug, Serialize)]
+struct CommandResult {
+    command: String,
+    summary: String,
+    args: JsonValue,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonEnvelope<T: Serialize> {
+    ok: bool,
+    value: Option<T>,
+    error: Option<JsonError>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonError {
+    code: String,
+    message: String,
+    hint: Option<String>,
+    context: BTreeMap<String, String>,
+}
+
+impl<T: Serialize> JsonEnvelope<T> {
+    fn success(value: T) -> Self {
+        Self {
+            ok: true,
+            value: Some(value),
+            error: None,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    let result = dispatch(cli.command)?;
+    let output = render_output(cli.json, &result)?;
+    println!("{output}");
+    Ok(())
+}
+
+fn dispatch(command: Commands) -> Result<CommandResult> {
+    match command {
         Commands::Vault { command } => handle_vault(command),
         Commands::Note { command } => handle_note(command),
         Commands::Links { command } => handle_links(command),
@@ -205,60 +251,114 @@ fn main() -> Result<()> {
     }
 }
 
-fn handle_vault(command: VaultCommands) -> Result<()> {
-    match command {
-        VaultCommands::Open(args) => println!("not implemented: vault open {:?}", args),
-        VaultCommands::Stats(args) => println!("not implemented: vault stats {:?}", args),
-        VaultCommands::Reindex(args) => println!("not implemented: vault reindex {:?}", args),
-        VaultCommands::Reconcile(args) => println!("not implemented: vault reconcile {:?}", args),
+fn render_output(json: bool, result: &CommandResult) -> Result<String> {
+    if json {
+        Ok(serde_json::to_string(&JsonEnvelope::success(result))?)
+    } else {
+        Ok(result.summary.clone())
     }
-    Ok(())
 }
 
-fn handle_note(command: NoteCommands) -> Result<()> {
+fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
     match command {
-        NoteCommands::Get(args) => println!("not implemented: note get {:?}", args),
-        NoteCommands::Put(args) => println!("not implemented: note put {:?}", args),
-        NoteCommands::List(args) => println!("not implemented: note list {:?}", args),
+        VaultCommands::Open(args) => {
+            placeholder_result("vault.open", "vault open is not implemented yet", args)
+        }
+        VaultCommands::Stats(args) => {
+            placeholder_result("vault.stats", "vault stats is not implemented yet", args)
+        }
+        VaultCommands::Reindex(args) => placeholder_result(
+            "vault.reindex",
+            "vault reindex is not implemented yet",
+            args,
+        ),
+        VaultCommands::Reconcile(args) => placeholder_result(
+            "vault.reconcile",
+            "vault reconcile is not implemented yet",
+            args,
+        ),
     }
-    Ok(())
 }
 
-fn handle_links(command: LinksCommands) -> Result<()> {
+fn handle_note(command: NoteCommands) -> Result<CommandResult> {
     match command {
-        LinksCommands::Outgoing(args) => println!("not implemented: links outgoing {:?}", args),
-        LinksCommands::Backlinks(args) => println!("not implemented: links backlinks {:?}", args),
+        NoteCommands::Get(args) => {
+            placeholder_result("note.get", "note get is not implemented yet", args)
+        }
+        NoteCommands::Put(args) => {
+            placeholder_result("note.put", "note put is not implemented yet", args)
+        }
+        NoteCommands::List(args) => {
+            placeholder_result("note.list", "note list is not implemented yet", args)
+        }
     }
-    Ok(())
 }
 
-fn handle_properties(command: PropertiesCommands) -> Result<()> {
+fn handle_links(command: LinksCommands) -> Result<CommandResult> {
     match command {
-        PropertiesCommands::Get(args) => println!("not implemented: properties get {:?}", args),
-        PropertiesCommands::Set(args) => println!("not implemented: properties set {:?}", args),
+        LinksCommands::Outgoing(args) => placeholder_result(
+            "links.outgoing",
+            "links outgoing is not implemented yet",
+            args,
+        ),
+        LinksCommands::Backlinks(args) => placeholder_result(
+            "links.backlinks",
+            "links backlinks is not implemented yet",
+            args,
+        ),
     }
-    Ok(())
 }
 
-fn handle_bases(command: BasesCommands) -> Result<()> {
+fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
     match command {
-        BasesCommands::List(args) => println!("not implemented: bases list {:?}", args),
-        BasesCommands::View(args) => println!("not implemented: bases view {:?}", args),
+        PropertiesCommands::Get(args) => placeholder_result(
+            "properties.get",
+            "properties get is not implemented yet",
+            args,
+        ),
+        PropertiesCommands::Set(args) => placeholder_result(
+            "properties.set",
+            "properties set is not implemented yet",
+            args,
+        ),
     }
-    Ok(())
 }
 
-fn handle_search(command: SearchCommands) -> Result<()> {
+fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
     match command {
-        SearchCommands::Query(args) => println!("not implemented: search query {:?}", args),
+        BasesCommands::List(args) => {
+            placeholder_result("bases.list", "bases list is not implemented yet", args)
+        }
+        BasesCommands::View(args) => {
+            placeholder_result("bases.view", "bases view is not implemented yet", args)
+        }
     }
-    Ok(())
+}
+
+fn handle_search(command: SearchCommands) -> Result<CommandResult> {
+    match command {
+        SearchCommands::Query(args) => {
+            placeholder_result("search.query", "search query is not implemented yet", args)
+        }
+    }
+}
+
+fn placeholder_result<A: Serialize>(
+    command: &str,
+    summary: &str,
+    args: A,
+) -> Result<CommandResult> {
+    Ok(CommandResult {
+        command: command.to_string(),
+        summary: summary.to_string(),
+        args: serde_json::to_value(args)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
-    use clap::CommandFactory;
+    use super::{Cli, dispatch, render_output};
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_help_contains_grouped_command_names() {
@@ -275,5 +375,35 @@ mod tests {
         assert!(rendered.contains("properties"));
         assert!(rendered.contains("bases"));
         assert!(rendered.contains("search"));
+    }
+
+    #[test]
+    fn json_output_is_one_envelope_object() {
+        let cli = Cli::parse_from([
+            "obs",
+            "--json",
+            "vault",
+            "open",
+            "--vault-root",
+            "/tmp/vault",
+            "--db-path",
+            "/tmp/obs.sqlite",
+        ]);
+        let result = dispatch(cli.command).expect("dispatch");
+        let output = render_output(cli.json, &result).expect("render output");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("parse output");
+
+        assert_eq!(
+            value.get("ok").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value
+                .get("value")
+                .and_then(|raw| raw.get("command"))
+                .and_then(serde_json::Value::as_str),
+            Some("vault.open")
+        );
+        assert!(value.get("error").is_some_and(serde_json::Value::is_null));
     }
 }
