@@ -1372,3 +1372,13 @@ Append-only execution log for autonomous runs.
   - commands: [add one-word cleanup script and wire util:clean task]
   - outcomes: [deterministic cleanup script added for cargo/swift artifacts, dist output, and legacy install dirs]
 - residual_risk: none
+
+- timestamp: 2026-03-03T23:36:30Z
+- session: session-2026-03-03-b
+- ticket: CLEAN-002
+- action: done
+- evidence:
+  - files: [plan/tickets.csv, plan/run-state.json]
+  - commands: [bun run util:clean, bun run util:check, swift test --package-path apps/tao-macos]
+  - outcomes: [cold-cache cleanup completed, rust quality gate passed, release artifacts rebuilt, swift package tests passed]
+- residual_risk: cargo audit reports allowed advisories inherited via ratatui dependencies (paste unmaintained, lru unsound advisory); no direct workspace blocker under current allow policy
