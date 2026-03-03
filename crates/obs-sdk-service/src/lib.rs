@@ -110,6 +110,64 @@ fn is_markdown_file(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
+/// Coordinates write operations through typed SDK storage transactions.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SdkTransactionCoordinator;
+
+impl SdkTransactionCoordinator {
+    /// Insert one file metadata row in a typed transaction.
+    pub fn insert_file_metadata(
+        &self,
+        connection: &mut Connection,
+        record: &FileRecordInput,
+    ) -> Result<(), SdkTransactionError> {
+        with_transaction(connection, |transaction| {
+            transaction.files_insert(record)?;
+            Ok(())
+        })
+        .map_err(|source| SdkTransactionError::Transaction { source })
+    }
+
+    /// Delete one file metadata row in a typed transaction.
+    pub fn delete_file_metadata(
+        &self,
+        connection: &mut Connection,
+        file_id: &str,
+    ) -> Result<bool, SdkTransactionError> {
+        with_transaction(connection, |transaction| {
+            transaction.files_delete_by_id(file_id)
+        })
+        .map_err(|source| SdkTransactionError::Transaction { source })
+    }
+
+    /// Replace one file metadata row atomically in a typed transaction.
+    pub fn replace_file_metadata(
+        &self,
+        connection: &mut Connection,
+        file_id: &str,
+        replacement: &FileRecordInput,
+    ) -> Result<(), SdkTransactionError> {
+        with_transaction(connection, |transaction| {
+            let _ = transaction.files_delete_by_id(file_id)?;
+            transaction.files_insert(replacement)?;
+            Ok(())
+        })
+        .map_err(|source| SdkTransactionError::Transaction { source })
+    }
+}
+
+/// Errors returned by SDK transaction coordination.
+#[derive(Debug, Error)]
+pub enum SdkTransactionError {
+    /// Typed storage transaction failed.
+    #[error("sdk transaction coordination failed: {source}")]
+    Transaction {
+        /// Transaction error details.
+        #[source]
+        source: StorageTransactionError,
+    },
+}
+
 /// Service wrapper for storage writes executed inside typed transactions.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StorageWriteService;
@@ -121,23 +179,21 @@ impl StorageWriteService {
         connection: &mut Connection,
         record: &FileRecordInput,
     ) -> Result<(), StorageWriteError> {
-        with_transaction(connection, |transaction| {
-            transaction.files_insert(record)?;
-            Ok(())
-        })
-        .map_err(|source| StorageWriteError::Transaction { source })
+        SdkTransactionCoordinator
+            .insert_file_metadata(connection, record)
+            .map_err(|source| StorageWriteError::Coordinator { source })
     }
 }
 
 /// Errors returned by service-layer storage writes.
 #[derive(Debug, Error)]
 pub enum StorageWriteError {
-    /// Typed storage transaction failed.
-    #[error("storage write transaction failed: {source}")]
-    Transaction {
-        /// Transaction error details.
+    /// SDK transaction coordinator failed.
+    #[error("storage write coordinator failed: {source}")]
+    Coordinator {
+        /// Coordinator error details.
         #[source]
-        source: StorageTransactionError,
+        source: SdkTransactionError,
     },
 }
 
@@ -195,7 +251,27 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{CasePolicy, MarkdownIngestPipeline, StorageWriteService};
+    use super::{
+        CasePolicy, MarkdownIngestPipeline, SdkTransactionCoordinator, StorageWriteService,
+    };
+
+    fn file_record(
+        file_id: &str,
+        normalized_path: &str,
+        match_key: &str,
+        absolute_path: &str,
+    ) -> FileRecordInput {
+        FileRecordInput {
+            file_id: file_id.to_string(),
+            normalized_path: normalized_path.to_string(),
+            match_key: match_key.to_string(),
+            absolute_path: absolute_path.to_string(),
+            size_bytes: 10,
+            modified_unix_ms: 1_700_000_000_000,
+            hash_blake3: format!("hash-{file_id}"),
+            is_markdown: true,
+        }
+    }
 
     #[test]
     fn ingest_vault_parses_markdown_and_skips_non_markdown() {
@@ -236,16 +312,12 @@ mod tests {
         run_migrations(&mut connection).expect("run migrations");
 
         let service = StorageWriteService;
-        let record = FileRecordInput {
-            file_id: "f1".to_string(),
-            normalized_path: "notes/typed.md".to_string(),
-            match_key: "notes/typed.md".to_string(),
-            absolute_path: "/vault/notes/typed.md".to_string(),
-            size_bytes: 10,
-            modified_unix_ms: 1_700_000_000_000,
-            hash_blake3: "hash-typed".to_string(),
-            is_markdown: true,
-        };
+        let record = file_record(
+            "f1",
+            "notes/typed.md",
+            "notes/typed.md",
+            "/vault/notes/typed.md",
+        );
 
         service
             .create_file_record(&mut connection, &record)
@@ -255,5 +327,62 @@ mod tests {
             .expect("get persisted record")
             .expect("record should exist");
         assert_eq!(persisted.normalized_path, "notes/typed.md");
+    }
+
+    #[test]
+    fn sdk_transaction_coordinator_replaces_file_metadata_atomically() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let coordinator = SdkTransactionCoordinator;
+        let original = file_record(
+            "f1",
+            "notes/original.md",
+            "notes/original.md",
+            "/vault/notes/original.md",
+        );
+        let replacement = file_record(
+            "f1",
+            "notes/replacement.md",
+            "notes/replacement.md",
+            "/vault/notes/replacement.md",
+        );
+
+        coordinator
+            .insert_file_metadata(&mut connection, &original)
+            .expect("insert original");
+        coordinator
+            .replace_file_metadata(&mut connection, "f1", &replacement)
+            .expect("replace metadata");
+
+        let persisted = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get replaced")
+            .expect("row exists");
+        assert_eq!(persisted.normalized_path, "notes/replacement.md");
+    }
+
+    #[test]
+    fn sdk_transaction_coordinator_rolls_back_failed_replacement() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let coordinator = SdkTransactionCoordinator;
+        let first = file_record("f1", "notes/a.md", "notes/a.md", "/vault/notes/a.md");
+        let second = file_record("f2", "notes/b.md", "notes/b.md", "/vault/notes/b.md");
+        coordinator
+            .insert_file_metadata(&mut connection, &first)
+            .expect("insert first");
+        coordinator
+            .insert_file_metadata(&mut connection, &second)
+            .expect("insert second");
+
+        let conflicting = file_record("f1", "notes/b.md", "notes/b.md", "/vault/notes/b.md");
+        let result = coordinator.replace_file_metadata(&mut connection, "f1", &conflicting);
+        assert!(result.is_err());
+
+        let first_after = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get first after failed replace")
+            .expect("first should remain after rollback");
+        assert_eq!(first_after.normalized_path, "notes/a.md");
     }
 }

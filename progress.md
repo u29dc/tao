@@ -322,3 +322,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [links and properties repositories implemented with source/target join query coverage in integration tests]
 - residual_risk: properties upsert keeps existing `property_id` on `(file_id,key)` conflict; identity mutation policy can be revisited if needed
+
+- timestamp: 2026-03-03T18:41:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [service-layer sdk transaction coordinator added and verified for atomic write/rollback behavior]
+- residual_risk: coordinator currently manages file metadata writes only; additional domain write coordinators will be layered as services expand
