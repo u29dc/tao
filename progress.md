@@ -1062,3 +1062,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 1000 --json-out bench/reports/perf-001-bridge-1k.json, bun run util:check]
 - outcomes: [captured and committed 1k-note bridge baseline report with p50/p95/max latencies for `note_get`, `notes_list`, `note_put`, and `events_poll` under documented perf budget thresholds]
 - residual_risk: single-host baseline reflects current Apple Silicon environment only and should be re-captured on CI-hosted runners for cross-machine drift checks
+
+- timestamp: 2026-03-03T19:36:20Z
+- session: session-2026-03-03-a
+- ticket: PERF-002
+- action: done
+- evidence:
+  - files: [bench/reports/perf-002-bridge-5k.json, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 5000 --json-out bench/reports/perf-002-bridge-5k.json, bun run util:check]
+- outcomes: [captured and committed 5k-note bridge baseline report with p50/p95/max latency distributions, including documented 5k `notes_list` scaling characteristics and budget pass status]
+- residual_risk: one observed `note_put` max outlier at 52.299ms remains below hard p95 budget but should be monitored for IO jitter regression in CI
