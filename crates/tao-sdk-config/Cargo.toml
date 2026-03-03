@@ -1,0 +1,20 @@
+[package]
+name = "tao-sdk-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+toml = "0.9.8"
+
+[dev-dependencies]
+tempfile = "3.23.0"

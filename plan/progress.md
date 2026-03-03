@@ -1412,3 +1412,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check, ./scripts/budgets.sh]
   - outcomes: [scripts directory now uses single-word script filenames with active call sites and docs updated, perf budget gate validated via renamed entrypoint]
 - residual_risk: historical references remain in prior plan/progress evidence entries by design
+
+- timestamp: 2026-03-03T23:50:00Z
+- session: session-2026-03-03-b
+- ticket: CFG-001
+- action: done
+- evidence:
+  - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-config/Cargo.toml, crates/tao-sdk-config/src/lib.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-sdk-config, cargo check --workspace --release]
+  - outcomes: [new tao-sdk-config crate added with typed TOML schema, defaults, merge precedence trait, normalization/validation, and bootstrap template helpers]
+- residual_risk: crate is not yet wired into sdk runtime loader; CFG-002..CFG-004 will integrate bootstrap/read/precedence flows

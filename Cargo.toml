@@ -10,6 +10,7 @@ members = [
   "crates/tao-sdk-storage",
   "crates/tao-sdk-search",
   "crates/tao-sdk-watch",
+  "crates/tao-sdk-config",
   "crates/tao-sdk-service",
   "crates/tao-sdk-bridge",
   "crates/tao-cli",
