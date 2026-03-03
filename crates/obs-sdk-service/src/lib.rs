@@ -32,8 +32,8 @@ pub use indexing::{
 pub use tracing_hooks::ServiceTraceContext;
 
 use obs_sdk_bases::{
-    BaseColumnConfig, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
-    BaseSortDirection, TableQueryPlan,
+    BaseColumnConfig, BaseDiagnostic, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
+    BaseSortDirection, TableQueryPlan, validate_base_config_json,
 };
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
@@ -1773,6 +1773,97 @@ pub enum BaseColumnConfigPersistError {
     },
 }
 
+/// Base validation API result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseValidationResult {
+    /// Base identifier.
+    pub base_id: String,
+    /// Owning file id.
+    pub file_id: String,
+    /// Owning normalized file path.
+    pub file_path: String,
+    /// Validation diagnostics.
+    pub diagnostics: Vec<BaseDiagnostic>,
+}
+
+/// Validation service for base config diagnostics.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BaseValidationService;
+
+impl BaseValidationService {
+    /// Validate one base config by base id or normalized base file path.
+    pub fn validate(
+        &self,
+        connection: &Connection,
+        path_or_id: &str,
+    ) -> Result<BaseValidationResult, BaseValidationError> {
+        let path_or_id = path_or_id.trim();
+        if path_or_id.is_empty() {
+            return Err(BaseValidationError::InvalidInput);
+        }
+
+        if let Some(base) = BasesRepository::get_by_id(connection, path_or_id)
+            .map_err(|source| BaseValidationError::Repository { source })?
+        {
+            let file = FilesRepository::get_by_id(connection, &base.file_id)
+                .map_err(|source| BaseValidationError::FilesRepository { source })?;
+            let file_path = file.map(|file| file.normalized_path).unwrap_or_default();
+
+            return Ok(BaseValidationResult {
+                base_id: base.base_id,
+                file_id: base.file_id,
+                file_path,
+                diagnostics: validate_base_config_json(&base.config_json),
+            });
+        }
+
+        let Some(base) = BasesRepository::list_with_paths(connection)
+            .map_err(|source| BaseValidationError::Repository { source })?
+            .into_iter()
+            .find(|base| base.file_path == path_or_id)
+        else {
+            return Err(BaseValidationError::BaseNotFound {
+                path_or_id: path_or_id.to_string(),
+            });
+        };
+
+        Ok(BaseValidationResult {
+            base_id: base.base_id,
+            file_id: base.file_id,
+            file_path: base.file_path,
+            diagnostics: validate_base_config_json(&base.config_json),
+        })
+    }
+}
+
+/// Base validation API failures.
+#[derive(Debug, Error)]
+pub enum BaseValidationError {
+    /// Input was empty.
+    #[error("base validation input must not be empty")]
+    InvalidInput,
+    /// Base id/path lookup failed.
+    #[error("base '{path_or_id}' not found for validation")]
+    BaseNotFound {
+        /// Input value used for lookup.
+        path_or_id: String,
+    },
+    /// Bases repository operation failed.
+    #[error("base repository operation failed during validation: {source}")]
+    Repository {
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::BasesRepositoryError,
+    },
+    /// Files repository operation failed.
+    #[error("files repository operation failed while resolving base path: {source}")]
+    FilesRepository {
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::FilesRepositoryError,
+    },
+}
+
 /// Reconcile run result over files metadata and on-disk vault contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileResult {
@@ -2279,8 +2370,8 @@ mod tests {
     use std::path::Path;
 
     use obs_sdk_bases::{
-        BaseColumnConfig, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
-        BaseSortDirection, BaseViewDefinition, BaseViewKind, TableQueryPlan,
+        BaseColumnConfig, BaseDiagnosticSeverity, BaseDocument, BaseFilterClause, BaseFilterOp,
+        BaseSortClause, BaseSortDirection, BaseViewDefinition, BaseViewKind, TableQueryPlan,
     };
     use obs_sdk_properties::TypedPropertyValue;
     use obs_sdk_storage::{
@@ -2292,10 +2383,11 @@ mod tests {
 
     use super::{
         BacklinkGraphService, BaseColumnConfigPersistError, BaseColumnConfigPersistenceService,
-        BaseTableExecutorError, BaseTableExecutorService, CasePolicy, HealthSnapshotService,
-        MarkdownIngestPipeline, NoteCrudError, NoteCrudService, PropertyQueryRequest,
-        PropertyQueryService, PropertyQuerySort, PropertyUpdateService, ReconcileService,
-        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
+        BaseTableExecutorError, BaseTableExecutorService, BaseValidationError,
+        BaseValidationService, CasePolicy, HealthSnapshotService, MarkdownIngestPipeline,
+        NoteCrudError, NoteCrudService, PropertyQueryRequest, PropertyQueryService,
+        PropertyQuerySort, PropertyUpdateService, ReconcileService, SdkTransactionCoordinator,
+        ServiceTraceContext, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -3692,6 +3784,93 @@ mod tests {
         assert!(matches!(
             error,
             BaseColumnConfigPersistError::DeserializeConfig { base_id, .. } if base_id == "b1"
+        ));
+    }
+
+    #[test]
+    fn base_validation_service_validates_by_id_and_path() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f-base",
+                "views/projects.base",
+                "views/projects.base",
+                "/vault/views/projects.base",
+            ),
+        )
+        .expect("insert base file");
+        let config_json = serde_json::to_string(&BaseDocument {
+            views: vec![BaseViewDefinition {
+                name: "Projects".to_string(),
+                kind: BaseViewKind::Table,
+                source: None,
+                filters: Vec::new(),
+                sorts: Vec::new(),
+                columns: vec![
+                    BaseColumnConfig {
+                        key: "status".to_string(),
+                        label: None,
+                        width: None,
+                        hidden: false,
+                    },
+                    BaseColumnConfig {
+                        key: "status".to_string(),
+                        label: None,
+                        width: None,
+                        hidden: false,
+                    },
+                ],
+                extras: serde_json::Map::new(),
+            }],
+        })
+        .expect("serialize base config");
+        BasesRepository::upsert(
+            &connection,
+            &BaseRecordInput {
+                base_id: "b1".to_string(),
+                file_id: "f-base".to_string(),
+                config_json,
+            },
+        )
+        .expect("insert base row");
+
+        let by_id = BaseValidationService
+            .validate(&connection, "b1")
+            .expect("validate by id");
+        assert_eq!(by_id.base_id, "b1");
+        assert_eq!(by_id.file_path, "views/projects.base");
+        assert!(by_id.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "bases.column.duplicate_key"
+                && diagnostic.severity == BaseDiagnosticSeverity::Warning
+        }));
+
+        let by_path = BaseValidationService
+            .validate(&connection, "views/projects.base")
+            .expect("validate by path");
+        assert_eq!(by_path.base_id, "b1");
+        assert_eq!(by_path.file_id, "f-base");
+        assert_eq!(by_path.diagnostics, by_id.diagnostics);
+    }
+
+    #[test]
+    fn base_validation_service_reports_invalid_input_and_missing_base() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let invalid_input = BaseValidationService
+            .validate(&connection, "   ")
+            .expect_err("empty lookup should fail");
+        assert!(matches!(invalid_input, BaseValidationError::InvalidInput));
+
+        let missing = BaseValidationService
+            .validate(&connection, "missing")
+            .expect_err("missing base should fail");
+        assert!(matches!(
+            missing,
+            BaseValidationError::BaseNotFound { path_or_id } if path_or_id == "missing"
         ));
     }
 }

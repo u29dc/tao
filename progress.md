@@ -722,3 +722,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [base table executor now emits per-column summary rows with count/min/max/avg over filtered datasets while preserving paged row delivery and deterministic ordering]
 - residual_risk: summary computation currently runs in-memory over filtered candidates, so high-cardinality base views may need SQL aggregation pushdown in later performance tickets
+
+- timestamp: 2026-03-03T17:40:47Z
+- session: session-2026-03-03-a
+- ticket: BASE-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bases/src/lib.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [base validation diagnostics API added at both parser and service layers, including schema/semantic diagnostics with stable codes and severity, plus id-or-path lookup validation endpoint over persisted base configs]
+- residual_risk: service validation currently depends on stored config json shape rather than reparsing raw `.base` files, so legacy rows require normalization to the typed document schema for richer diagnostics
