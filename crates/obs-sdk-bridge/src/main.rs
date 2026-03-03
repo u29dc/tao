@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use obs_sdk_bridge::{BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeError, BridgeKernel};
+use obs_sdk_bridge::{
+    BRIDGE_ERROR_INIT_FAILED, BRIDGE_ERROR_SERIALIZE_FAILED, BRIDGE_SCHEMA_VERSION, BridgeEnvelope,
+    BridgeError, BridgeKernel,
+};
 use serde_json::Value as JsonValue;
 
 #[derive(Debug, Parser)]
@@ -98,7 +101,7 @@ fn with_kernel<T: serde::Serialize>(
     match BridgeKernel::open(vault_root, db_path) {
         Ok(mut kernel) => serialize_output(&operation(&mut kernel)),
         Err(source) => serialize_output(&BridgeEnvelope::<JsonValue>::failure(
-            BridgeError::with_code("bridge.init.failed", source.to_string())
+            BridgeError::with_code(BRIDGE_ERROR_INIT_FAILED, source.to_string())
                 .with_hint("ensure vault and sqlite paths are valid"),
         )),
     }
@@ -107,8 +110,8 @@ fn with_kernel<T: serde::Serialize>(
 fn serialize_output<T: serde::Serialize>(payload: &T) -> String {
     serde_json::to_string(payload).unwrap_or_else(|source| {
         format!(
-            "{{\"schema_version\":\"{}\",\"ok\":false,\"value\":null,\"error\":{{\"code\":\"bridge.serialize.failed\",\"message\":\"{}\",\"hint\":null,\"context\":{{}}}}}}",
-            BRIDGE_SCHEMA_VERSION, source
+            "{{\"schema_version\":\"{}\",\"ok\":false,\"value\":null,\"error\":{{\"code\":\"{}\",\"message\":\"{}\",\"hint\":null,\"context\":{{}}}}}}",
+            BRIDGE_SCHEMA_VERSION, BRIDGE_ERROR_SERIALIZE_FAILED, source
         )
     })
 }

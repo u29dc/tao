@@ -782,3 +782,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge schema version upgraded to `v1.0` with explicit parser and major-version compatibility checks in Rust and Swift; Swift client now rejects incompatible major versions at envelope decode time; compatibility tests cover `v1`/minor acceptance and `v2` rejection]
 - residual_risk: compatibility policy currently validates major version only, so richer feature-negotiation for optional capabilities is deferred to later bridge evolution tickets
+
+- timestamp: 2026-03-03T18:00:30Z
+- session: session-2026-03-03-a
+- ticket: FFI-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `ObsBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
+- residual_risk: typed mapping currently covers existing bridge codes and preserves unknown fallback, so new codes still require explicit app-level UX copy when surfaced in APP-010

@@ -131,6 +131,78 @@ import Foundation
     }
 }
 
+@Test func bridge_client_maps_known_bridge_error_codes_to_typed_errors() throws {
+    let fixture = try makeMockBridgeScript(
+        payload: """
+        {"schema_version":"v1.0","ok":false,"value":null,"error":{"code":"bridge.note_put.update_failed","message":"update failed","hint":"retry","context":{"path":"notes/mock.md"}}}
+        """
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
+
+    let client = ObsBridgeClient(
+        bridgeCommand: [fixture.script.path],
+        repositoryRoot: fixture.tempRoot
+    )
+
+    do {
+        _ = try client.notePut(
+            vaultRoot: fixture.tempRoot.path,
+            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path,
+            path: "notes/mock.md",
+            content: "x"
+        )
+        Issue.record("expected mapped bridge error")
+    } catch let error as ObsBridgeClientError {
+        switch error {
+        case .bridgeError(let typedError):
+            switch typedError {
+            case .notePutUpdateFailed(let dto):
+                #expect(dto.code == "bridge.note_put.update_failed")
+                #expect(dto.context["path"] == "notes/mock.md")
+            default:
+                Issue.record("unexpected typed error: \(typedError)")
+            }
+        default:
+            Issue.record("unexpected client error: \(error)")
+        }
+    }
+}
+
+@Test func bridge_client_maps_unknown_bridge_error_codes_to_unknown_case() throws {
+    let fixture = try makeMockBridgeScript(
+        payload: """
+        {"schema_version":"v1.0","ok":false,"value":null,"error":{"code":"bridge.future.experimental","message":"future","hint":null,"context":{}}}
+        """
+    )
+    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
+
+    let client = ObsBridgeClient(
+        bridgeCommand: [fixture.script.path],
+        repositoryRoot: fixture.tempRoot
+    )
+
+    do {
+        _ = try client.vaultStats(
+            vaultRoot: fixture.tempRoot.path,
+            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path
+        )
+        Issue.record("expected unknown bridge error mapping")
+    } catch let error as ObsBridgeClientError {
+        switch error {
+        case .bridgeError(let typedError):
+            switch typedError {
+            case .unknown(let dto):
+                #expect(dto.code == "bridge.future.experimental")
+                #expect(typedError.bridgeCode == "bridge.future.experimental")
+            default:
+                Issue.record("unexpected typed error: \(typedError)")
+            }
+        default:
+            Issue.record("unexpected client error: \(error)")
+        }
+    }
+}
+
 private struct MockBridgeScriptFixture {
     let tempRoot: URL
     let script: URL

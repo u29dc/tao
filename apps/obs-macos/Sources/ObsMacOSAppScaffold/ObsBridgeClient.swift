@@ -7,7 +7,7 @@ public struct BridgeEnvelope<Value: Decodable>: Decodable {
     public let error: BridgeErrorDTO?
 }
 
-public struct BridgeErrorDTO: Decodable, Error {
+public struct BridgeErrorDTO: Decodable, Error, Equatable {
     public let code: String
     public let message: String
     public let hint: String?
@@ -36,12 +36,97 @@ public struct BridgeWriteAck: Decodable {
     public let action: String
 }
 
+public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
+    case initFailed(BridgeErrorDTO)
+    case vaultStatsFailed(BridgeErrorDTO)
+    case noteGetInvalidPath(BridgeErrorDTO)
+    case noteGetReadFailed(BridgeErrorDTO)
+    case noteGetParseFailed(BridgeErrorDTO)
+    case notePutInvalidPath(BridgeErrorDTO)
+    case notePutLookupFailed(BridgeErrorDTO)
+    case notePutCreateFailed(BridgeErrorDTO)
+    case notePutUpdateFailed(BridgeErrorDTO)
+    case serializeFailed(BridgeErrorDTO)
+    case unknown(BridgeErrorDTO)
+
+    static func fromBridgeDTO(_ error: BridgeErrorDTO) -> Self {
+        switch error.code {
+        case "bridge.init.failed":
+            return .initFailed(error)
+        case "bridge.vault_stats.failed":
+            return .vaultStatsFailed(error)
+        case "bridge.note_get.invalid_path":
+            return .noteGetInvalidPath(error)
+        case "bridge.note_get.read_failed":
+            return .noteGetReadFailed(error)
+        case "bridge.note_get.parse_failed":
+            return .noteGetParseFailed(error)
+        case "bridge.note_put.invalid_path":
+            return .notePutInvalidPath(error)
+        case "bridge.note_put.lookup_failed":
+            return .notePutLookupFailed(error)
+        case "bridge.note_put.create_failed":
+            return .notePutCreateFailed(error)
+        case "bridge.note_put.update_failed":
+            return .notePutUpdateFailed(error)
+        case "bridge.serialize.failed":
+            return .serializeFailed(error)
+        default:
+            return .unknown(error)
+        }
+    }
+
+    public var bridgeCode: String {
+        switch self {
+        case .initFailed(let error),
+            .vaultStatsFailed(let error),
+            .noteGetInvalidPath(let error),
+            .noteGetReadFailed(let error),
+            .noteGetParseFailed(let error),
+            .notePutInvalidPath(let error),
+            .notePutLookupFailed(let error),
+            .notePutCreateFailed(let error),
+            .notePutUpdateFailed(let error),
+            .serializeFailed(let error),
+            .unknown(let error):
+            return error.code
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .initFailed(let error):
+            return "bridge init failed: \(error.message)"
+        case .vaultStatsFailed(let error):
+            return "vault stats failed: \(error.message)"
+        case .noteGetInvalidPath(let error):
+            return "note get invalid path: \(error.message)"
+        case .noteGetReadFailed(let error):
+            return "note get read failed: \(error.message)"
+        case .noteGetParseFailed(let error):
+            return "note get parse failed: \(error.message)"
+        case .notePutInvalidPath(let error):
+            return "note put invalid path: \(error.message)"
+        case .notePutLookupFailed(let error):
+            return "note put lookup failed: \(error.message)"
+        case .notePutCreateFailed(let error):
+            return "note put create failed: \(error.message)"
+        case .notePutUpdateFailed(let error):
+            return "note put update failed: \(error.message)"
+        case .serializeFailed(let error):
+            return "bridge serialize failed: \(error.message)"
+        case .unknown(let error):
+            return "bridge unknown error \(error.code): \(error.message)"
+        }
+    }
+}
+
 public enum ObsBridgeClientError: Error, CustomStringConvertible {
     case launchFailed(String)
     case processFailed(Int32, String)
     case decodeFailed(String)
     case incompatibleSchema(expectedMajor: Int, actual: String)
-    case bridgeError(BridgeErrorDTO)
+    case bridgeError(ObsBridgeTypedError)
     case missingValue
 
     public var description: String {
@@ -55,7 +140,7 @@ public enum ObsBridgeClientError: Error, CustomStringConvertible {
         case .incompatibleSchema(let expectedMajor, let actual):
             return "incompatible schema version \(actual), expected major v\(expectedMajor)"
         case .bridgeError(let error):
-            return "bridge error \(error.code): \(error.message)"
+            return error.description
         case .missingValue:
             return "bridge envelope missing value payload"
         }
@@ -143,7 +228,7 @@ public struct ObsBridgeClient {
         }
 
         if let error = envelope.error {
-            throw ObsBridgeClientError.bridgeError(error)
+            throw ObsBridgeClientError.bridgeError(.fromBridgeDTO(error))
         }
         throw ObsBridgeClientError.missingValue
     }

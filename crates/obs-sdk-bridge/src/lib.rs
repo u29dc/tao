@@ -15,6 +15,26 @@ use thiserror::Error;
 pub const BRIDGE_SCHEMA_VERSION: &str = "v1.0";
 /// Supported bridge DTO major version for compatibility checks.
 pub const BRIDGE_SCHEMA_MAJOR: u16 = 1;
+/// Bridge error code when kernel initialization fails.
+pub const BRIDGE_ERROR_INIT_FAILED: &str = "bridge.init.failed";
+/// Bridge error code when vault stats lookup fails.
+pub const BRIDGE_ERROR_VAULT_STATS_FAILED: &str = "bridge.vault_stats.failed";
+/// Bridge error code when note-get path is invalid.
+pub const BRIDGE_ERROR_NOTE_GET_INVALID_PATH: &str = "bridge.note_get.invalid_path";
+/// Bridge error code when note-get read fails.
+pub const BRIDGE_ERROR_NOTE_GET_READ_FAILED: &str = "bridge.note_get.read_failed";
+/// Bridge error code when note-get parse fails.
+pub const BRIDGE_ERROR_NOTE_GET_PARSE_FAILED: &str = "bridge.note_get.parse_failed";
+/// Bridge error code when note-put path is invalid.
+pub const BRIDGE_ERROR_NOTE_PUT_INVALID_PATH: &str = "bridge.note_put.invalid_path";
+/// Bridge error code when note-put lookup fails.
+pub const BRIDGE_ERROR_NOTE_PUT_LOOKUP_FAILED: &str = "bridge.note_put.lookup_failed";
+/// Bridge error code when note-put create fails.
+pub const BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED: &str = "bridge.note_put.create_failed";
+/// Bridge error code when note-put update fails.
+pub const BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED: &str = "bridge.note_put.update_failed";
+/// Bridge error code when serialization fails.
+pub const BRIDGE_ERROR_SERIALIZE_FAILED: &str = "bridge.serialize.failed";
 
 /// Parsed bridge schema version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +260,7 @@ impl BridgeKernel {
                 last_index_updated_at: snapshot.last_index_updated_at,
             }),
             Err(source) => BridgeEnvelope::failure(
-                BridgeError::with_code("bridge.vault_stats.failed", source.to_string())
+                BridgeError::with_code(BRIDGE_ERROR_VAULT_STATS_FAILED, source.to_string())
                     .with_hint("ensure vault path and sqlite database are readable"),
             ),
         }
@@ -253,7 +273,7 @@ impl BridgeKernel {
         if normalized_path.is_empty() {
             return BridgeEnvelope::failure(
                 BridgeError::with_code(
-                    "bridge.note_get.invalid_path",
+                    BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
                     "normalized path must not be empty",
                 )
                 .with_hint("provide a vault-relative markdown path"),
@@ -265,7 +285,7 @@ impl BridgeKernel {
             Ok(raw) => raw,
             Err(source) => {
                 return BridgeEnvelope::failure(
-                    BridgeError::with_code("bridge.note_get.read_failed", source.to_string())
+                    BridgeError::with_code(BRIDGE_ERROR_NOTE_GET_READ_FAILED, source.to_string())
                         .with_hint("ensure the note exists and is readable")
                         .with_context(
                             "path",
@@ -287,7 +307,7 @@ impl BridgeKernel {
                 headings_total: parsed.headings.len() as u64,
             }),
             Err(source) => BridgeEnvelope::failure(
-                BridgeError::with_code("bridge.note_get.parse_failed", source.to_string())
+                BridgeError::with_code(BRIDGE_ERROR_NOTE_GET_PARSE_FAILED, source.to_string())
                     .with_hint("fix note markdown syntax issues and retry"),
             ),
         }
@@ -304,7 +324,7 @@ impl BridgeKernel {
         if normalized_path.is_empty() {
             return BridgeEnvelope::failure(
                 BridgeError::with_code(
-                    "bridge.note_put.invalid_path",
+                    BRIDGE_ERROR_NOTE_PUT_INVALID_PATH,
                     "normalized path must not be empty",
                 )
                 .with_hint("provide a vault-relative markdown path"),
@@ -318,8 +338,11 @@ impl BridgeKernel {
                 Ok(existing) => existing,
                 Err(source) => {
                     return BridgeEnvelope::failure(
-                        BridgeError::with_code("bridge.note_put.lookup_failed", source.to_string())
-                            .with_hint("ensure bridge database is available"),
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_PUT_LOOKUP_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("ensure bridge database is available"),
                     );
                 }
             };
@@ -338,7 +361,7 @@ impl BridgeKernel {
                     action: "updated".to_string(),
                 }),
                 Err(source) => BridgeEnvelope::failure(
-                    BridgeError::with_code("bridge.note_put.update_failed", source.to_string())
+                    BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED, source.to_string())
                         .with_hint("fix note payload or path and retry"),
                 ),
             }
@@ -357,7 +380,7 @@ impl BridgeKernel {
                     action: "created".to_string(),
                 }),
                 Err(source) => BridgeEnvelope::failure(
-                    BridgeError::with_code("bridge.note_put.create_failed", source.to_string())
+                    BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED, source.to_string())
                         .with_hint("ensure vault path exists and target note path is valid"),
                 ),
             }
