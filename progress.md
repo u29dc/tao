@@ -83,3 +83,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [workspace member map and crate responsibility docs committed]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:27:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-002
+- action: done
+- evidence:
+  - files: [docs/architecture/swift-app-boundaries.md, apps/obs-macos/README.md, tickets.csv, run-state.json]
+  - commands: [write swift module boundaries and app scaffold readme]
+  - outcomes: [swift adapter boundaries and target layout documented]
+- residual_risk: none
+
