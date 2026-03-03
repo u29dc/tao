@@ -66,6 +66,12 @@ private struct AppErrorState: Identifiable {
     let recoveryAction: AppRecoveryAction?
 }
 
+private enum StartupPersistenceKeys {
+    static let vaultRoot = "obs.startup.vault_root"
+    static let dbPath = "obs.startup.db_path"
+    static let notePath = "obs.startup.note_path"
+}
+
 private struct ObsRootSplitView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var quickOpenCommandNonce: Int
@@ -74,6 +80,9 @@ private struct ObsRootSplitView: View {
     @State private var vaultRoot = ""
     @State private var dbPath = ""
     @State private var openedVaultRoot: String?
+    @State private var hasRestoredStartupState = false
+    @State private var isRestoringStartupState = false
+    @State private var pendingRestoredNotePath: String?
     @State private var statsSummary = "Bridge read APIs not called yet."
     @State private var bridgeError: String?
     @State private var appErrorState: AppErrorState?
@@ -328,8 +337,12 @@ private struct ObsRootSplitView: View {
                 transaction.disablesAnimations = true
             }
         }
+        .onAppear {
+            restoreStartupStateIfNeeded()
+        }
         .onChange(of: selectedTreePath) { _, newValue in
             loadSelectedNote(path: newValue)
+            persistStartupState(notePathOverride: newValue)
         }
         .onChange(of: quickOpenCommandNonce) { _, _ in
             presentQuickOpen()
@@ -649,6 +662,73 @@ private struct ObsRootSplitView: View {
         }
     }
 
+    private func restoreStartupStateIfNeeded() {
+        guard !hasRestoredStartupState else {
+            return
+        }
+        hasRestoredStartupState = true
+
+        let defaults = UserDefaults.standard
+        guard
+            let persistedVaultRoot = defaults.string(forKey: StartupPersistenceKeys.vaultRoot),
+            let persistedDbPath = defaults.string(forKey: StartupPersistenceKeys.dbPath)
+        else {
+            return
+        }
+
+        let restoredVaultRoot = persistedVaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let restoredDbPath = persistedDbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !restoredVaultRoot.isEmpty, !restoredDbPath.isEmpty else {
+            clearStartupState()
+            return
+        }
+        guard FileManager.default.fileExists(atPath: restoredVaultRoot) else {
+            clearStartupState()
+            return
+        }
+
+        vaultRoot = restoredVaultRoot
+        dbPath = restoredDbPath
+        if let persistedNotePath = defaults.string(forKey: StartupPersistenceKeys.notePath) {
+            let trimmed = persistedNotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                pendingRestoredNotePath = trimmed
+            }
+        }
+
+        isRestoringStartupState = true
+        loadVaultStats()
+    }
+
+    private func persistStartupState(notePathOverride: String? = nil) {
+        let persistedVaultRoot = (openedVaultRoot ?? vaultRoot)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let persistedDbPath = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !persistedVaultRoot.isEmpty, !persistedDbPath.isEmpty else {
+            clearStartupState()
+            return
+        }
+
+        let defaults = UserDefaults.standard
+        defaults.set(persistedVaultRoot, forKey: StartupPersistenceKeys.vaultRoot)
+        defaults.set(persistedDbPath, forKey: StartupPersistenceKeys.dbPath)
+
+        let persistedNotePath = (notePathOverride ?? selectedTreePath)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let persistedNotePath, !persistedNotePath.isEmpty {
+            defaults.set(persistedNotePath, forKey: StartupPersistenceKeys.notePath)
+        } else {
+            defaults.removeObject(forKey: StartupPersistenceKeys.notePath)
+        }
+    }
+
+    private func clearStartupState() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: StartupPersistenceKeys.vaultRoot)
+        defaults.removeObject(forKey: StartupPersistenceKeys.dbPath)
+        defaults.removeObject(forKey: StartupPersistenceKeys.notePath)
+    }
+
     private func performRecoveryAction(_ action: AppRecoveryAction) {
         appErrorState = nil
         switch action {
@@ -728,6 +808,9 @@ private struct ObsRootSplitView: View {
                         "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
                     openedVaultRoot = root
                     fileTreeViewModel.bindVault(vaultRoot: root, dbPath: db)
+                    let restoredNotePath = pendingRestoredNotePath
+                    pendingRestoredNotePath = nil
+                    selectedTreePath = restoredNotePath
                     selectedNote = nil
                     noteError = nil
                     propertiesStatus = nil
@@ -743,7 +826,9 @@ private struct ObsRootSplitView: View {
                     isLoadingBases = false
                     isLoadingBasePage = false
                     appErrorState = nil
+                    isRestoringStartupState = false
                     isLoadingStats = false
+                    persistStartupState(notePathOverride: restoredNotePath)
                     if selectedSidebarItem == .bases {
                         loadBasesList()
                     }
@@ -756,6 +841,11 @@ private struct ObsRootSplitView: View {
                         operation: "Load vault stats",
                         recoveryAction: .retryLoadVaultStats
                     )
+                    if isRestoringStartupState {
+                        clearStartupState()
+                        pendingRestoredNotePath = nil
+                    }
+                    isRestoringStartupState = false
                     isLoadingStats = false
                 }
             }
@@ -813,6 +903,7 @@ private struct ObsRootSplitView: View {
                     linksError = nil
                     appErrorState = nil
                     isLoadingNote = false
+                    persistStartupState(notePathOverride: note.path)
                     loadLinkPanels(path: note.path)
                 }
             } catch {

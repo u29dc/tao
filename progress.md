@@ -932,3 +932,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [added global reduced-motion handling in the app view layer by disabling implicit animations when accessibility reduce-motion is enabled and gating key UI animation bindings behind the setting]
 - residual_risk: current app motion profile is still intentionally minimal, so additional feature-specific transitions introduced later must continue to honor the same reduce-motion guardrails
+
+- timestamp: 2026-03-03T18:53:30Z
+- session: session-2026-03-03-a
+- ticket: APP-012
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [added persisted startup state for vault/db/note paths, launch-time restoration with path safety checks, restoration-aware failure cleanup, and automatic state updates whenever vault or note selection changes]
+- residual_risk: restored note selection currently replays immediately after vault stats load without waiting for full tree hydration, so future UX polish can add explicit restored-state loading indicators
