@@ -93,3 +93,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [swift adapter boundaries and target layout documented]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:29:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-003
+- action: done
+- evidence:
+  - files: [docs/architecture/bridge-dto-contracts.md, tickets.csv, run-state.json]
+  - commands: [write bridge dto contract spec]
+  - outcomes: [swift rust boundary dto and versioning rules documented]
+- residual_risk: none
+
