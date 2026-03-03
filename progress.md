@@ -23,3 +23,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [adr index scaffold added]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:12:00Z
+- session: session-2026-03-03-a
+- ticket: DOC-002
+- action: done
+- evidence:
+  - files: [docs/product/scope-v1.md, tickets.csv, run-state.json]
+  - commands: [mkdir -p docs/product, write docs/product/scope-v1.md]
+  - outcomes: [v1 scope contract with acceptance criteria added]
+- residual_risk: none
+
