@@ -41,6 +41,21 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Return one paged markdown note list window.
+    NotesList {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Cursor path for paging.
+        #[arg(long)]
+        after_path: Option<String>,
+        /// Maximum rows to return.
+        #[arg(long, default_value_t = 128)]
+        limit: u64,
+    },
     /// Create or update one note and return write acknowledgement.
     NotePut {
         /// Absolute vault root path.
@@ -87,6 +102,14 @@ fn main() {
             db_path,
             path,
         } => with_kernel(vault_root, db_path, |kernel| kernel.note_get(&path)),
+        Commands::NotesList {
+            vault_root,
+            db_path,
+            after_path,
+            limit,
+        } => with_kernel(vault_root, db_path, |kernel| {
+            kernel.notes_list(after_path.as_deref(), limit)
+        }),
         Commands::NotePut {
             vault_root,
             db_path,

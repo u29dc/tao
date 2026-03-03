@@ -30,6 +30,18 @@ public struct BridgeNoteView: Decodable {
     public let headingsTotal: UInt64
 }
 
+public struct BridgeNoteSummary: Decodable {
+    public let fileId: String
+    public let path: String
+    public let title: String
+    public let updatedAt: String?
+}
+
+public struct BridgeNoteListPage: Decodable {
+    public let items: [BridgeNoteSummary]
+    public let nextCursor: String?
+}
+
 public struct BridgeWriteAck: Decodable {
     public let path: String
     public let fileId: String
@@ -56,6 +68,8 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case noteGetInvalidPath(BridgeErrorDTO)
     case noteGetReadFailed(BridgeErrorDTO)
     case noteGetParseFailed(BridgeErrorDTO)
+    case notesListInvalidLimit(BridgeErrorDTO)
+    case notesListQueryFailed(BridgeErrorDTO)
     case notePutInvalidPath(BridgeErrorDTO)
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
@@ -78,6 +92,10 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .noteGetReadFailed(error)
         case "bridge.note_get.parse_failed":
             return .noteGetParseFailed(error)
+        case "bridge.notes_list.invalid_limit":
+            return .notesListInvalidLimit(error)
+        case "bridge.notes_list.query_failed":
+            return .notesListQueryFailed(error)
         case "bridge.note_put.invalid_path":
             return .notePutInvalidPath(error)
         case "bridge.note_put.lookup_failed":
@@ -106,6 +124,8 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .noteGetInvalidPath(let error),
             .noteGetReadFailed(let error),
             .noteGetParseFailed(let error),
+            .notesListInvalidLimit(let error),
+            .notesListQueryFailed(let error),
             .notePutInvalidPath(let error),
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
@@ -131,6 +151,10 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "note get read failed: \(error.message)"
         case .noteGetParseFailed(let error):
             return "note get parse failed: \(error.message)"
+        case .notesListInvalidLimit(let error):
+            return "notes list invalid limit: \(error.message)"
+        case .notesListQueryFailed(let error):
+            return "notes list query failed: \(error.message)"
         case .notePutInvalidPath(let error):
             return "note put invalid path: \(error.message)"
         case .notePutLookupFailed(let error):
@@ -231,6 +255,24 @@ public struct ObsBridgeClient {
             ],
             as: BridgeWriteAck.self
         )
+    }
+
+    public func notesList(
+        vaultRoot: String,
+        dbPath: String,
+        afterPath: String? = nil,
+        limit: UInt64 = 128
+    ) throws -> BridgeNoteListPage {
+        var subcommand: [String] = [
+            "notes-list",
+            "--vault-root", vaultRoot,
+            "--db-path", dbPath,
+            "--limit", String(limit)
+        ]
+        if let afterPath {
+            subcommand.append(contentsOf: ["--after-path", afterPath])
+        }
+        return try invoke(subcommand: subcommand, as: BridgeNoteListPage.self)
     }
 
     public func eventsPoll(

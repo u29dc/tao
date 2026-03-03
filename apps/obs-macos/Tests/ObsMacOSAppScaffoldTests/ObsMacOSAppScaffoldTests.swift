@@ -93,6 +93,58 @@ import Foundation
     #expect(secondRead.body.contains("two"))
 }
 
+@Test func bridge_client_notes_list_pages_results() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-list-test-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = ObsBridgeClient()
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/c.md",
+        content: "# C"
+    )
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/a.md",
+        content: "# A"
+    )
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/b.md",
+        content: "# B"
+    )
+
+    let firstPage = try client.notesList(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        limit: 2
+    )
+    #expect(firstPage.items.count == 2)
+    #expect(firstPage.items[0].path == "notes/a.md")
+    #expect(firstPage.items[1].path == "notes/b.md")
+    #expect(firstPage.nextCursor == "notes/b.md")
+
+    let secondPage = try client.notesList(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        afterPath: firstPage.nextCursor,
+        limit: 2
+    )
+    #expect(secondPage.items.count == 1)
+    #expect(secondPage.items[0].path == "notes/c.md")
+    #expect(secondPage.nextCursor == nil)
+}
+
 @Test func bridge_client_events_poll_returns_note_write_events() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory

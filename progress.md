@@ -802,3 +802,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge now persists note-change events in a sqlite-backed `bridge_events` log and exposes `events-poll` cursor API through bridge shell; Swift client adds typed event polling API and tests confirm create/update writes are delivered and cursor-based polling drains incrementally]
 - residual_risk: current subscription transport is poll-based rather than push-streaming, so real-time event fanout and backpressure policies are deferred to future transport optimization tickets
+
+- timestamp: 2026-03-03T18:07:50Z
+- session: session-2026-03-03-a
+- ticket: FFI-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [paged `notes-list` windowing API added with cursor+limit controls and deterministic path ordering; Rust bridge tests verify two-page traversal; Swift client now exposes `notesList` API and integration tests verify stable paging semantics over larger note sets]
+- residual_risk: note summary titles currently derive from path stem for list latency predictability, so richer title extraction from parsed markdown remains a future enhancement if UI requires higher fidelity in large lists

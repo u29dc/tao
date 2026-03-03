@@ -25,6 +25,10 @@ pub const BRIDGE_ERROR_NOTE_GET_INVALID_PATH: &str = "bridge.note_get.invalid_pa
 pub const BRIDGE_ERROR_NOTE_GET_READ_FAILED: &str = "bridge.note_get.read_failed";
 /// Bridge error code when note-get parse fails.
 pub const BRIDGE_ERROR_NOTE_GET_PARSE_FAILED: &str = "bridge.note_get.parse_failed";
+/// Bridge error code when notes-list limit is invalid.
+pub const BRIDGE_ERROR_NOTES_LIST_INVALID_LIMIT: &str = "bridge.notes_list.invalid_limit";
+/// Bridge error code when notes-list query fails.
+pub const BRIDGE_ERROR_NOTES_LIST_QUERY_FAILED: &str = "bridge.notes_list.query_failed";
 /// Bridge error code when note-put path is invalid.
 pub const BRIDGE_ERROR_NOTE_PUT_INVALID_PATH: &str = "bridge.note_put.invalid_path";
 /// Bridge error code when note-put lookup fails.
@@ -193,6 +197,28 @@ pub struct BridgeNoteView {
     pub headings_total: u64,
 }
 
+/// Bridge note summary DTO for paged list endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeNoteSummary {
+    /// Stable file id.
+    pub file_id: String,
+    /// Canonical normalized path.
+    pub path: String,
+    /// Derived display title.
+    pub title: String,
+    /// Last updated timestamp when available.
+    pub updated_at: Option<String>,
+}
+
+/// Bridge paged notes list DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeNoteListPage {
+    /// Windowed note summaries.
+    pub items: Vec<BridgeNoteSummary>,
+    /// Cursor for the next page when available.
+    pub next_cursor: Option<String>,
+}
+
 /// Bridge write acknowledgement DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeWriteAck {
@@ -347,6 +373,43 @@ impl BridgeKernel {
         }
     }
 
+    /// Return one paged window of markdown note summaries.
+    #[must_use]
+    pub fn notes_list(
+        &self,
+        after_path: Option<&str>,
+        limit: u64,
+    ) -> BridgeEnvelope<BridgeNoteListPage> {
+        if limit == 0 || limit > 1_000 {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_NOTES_LIST_INVALID_LIMIT,
+                    "limit must be between 1 and 1000",
+                )
+                .with_hint("set `limit` to one value in range [1, 1000]")
+                .with_context("limit", JsonValue::String(limit.to_string())),
+            );
+        }
+
+        match query_note_summaries_page(&self.connection, after_path, limit) {
+            Ok(page) => BridgeEnvelope::success(page),
+            Err(source) => {
+                let mut error = BridgeError::with_code(
+                    BRIDGE_ERROR_NOTES_LIST_QUERY_FAILED,
+                    source.to_string(),
+                )
+                .with_hint("ensure bridge database is available");
+                if let Some(after_path) = after_path {
+                    error =
+                        error.with_context("after_path", JsonValue::String(after_path.to_string()));
+                }
+                BridgeEnvelope::failure(
+                    error.with_context("limit", JsonValue::String(limit.to_string())),
+                )
+            }
+        }
+    }
+
     /// Create or update one note safely through SDK write services.
     #[must_use]
     pub fn note_put(
@@ -479,6 +542,54 @@ impl BridgeKernel {
             ),
         }
     }
+}
+
+fn query_note_summaries_page(
+    connection: &Connection,
+    after_path: Option<&str>,
+    limit: u64,
+) -> Result<BridgeNoteListPage, rusqlite::Error> {
+    let limit_plus_one = limit.saturating_add(1);
+    let limit_plus_one_i64 = i64::try_from(limit_plus_one).unwrap_or(i64::MAX);
+
+    let mut statement = connection.prepare(
+        "SELECT file_id, normalized_path, indexed_at
+         FROM files
+         WHERE is_markdown = 1
+           AND (?1 IS NULL OR normalized_path > ?1)
+         ORDER BY normalized_path ASC
+         LIMIT ?2",
+    )?;
+
+    let rows = statement.query_map(params![after_path, limit_plus_one_i64], |row| {
+        let file_id: String = row.get(0)?;
+        let normalized_path: String = row.get(1)?;
+        let indexed_at: String = row.get(2)?;
+        let title = Path::new(&normalized_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| normalized_path.clone());
+        Ok(BridgeNoteSummary {
+            file_id,
+            path: normalized_path,
+            title,
+            updated_at: Some(indexed_at),
+        })
+    })?;
+
+    let mut items: Vec<BridgeNoteSummary> = rows.collect::<Result<Vec<_>, _>>()?;
+    let has_more = items.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+    if has_more {
+        items.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+    let next_cursor = if has_more {
+        items.last().map(|item| item.path.clone())
+    } else {
+        None
+    };
+
+    Ok(BridgeNoteListPage { items, next_cursor })
 }
 
 fn ensure_bridge_event_log(connection: &Connection) -> Result<(), rusqlite::Error> {
@@ -721,6 +832,34 @@ mod tests {
         assert_eq!(value.front_matter.as_deref(), Some("status: draft"));
         assert_eq!(value.body, "# Alpha\ncontent");
         assert_eq!(value.headings_total, 1);
+    }
+
+    #[test]
+    fn bridge_kernel_notes_list_pages_markdown_results() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        assert!(kernel.note_put("notes/c.md", "# C").ok);
+        assert!(kernel.note_put("notes/a.md", "# A").ok);
+        assert!(kernel.note_put("notes/b.md", "# B").ok);
+
+        let first_page = kernel.notes_list(None, 2);
+        assert!(first_page.ok);
+        let first = first_page.value.expect("first page");
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.items[0].path, "notes/a.md");
+        assert_eq!(first.items[1].path, "notes/b.md");
+        assert_eq!(first.next_cursor.as_deref(), Some("notes/b.md"));
+
+        let second_page = kernel.notes_list(first.next_cursor.as_deref(), 2);
+        assert!(second_page.ok);
+        let second = second_page.value.expect("second page");
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].path, "notes/c.md");
+        assert_eq!(second.next_cursor, None);
     }
 
     #[test]
