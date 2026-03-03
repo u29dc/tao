@@ -552,3 +552,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [stale cleanup workflow added to remove non-live file rows transactionally, persist summary state, and validate cleanup/noop behavior with integration tests]
 - residual_risk: stale cleanup removes stale metadata but does not recompute live link unresolved flags; full/incremental indexing remains source of truth for link-state refresh
+
+- timestamp: 2026-03-03T16:55:37Z
+- session: session-2026-03-03-a
+- ticket: IDX-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-service/Cargo.toml, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [checkpointed incremental indexing service added with persisted progress state, resumable execution after interruption, and summary checkpoint metrics]
+- residual_risk: checkpointed runs currently serialize checkpoint progress per batch and may add index_state write overhead on very high-frequency change streams

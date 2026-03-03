@@ -411,6 +411,7 @@ dependencies = [
  "obs-sdk-storage",
  "obs-sdk-vault",
  "rusqlite",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",

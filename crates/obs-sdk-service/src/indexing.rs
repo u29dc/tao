@@ -19,8 +19,12 @@ use obs_sdk_vault::{
     VaultScanError, VaultScanService,
 };
 use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+
+const CHECKPOINT_STATE_KEY: &str = "checkpoint.incremental_index";
+const CHECKPOINT_SUMMARY_KEY: &str = "last_checkpointed_index_summary";
 
 /// Result payload for full rebuild indexing workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,6 +778,284 @@ impl StaleCleanupService {
     }
 }
 
+/// Result payload for checkpointed incremental indexing workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointedIndexResult {
+    /// Whether this run resumed from a previously persisted checkpoint.
+    pub started_from_checkpoint: bool,
+    /// Total unique paths tracked by the active checkpoint.
+    pub total_paths: u64,
+    /// Number of unique paths processed in this invocation.
+    pub processed_paths: u64,
+    /// Number of unique paths still pending in checkpoint state.
+    pub remaining_paths: u64,
+    /// Number of incremental batches applied in this invocation.
+    pub batches_applied: u64,
+    /// Number of file rows upserted in this invocation.
+    pub upserted_files: u64,
+    /// Number of file rows removed in this invocation.
+    pub removed_files: u64,
+    /// Number of link rows rebuilt in this invocation.
+    pub links_reindexed: u64,
+    /// Number of property rows rebuilt in this invocation.
+    pub properties_reindexed: u64,
+    /// Number of base rows rebuilt in this invocation.
+    pub bases_reindexed: u64,
+    /// Whether checkpoint state was fully consumed and removed.
+    pub checkpoint_completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IncrementalCheckpointState {
+    pending_paths: Vec<String>,
+    next_offset: usize,
+    max_batch_size: usize,
+    case_policy: String,
+    created_unix_ms: u128,
+    updated_unix_ms: u128,
+}
+
+/// Service that persists incremental indexing checkpoints and resumes after restart.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CheckpointedIndexService {
+    incremental: IncrementalIndexService,
+}
+
+impl CheckpointedIndexService {
+    /// Apply incremental indexing with persisted checkpoints.
+    ///
+    /// When `changed_paths` is empty, this resumes from checkpoint state if present.
+    /// When `changed_paths` is non-empty, this starts a new checkpoint run.
+    pub fn apply_checkpointed(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changed_paths: &[PathBuf],
+        max_batch_size: usize,
+        max_batches_per_run: Option<usize>,
+        case_policy: CasePolicy,
+    ) -> Result<CheckpointedIndexResult, CheckpointedIndexError> {
+        if max_batch_size == 0 {
+            return Err(CheckpointedIndexError::InvalidBatchSize { value: 0 });
+        }
+        if matches!(max_batches_per_run, Some(0)) {
+            return Err(CheckpointedIndexError::InvalidBatchLimit { value: 0 });
+        }
+
+        let (mut checkpoint, started_from_checkpoint, effective_case_policy) =
+            if changed_paths.is_empty() {
+                let Some(state) = load_checkpoint_state(connection)? else {
+                    return Ok(CheckpointedIndexResult {
+                        started_from_checkpoint: true,
+                        total_paths: 0,
+                        processed_paths: 0,
+                        remaining_paths: 0,
+                        batches_applied: 0,
+                        upserted_files: 0,
+                        removed_files: 0,
+                        links_reindexed: 0,
+                        properties_reindexed: 0,
+                        bases_reindexed: 0,
+                        checkpoint_completed: true,
+                    });
+                };
+                let policy = parse_checkpoint_case_policy(&state.case_policy)?;
+                (state, true, policy)
+            } else {
+                let mut seen = std::collections::BTreeSet::new();
+                let mut pending_paths = Vec::new();
+                for path in changed_paths {
+                    let normalized = normalize_changed_path(path).map_err(|source| {
+                        CheckpointedIndexError::NormalizeChangedPath {
+                            source: Box::new(source),
+                        }
+                    })?;
+                    if seen.insert(normalized.clone()) {
+                        pending_paths.push(normalized);
+                    }
+                }
+
+                let now_unix_ms =
+                    current_unix_ms_raw().map_err(|source| CheckpointedIndexError::Clock {
+                        source: Box::new(source),
+                    })?;
+                let state = IncrementalCheckpointState {
+                    pending_paths,
+                    next_offset: 0,
+                    max_batch_size,
+                    case_policy: checkpoint_case_policy_label(case_policy).to_string(),
+                    created_unix_ms: now_unix_ms,
+                    updated_unix_ms: now_unix_ms,
+                };
+                save_checkpoint_state(connection, &state)?;
+                (state, false, case_policy)
+            };
+
+        let mut processed_paths = 0_u64;
+        let mut batches_applied = 0_u64;
+        let mut upserted_files = 0_u64;
+        let mut removed_files = 0_u64;
+        let mut links_reindexed = 0_u64;
+        let mut properties_reindexed = 0_u64;
+        let mut bases_reindexed = 0_u64;
+
+        while checkpoint.next_offset < checkpoint.pending_paths.len() {
+            if max_batches_per_run
+                .is_some_and(|limit| batches_applied >= u64::try_from(limit).unwrap_or(u64::MAX))
+            {
+                break;
+            }
+
+            let batch_end = std::cmp::min(
+                checkpoint.next_offset + checkpoint.max_batch_size,
+                checkpoint.pending_paths.len(),
+            );
+            let batch_paths = checkpoint.pending_paths[checkpoint.next_offset..batch_end]
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>();
+
+            let batch_result = self
+                .incremental
+                .apply_changes(vault_root, connection, &batch_paths, effective_case_policy)
+                .map_err(|source| CheckpointedIndexError::ApplyIncremental {
+                    source: Box::new(source),
+                })?;
+
+            checkpoint.next_offset = batch_end;
+            checkpoint.updated_unix_ms =
+                current_unix_ms_raw().map_err(|source| CheckpointedIndexError::Clock {
+                    source: Box::new(source),
+                })?;
+            save_checkpoint_state(connection, &checkpoint)?;
+
+            processed_paths += batch_result.processed_paths;
+            batches_applied += 1;
+            upserted_files += batch_result.upserted_files;
+            removed_files += batch_result.removed_files;
+            links_reindexed += batch_result.links_reindexed;
+            properties_reindexed += batch_result.properties_reindexed;
+            bases_reindexed += batch_result.bases_reindexed;
+        }
+
+        let total_paths = checkpoint.pending_paths.len() as u64;
+        let remaining_paths = total_paths - checkpoint.next_offset as u64;
+        let checkpoint_completed = remaining_paths == 0;
+
+        if checkpoint_completed {
+            IndexStateRepository::delete_by_key(connection, CHECKPOINT_STATE_KEY).map_err(
+                |source| CheckpointedIndexError::DeleteCheckpointState {
+                    source: Box::new(source),
+                },
+            )?;
+        }
+
+        let completed_unix_ms =
+            current_unix_ms_raw().map_err(|source| CheckpointedIndexError::Clock {
+                source: Box::new(source),
+            })?;
+        let summary_json = serde_json::to_string(&json!({
+            "mode": "checkpointed_incremental",
+            "started_from_checkpoint": started_from_checkpoint,
+            "total_paths": total_paths,
+            "processed_paths": processed_paths,
+            "remaining_paths": remaining_paths,
+            "batches_applied": batches_applied,
+            "upserted_files": upserted_files,
+            "removed_files": removed_files,
+            "links_reindexed": links_reindexed,
+            "properties_reindexed": properties_reindexed,
+            "bases_reindexed": bases_reindexed,
+            "checkpoint_completed": checkpoint_completed,
+            "completed_unix_ms": completed_unix_ms,
+        }))
+        .map_err(|source| CheckpointedIndexError::SerializeSummary {
+            source: Box::new(source),
+        })?;
+        IndexStateRepository::upsert(
+            connection,
+            &IndexStateRecordInput {
+                key: CHECKPOINT_SUMMARY_KEY.to_string(),
+                value_json: summary_json,
+            },
+        )
+        .map_err(|source| CheckpointedIndexError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+
+        Ok(CheckpointedIndexResult {
+            started_from_checkpoint,
+            total_paths,
+            processed_paths,
+            remaining_paths,
+            batches_applied,
+            upserted_files,
+            removed_files,
+            links_reindexed,
+            properties_reindexed,
+            bases_reindexed,
+            checkpoint_completed,
+        })
+    }
+}
+
+fn load_checkpoint_state(
+    connection: &Connection,
+) -> Result<Option<IncrementalCheckpointState>, CheckpointedIndexError> {
+    let stored =
+        IndexStateRepository::get_by_key(connection, CHECKPOINT_STATE_KEY).map_err(|source| {
+            CheckpointedIndexError::GetCheckpointState {
+                source: Box::new(source),
+            }
+        })?;
+    let Some(record) = stored else {
+        return Ok(None);
+    };
+    let checkpoint = serde_json::from_str::<IncrementalCheckpointState>(&record.value_json)
+        .map_err(|source| CheckpointedIndexError::DeserializeCheckpoint {
+            source: Box::new(source),
+        })?;
+    Ok(Some(checkpoint))
+}
+
+fn save_checkpoint_state(
+    connection: &Connection,
+    checkpoint: &IncrementalCheckpointState,
+) -> Result<(), CheckpointedIndexError> {
+    let value_json = serde_json::to_string(checkpoint).map_err(|source| {
+        CheckpointedIndexError::SerializeCheckpoint {
+            source: Box::new(source),
+        }
+    })?;
+    IndexStateRepository::upsert(
+        connection,
+        &IndexStateRecordInput {
+            key: CHECKPOINT_STATE_KEY.to_string(),
+            value_json,
+        },
+    )
+    .map_err(|source| CheckpointedIndexError::UpsertCheckpointState {
+        source: Box::new(source),
+    })
+}
+
+fn checkpoint_case_policy_label(case_policy: CasePolicy) -> &'static str {
+    match case_policy {
+        CasePolicy::Sensitive => "sensitive",
+        CasePolicy::Insensitive => "insensitive",
+    }
+}
+
+fn parse_checkpoint_case_policy(label: &str) -> Result<CasePolicy, CheckpointedIndexError> {
+    match label {
+        "sensitive" => Ok(CasePolicy::Sensitive),
+        "insensitive" => Ok(CasePolicy::Insensitive),
+        _ => Err(CheckpointedIndexError::InvalidCheckpointCasePolicy {
+            value: label.to_string(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -1152,6 +1434,99 @@ pub enum StaleCleanupError {
     },
 }
 
+/// Checkpointed incremental indexing failures.
+#[derive(Debug, Error)]
+pub enum CheckpointedIndexError {
+    /// Provided batch size is invalid.
+    #[error("invalid checkpoint batch size: {value}")]
+    InvalidBatchSize {
+        /// Invalid batch size value.
+        value: usize,
+    },
+    /// Provided per-run batch processing limit is invalid.
+    #[error("invalid max-batches-per-run value: {value}")]
+    InvalidBatchLimit {
+        /// Invalid max-batches-per-run value.
+        value: usize,
+    },
+    /// Changed path input is invalid.
+    #[error("invalid changed path while creating checkpoint: {source}")]
+    NormalizeChangedPath {
+        /// Path normalization error.
+        #[source]
+        source: Box<FullIndexError>,
+    },
+    /// Stored checkpoint JSON payload cannot be parsed.
+    #[error("failed to deserialize checkpoint state payload: {source}")]
+    DeserializeCheckpoint {
+        /// JSON deserialization error.
+        #[source]
+        source: Box<serde_json::Error>,
+    },
+    /// Checkpoint JSON payload serialization failed.
+    #[error("failed to serialize checkpoint state payload: {source}")]
+    SerializeCheckpoint {
+        /// JSON serialization error.
+        #[source]
+        source: Box<serde_json::Error>,
+    },
+    /// Checkpoint summary serialization failed.
+    #[error("failed to serialize checkpoint summary payload: {source}")]
+    SerializeSummary {
+        /// JSON serialization error.
+        #[source]
+        source: Box<serde_json::Error>,
+    },
+    /// Checkpoint case policy label is invalid.
+    #[error("invalid checkpoint case policy '{value}'")]
+    InvalidCheckpointCasePolicy {
+        /// Unknown case policy label.
+        value: String,
+    },
+    /// Reading checkpoint state row failed.
+    #[error("failed to read checkpoint state row: {source}")]
+    GetCheckpointState {
+        /// Index state repository error.
+        #[source]
+        source: Box<obs_sdk_storage::IndexStateRepositoryError>,
+    },
+    /// Persisting checkpoint state row failed.
+    #[error("failed to persist checkpoint state row: {source}")]
+    UpsertCheckpointState {
+        /// Index state repository error.
+        #[source]
+        source: Box<obs_sdk_storage::IndexStateRepositoryError>,
+    },
+    /// Deleting consumed checkpoint state row failed.
+    #[error("failed to delete consumed checkpoint state row: {source}")]
+    DeleteCheckpointState {
+        /// Index state repository error.
+        #[source]
+        source: Box<obs_sdk_storage::IndexStateRepositoryError>,
+    },
+    /// Persisting checkpoint summary state row failed.
+    #[error("failed to persist checkpoint summary state row: {source}")]
+    UpsertIndexState {
+        /// Index state repository error.
+        #[source]
+        source: Box<obs_sdk_storage::IndexStateRepositoryError>,
+    },
+    /// Applying incremental index batch failed.
+    #[error("failed to apply incremental batch from checkpoint: {source}")]
+    ApplyIncremental {
+        /// Incremental indexing error.
+        #[source]
+        source: Box<FullIndexError>,
+    },
+    /// Reading system clock failed.
+    #[error("failed to read current time during checkpointed indexing: {source}")]
+    Clock {
+        /// System time conversion error.
+        #[source]
+        source: Box<std::time::SystemTimeError>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1166,8 +1541,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, CoalescedBatchIndexService, FullIndexService, IncrementalIndexService,
-        StaleCleanupService,
+        CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, FullIndexService,
+        IncrementalIndexService, StaleCleanupService,
     };
 
     #[test]
@@ -1387,6 +1762,135 @@ mod tests {
             error,
             super::FullIndexError::InvalidBatchSize { .. }
         ));
+    }
+
+    #[test]
+    fn checkpointed_apply_persists_progress_and_resume_finishes_remaining_paths() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+        fs::write(temp.path().join("notes/c.md"), "# C").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let before_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b before")
+            .expect("b exists before");
+        let before_c = FilesRepository::get_by_normalized_path(&connection, "notes/c.md")
+            .expect("get c before")
+            .expect("c exists before");
+
+        fs::write(temp.path().join("notes/a.md"), "# A changed").expect("update a");
+        fs::write(temp.path().join("notes/b.md"), "# B changed").expect("update b");
+        fs::write(temp.path().join("notes/c.md"), "# C changed").expect("update c");
+
+        let first = CheckpointedIndexService::default()
+            .apply_checkpointed(
+                temp.path(),
+                &mut connection,
+                &[
+                    PathBuf::from("notes/a.md"),
+                    PathBuf::from("notes/b.md"),
+                    PathBuf::from("notes/c.md"),
+                ],
+                1,
+                Some(1),
+                CasePolicy::Sensitive,
+            )
+            .expect("first checkpointed run");
+
+        assert!(!first.started_from_checkpoint);
+        assert_eq!(first.total_paths, 3);
+        assert_eq!(first.processed_paths, 1);
+        assert_eq!(first.remaining_paths, 2);
+        assert_eq!(first.batches_applied, 1);
+        assert!(!first.checkpoint_completed);
+        assert!(
+            IndexStateRepository::get_by_key(&connection, "checkpoint.incremental_index")
+                .expect("get checkpoint state")
+                .is_some()
+        );
+
+        let mid_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b mid")
+            .expect("b exists mid");
+        assert_eq!(mid_b.hash_blake3, before_b.hash_blake3);
+
+        let resumed = CheckpointedIndexService::default()
+            .apply_checkpointed(
+                temp.path(),
+                &mut connection,
+                &[],
+                8,
+                None,
+                CasePolicy::Insensitive,
+            )
+            .expect("resume checkpointed run");
+
+        assert!(resumed.started_from_checkpoint);
+        assert_eq!(resumed.total_paths, 3);
+        assert_eq!(resumed.processed_paths, 2);
+        assert_eq!(resumed.remaining_paths, 0);
+        assert_eq!(resumed.batches_applied, 2);
+        assert!(resumed.checkpoint_completed);
+        assert!(
+            IndexStateRepository::get_by_key(&connection, "checkpoint.incremental_index")
+                .expect("get consumed checkpoint state")
+                .is_none()
+        );
+
+        let after_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b after")
+            .expect("b exists after");
+        let after_c = FilesRepository::get_by_normalized_path(&connection, "notes/c.md")
+            .expect("get c after")
+            .expect("c exists after");
+        assert_ne!(after_b.hash_blake3, before_b.hash_blake3);
+        assert_ne!(after_c.hash_blake3, before_c.hash_blake3);
+
+        let summary =
+            IndexStateRepository::get_by_key(&connection, "last_checkpointed_index_summary")
+                .expect("get checkpoint summary")
+                .expect("checkpoint summary exists");
+        let summary_json: JsonValue =
+            serde_json::from_str(&summary.value_json).expect("parse checkpoint summary");
+        assert_eq!(
+            summary_json
+                .get("checkpoint_completed")
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn checkpointed_apply_returns_noop_when_no_checkpoint_exists() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let result = CheckpointedIndexService::default()
+            .apply_checkpointed(
+                temp.path(),
+                &mut connection,
+                &[],
+                32,
+                None,
+                CasePolicy::Sensitive,
+            )
+            .expect("resume with no checkpoint");
+
+        assert!(result.started_from_checkpoint);
+        assert_eq!(result.total_paths, 0);
+        assert_eq!(result.processed_paths, 0);
+        assert_eq!(result.remaining_paths, 0);
+        assert!(result.checkpoint_completed);
     }
 
     #[test]

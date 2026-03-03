@@ -20,6 +20,7 @@ pub use import_export::{
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
 pub use indexing::{
+    CheckpointedIndexError, CheckpointedIndexResult, CheckpointedIndexService,
     CoalescedBatchIndexResult, CoalescedBatchIndexService, FullIndexError, FullIndexResult,
     FullIndexService, IncrementalIndexResult, IncrementalIndexService, StaleCleanupError,
     StaleCleanupResult, StaleCleanupService,
