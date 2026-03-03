@@ -1,5 +1,6 @@
 //! Service-layer orchestration entrypoints over SDK subsystem crates.
 
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -271,9 +272,25 @@ impl NoteCrudService {
             })?;
 
         let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
-        self.coordinator
-            .insert_file_metadata(connection, &record)
-            .map_err(|source| NoteCrudError::Coordinator { source })?;
+        if let Err(source) = self.coordinator.insert_file_metadata(connection, &record) {
+            match fs::remove_file(&absolute) {
+                Ok(_) => {
+                    return Err(NoteCrudError::Coordinator {
+                        source: Box::new(source),
+                    });
+                }
+                Err(rollback_source) => {
+                    return Err(NoteCrudError::CoordinatorRollback {
+                        source: Box::new(source),
+                        details: Box::new(RollbackFailure {
+                            step: "delete_created_file",
+                            path: absolute,
+                            error: rollback_source.to_string(),
+                        }),
+                    });
+                }
+            }
+        }
 
         self.events.publish(DomainEvent::NoteChanged {
             file_id: file_id.to_string(),
@@ -298,15 +315,39 @@ impl NoteCrudService {
     ) -> Result<NoteCrudResult, NoteCrudError> {
         validate_relative_note_path(relative_path)?;
         let absolute = vault_root.join(relative_path);
+        let previous_content =
+            fs::read(&absolute).map_err(|source| NoteCrudError::ReadFileForRollback {
+                path: absolute.clone(),
+                source,
+            })?;
         fs::write(&absolute, content).map_err(|source| NoteCrudError::WriteFile {
             path: absolute.clone(),
             source,
         })?;
 
         let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
-        self.coordinator
+        if let Err(source) = self
+            .coordinator
             .replace_file_metadata(connection, file_id, &record)
-            .map_err(|source| NoteCrudError::Coordinator { source })?;
+        {
+            match fs::write(&absolute, &previous_content) {
+                Ok(_) => {
+                    return Err(NoteCrudError::Coordinator {
+                        source: Box::new(source),
+                    });
+                }
+                Err(rollback_source) => {
+                    return Err(NoteCrudError::CoordinatorRollback {
+                        source: Box::new(source),
+                        details: Box::new(RollbackFailure {
+                            step: "restore_previous_content",
+                            path: absolute,
+                            error: rollback_source.to_string(),
+                        }),
+                    });
+                }
+            }
+        }
 
         self.events.publish(DomainEvent::NoteChanged {
             file_id: file_id.to_string(),
@@ -334,6 +375,16 @@ impl NoteCrudService {
         };
 
         let absolute = vault_root.join(&existing.normalized_path);
+        let deleted_file_bytes = if absolute.exists() {
+            Some(
+                fs::read(&absolute).map_err(|source| NoteCrudError::ReadFileForRollback {
+                    path: absolute.clone(),
+                    source,
+                })?,
+            )
+        } else {
+            None
+        };
         if absolute.exists() {
             fs::remove_file(&absolute).map_err(|source| NoteCrudError::DeleteFile {
                 path: absolute.clone(),
@@ -341,10 +392,33 @@ impl NoteCrudService {
             })?;
         }
 
-        let removed = self
-            .coordinator
-            .delete_file_metadata(connection, file_id)
-            .map_err(|source| NoteCrudError::Coordinator { source })?;
+        let removed = match self.coordinator.delete_file_metadata(connection, file_id) {
+            Ok(removed) => removed,
+            Err(source) => {
+                if let Some(bytes) = deleted_file_bytes {
+                    match fs::write(&absolute, bytes) {
+                        Ok(_) => {
+                            return Err(NoteCrudError::Coordinator {
+                                source: Box::new(source),
+                            });
+                        }
+                        Err(rollback_source) => {
+                            return Err(NoteCrudError::CoordinatorRollback {
+                                source: Box::new(source),
+                                details: Box::new(RollbackFailure {
+                                    step: "restore_deleted_file",
+                                    path: absolute,
+                                    error: rollback_source.to_string(),
+                                }),
+                            });
+                        }
+                    }
+                }
+                return Err(NoteCrudError::Coordinator {
+                    source: Box::new(source),
+                });
+            }
+        };
 
         if removed {
             self.events.publish(DomainEvent::NoteChanged {
@@ -391,9 +465,28 @@ impl NoteCrudService {
         })?;
 
         let record = fingerprint_to_file_record(file_id, vault_root, new_relative_path)?;
-        self.coordinator
+        if let Err(source) = self
+            .coordinator
             .replace_file_metadata(connection, file_id, &record)
-            .map_err(|source| NoteCrudError::Coordinator { source })?;
+        {
+            match fs::rename(&new_absolute, &old_absolute) {
+                Ok(_) => {
+                    return Err(NoteCrudError::Coordinator {
+                        source: Box::new(source),
+                    });
+                }
+                Err(rollback_source) => {
+                    return Err(NoteCrudError::CoordinatorRollback {
+                        source: Box::new(source),
+                        details: Box::new(RollbackFailure {
+                            step: "rename_back_to_original_path",
+                            path: old_absolute,
+                            error: rollback_source.to_string(),
+                        }),
+                    });
+                }
+            }
+        }
 
         self.events.publish(DomainEvent::NoteChanged {
             file_id: file_id.to_string(),
@@ -500,6 +593,15 @@ pub enum NoteCrudError {
         #[source]
         source: std::io::Error,
     },
+    /// Reading note file content for rollback failed.
+    #[error("failed to read note file '{path}' for rollback safety: {source}")]
+    ReadFileForRollback {
+        /// File path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
     /// Renaming note file failed.
     #[error("failed to rename note file from '{from}' to '{to}': {source}")]
     RenameFile {
@@ -545,7 +647,18 @@ pub enum NoteCrudError {
     Coordinator {
         /// Coordinator error.
         #[source]
-        source: SdkTransactionError,
+        source: Box<SdkTransactionError>,
+    },
+    /// Coordinator transaction failed and filesystem rollback also failed.
+    #[error(
+        "note coordinator failed and filesystem rollback failed: {details}; coordinator: {source}"
+    )]
+    CoordinatorRollback {
+        /// Coordinator error.
+        #[source]
+        source: Box<SdkTransactionError>,
+        /// Rollback failure details.
+        details: Box<RollbackFailure>,
     },
     /// Repository query failed.
     #[error("note repository query failed: {source}")]
@@ -554,6 +667,29 @@ pub enum NoteCrudError {
         #[source]
         source: obs_sdk_storage::FilesRepositoryError,
     },
+}
+
+/// Filesystem rollback failure details for note write paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackFailure {
+    /// Rollback step identifier.
+    pub step: &'static str,
+    /// Filesystem path that failed rollback.
+    pub path: PathBuf,
+    /// Rollback failure details.
+    pub error: String,
+}
+
+impl fmt::Display for RollbackFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "step '{}' failed for '{}': {}",
+            self.step,
+            self.path.display(),
+            self.error
+        )
+    }
 }
 
 /// Result payload for typed property update operations.
@@ -645,7 +781,9 @@ impl PropertyUpdateService {
                 Path::new(&existing.normalized_path),
                 &updated_markdown,
             )
-            .map_err(|source| PropertyUpdateError::NoteUpdate { source })?;
+            .map_err(|source| PropertyUpdateError::NoteUpdate {
+                source: Box::new(source),
+            })?;
 
         let parsed = self
             .parser
@@ -741,7 +879,7 @@ pub enum PropertyUpdateError {
     NoteUpdate {
         /// Note update error.
         #[source]
-        source: NoteCrudError,
+        source: Box<NoteCrudError>,
     },
     /// Parsing updated markdown failed.
     #[error("failed to parse updated markdown after property set: {source}")]
@@ -1234,6 +1372,100 @@ mod tests {
             backlinks[0].resolved_path.as_deref(),
             Some("archive/renamed-target.md")
         );
+    }
+
+    #[test]
+    fn note_crud_service_rolls_back_created_file_when_metadata_insert_fails() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let coordinator = SdkTransactionCoordinator;
+        coordinator
+            .insert_file_metadata(
+                &mut connection,
+                &file_record(
+                    "conflict",
+                    "notes/conflict.md",
+                    "notes/conflict.md",
+                    "/ghost/conflict.md",
+                ),
+            )
+            .expect("seed conflicting metadata");
+
+        let service = NoteCrudService::default();
+        let error = service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "new-file",
+                Path::new("notes/conflict.md"),
+                "# New",
+            )
+            .expect_err("create should fail on metadata conflict");
+
+        assert!(matches!(error, NoteCrudError::Coordinator { .. }));
+        assert!(!vault_root.join("notes/conflict.md").exists());
+        assert!(
+            FilesRepository::get_by_id(&connection, "new-file")
+                .expect("get metadata for failed create")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn note_crud_service_rolls_back_rename_when_metadata_update_fails() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "note-a",
+                Path::new("notes/a.md"),
+                "# A",
+            )
+            .expect("create note a");
+
+        let coordinator = SdkTransactionCoordinator;
+        coordinator
+            .insert_file_metadata(
+                &mut connection,
+                &file_record(
+                    "conflict",
+                    "notes/conflict.md",
+                    "notes/conflict.md",
+                    "/ghost/conflict.md",
+                ),
+            )
+            .expect("seed conflicting metadata");
+
+        let error = service
+            .rename_note(
+                &vault_root,
+                &mut connection,
+                "note-a",
+                Path::new("notes/conflict.md"),
+            )
+            .expect_err("rename should fail on metadata conflict");
+
+        assert!(matches!(error, NoteCrudError::Coordinator { .. }));
+        assert!(vault_root.join("notes/a.md").exists());
+        assert!(!vault_root.join("notes/conflict.md").exists());
+
+        let file_record = FilesRepository::get_by_id(&connection, "note-a")
+            .expect("get file row")
+            .expect("file row exists");
+        assert_eq!(file_record.normalized_path, "notes/a.md");
     }
 
     #[test]

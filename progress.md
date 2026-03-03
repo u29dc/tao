@@ -432,3 +432,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [import/export service boundaries implemented with typed transfer planning, dry-run/apply execution modes, and boundary contract tests]
 - residual_risk: transfer execution currently performs direct filesystem copies without conflict-resolution policies beyond overwrite toggle
+
+- timestamp: 2026-03-03T16:24:39Z
+- session: session-2026-03-03-a
+- ticket: SDK-012
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [note service flows now enforce failure-safe rollback for create/update/rename/delete with added rollback regression tests]
+- residual_risk: rollback assumes local filesystem operations are immediately reversible; cross-device rename edge-cases may need explicit fallback copy semantics
