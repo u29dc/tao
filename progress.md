@@ -242,3 +242,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [full vault scan service implemented with deterministic sorted manifest entries and stable canonical path metadata]
 - residual_risk: scan currently includes all files; markdown-only filtering is deferred to ingest pipeline tickets
+
+- timestamp: 2026-03-03T17:03:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-003
+- action: done
+- evidence:
+  - files: [Cargo.toml, Cargo.lock, crates/obs-sdk-vault/Cargo.toml, crates/obs-sdk-vault/src/lib.rs, crates/obs-sdk-vault/src/fingerprint.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [file fingerprint service implemented with canonical path mapping and tested mtime/size/blake3 hashing]
+- residual_risk: full-file hashing on every request may be expensive for very large binaries; batching/caching deferred to indexing tickets
