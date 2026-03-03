@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
 use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, load_or_bootstrap};
+use tao_sdk_storage::{MigrationRunnerError, preflight_migrations, run_migrations};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
@@ -185,6 +187,82 @@ impl SdkConfigLoader {
     }
 }
 
+/// Bootstrap snapshot returned after config resolution and migration readiness checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkBootstrapSnapshot {
+    /// Final resolved SDK configuration.
+    pub config: SdkConfig,
+    /// Root config path (`<cwd>/config.toml`).
+    pub root_config_path: PathBuf,
+    /// Vault config path (`<vault>/config.toml`).
+    pub vault_config_path: PathBuf,
+    /// Database path used by this bootstrap run.
+    pub db_path: PathBuf,
+    /// True when database was opened and migrations validated/applied.
+    pub db_ready: bool,
+    /// Count of known migrations compiled into the binary.
+    pub known_migrations: u64,
+    /// Count of applied migrations after bootstrap.
+    pub applied_migrations: u64,
+    /// Count of pending migrations after bootstrap.
+    pub pending_migrations: u64,
+}
+
+/// Bootstrap service that resolves config and initializes sqlite state.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SdkBootstrapService;
+
+impl SdkBootstrapService {
+    /// Bootstrap from process environment and explicit overrides.
+    pub fn bootstrap(
+        overrides: SdkConfigOverrides,
+    ) -> Result<SdkBootstrapSnapshot, SdkBootstrapError> {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let cwd = std::env::current_dir()
+            .map_err(|source| SdkBootstrapError::CurrentDirectory { source })?;
+        Self::bootstrap_from_map(overrides, &env, &cwd)
+    }
+
+    /// Bootstrap from injected environment map and cwd (primarily for tests).
+    pub fn bootstrap_from_map(
+        overrides: SdkConfigOverrides,
+        env: &HashMap<String, String>,
+        cwd: &Path,
+    ) -> Result<SdkBootstrapSnapshot, SdkBootstrapError> {
+        let config = SdkConfigLoader::load_from_map(overrides, env, cwd)
+            .map_err(|source| SdkBootstrapError::LoadConfig { source })?;
+
+        let mut connection = Connection::open(&config.db_path).map_err(|source| {
+            SdkBootstrapError::OpenDatabase {
+                path: config.db_path.clone(),
+                source,
+            }
+        })?;
+
+        run_migrations(&mut connection).map_err(|source| SdkBootstrapError::RunMigrations {
+            path: config.db_path.clone(),
+            source,
+        })?;
+
+        let preflight =
+            preflight_migrations(&connection).map_err(|source| SdkBootstrapError::Preflight {
+                path: config.db_path.clone(),
+                source,
+            })?;
+
+        Ok(SdkBootstrapSnapshot {
+            root_config_path: cwd.join("config.toml"),
+            vault_config_path: config.vault_root.join("config.toml"),
+            db_path: config.db_path.clone(),
+            db_ready: true,
+            known_migrations: preflight.known_migrations,
+            applied_migrations: preflight.applied_migrations,
+            pending_migrations: preflight.pending_migrations,
+            config,
+        })
+    }
+}
+
 fn choose_path(
     override_value: Option<PathBuf>,
     env_value: Option<PathBuf>,
@@ -352,6 +430,52 @@ pub enum SdkConfigError {
     },
 }
 
+/// SDK bootstrap service failures.
+#[derive(Debug, Error)]
+pub enum SdkBootstrapError {
+    /// Current working directory could not be resolved.
+    #[error("failed to read current directory for sdk bootstrap: {source}")]
+    CurrentDirectory {
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Config resolution failed.
+    #[error("failed to resolve sdk config during bootstrap: {source}")]
+    LoadConfig {
+        /// Config loader error.
+        #[source]
+        source: SdkConfigError,
+    },
+    /// Opening sqlite database failed.
+    #[error("failed to open sqlite database '{path}' during bootstrap: {source}")]
+    OpenDatabase {
+        /// Database path.
+        path: PathBuf,
+        /// SQLite open error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Running migrations failed.
+    #[error("failed to run sqlite migrations for '{path}' during bootstrap: {source}")]
+    RunMigrations {
+        /// Database path.
+        path: PathBuf,
+        /// Migration runner error.
+        #[source]
+        source: MigrationRunnerError,
+    },
+    /// Post-bootstrap migration preflight failed.
+    #[error("failed to preflight migrations for '{path}' during bootstrap: {source}")]
+    Preflight {
+        /// Database path.
+        path: PathBuf,
+        /// Migration preflight error.
+        #[source]
+        source: MigrationRunnerError,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -359,7 +483,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{CasePolicy, SdkConfigError, SdkConfigLoader, SdkConfigOverrides};
+    use super::{
+        CasePolicy, SdkBootstrapService, SdkConfigError, SdkConfigLoader, SdkConfigOverrides,
+    };
 
     #[test]
     fn load_from_map_applies_precedence_override_then_env_then_default() {
@@ -573,5 +699,33 @@ db_path = ".vault.sqlite"
         assert_eq!(loaded.feature_flags, vec!["vault-flag".to_string()]);
         assert_eq!(loaded.data_dir, canonical_vault.join(".vault-data"));
         assert_eq!(loaded.db_path, canonical_vault.join(".vault.sqlite"));
+    }
+
+    #[test]
+    fn sdk_bootstrap_service_returns_config_paths_and_db_ready_metadata() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let snapshot = SdkBootstrapService::bootstrap_from_map(
+            SdkConfigOverrides::default(),
+            &env,
+            temp.path(),
+        )
+        .expect("sdk bootstrap");
+
+        assert!(snapshot.db_ready);
+        assert_eq!(snapshot.known_migrations, 1);
+        assert_eq!(snapshot.pending_migrations, 0);
+        assert_eq!(snapshot.applied_migrations, 1);
+        assert_eq!(snapshot.db_path, snapshot.config.db_path);
+        assert!(snapshot.root_config_path.exists());
+        assert!(snapshot.vault_config_path.exists());
     }
 }

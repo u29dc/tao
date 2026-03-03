@@ -1452,3 +1452,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
   - outcomes: [effective sdk config now applies precedence defaults < root config.toml < vault config.toml, while preserving higher-priority env and explicit overrides]
 - residual_risk: cli/sdk bootstrap APIs still expose only final resolved runtime values; richer bootstrap metadata wiring is handled in SDK-017
+
+- timestamp: 2026-03-04T00:02:30Z
+- session: session-2026-03-03-b
+- ticket: SDK-017
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/lib.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+  - outcomes: [new SdkBootstrapService API resolves config, ensures root+vault config files, opens sqlite, runs migrations, and returns db readiness metadata with resolved config paths]
+- residual_risk: cli wrappers still call local bootstrap logic directly until CLI-007..CLI-009 migration completes

@@ -14,7 +14,10 @@ mod import_export;
 mod indexing;
 mod tracing_hooks;
 
-pub use config::{SdkConfig, SdkConfigError, SdkConfigLoader, SdkConfigOverrides};
+pub use config::{
+    SdkBootstrapError, SdkBootstrapService, SdkBootstrapSnapshot, SdkConfig, SdkConfigError,
+    SdkConfigLoader, SdkConfigOverrides,
+};
 pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use import_export::{
     FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
