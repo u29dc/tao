@@ -270,6 +270,239 @@ fn serialize_view_config(
     Ok(serde_json::Value::Object(config))
 }
 
+/// Query planner request for one table view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableQueryPlanRequest {
+    /// Target view name.
+    pub view_name: String,
+    /// One-based page number.
+    pub page: u32,
+    /// Page size.
+    pub page_size: u32,
+}
+
+/// Property query request hint derived from a base table plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PropertyQueryPlanRequest {
+    /// Property key to query.
+    pub key: String,
+    /// Optional substring filter.
+    pub value_contains: Option<String>,
+    /// Sort strategy.
+    pub sort: PropertyQuerySortHint,
+    /// Optional row limit.
+    pub limit: Option<usize>,
+    /// Pagination row offset.
+    pub offset: usize,
+}
+
+/// Sort hints that map to service-level property query sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PropertyQuerySortHint {
+    /// File path ascending.
+    FilePathAsc,
+    /// File path descending.
+    FilePathDesc,
+    /// Updated timestamp ascending.
+    UpdatedAtAsc,
+    /// Updated timestamp descending.
+    UpdatedAtDesc,
+    /// Value ascending.
+    ValueAsc,
+    /// Value descending.
+    ValueDesc,
+}
+
+/// Compiled table query plan for one base view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableQueryPlan {
+    /// View name.
+    pub view_name: String,
+    /// Optional path source prefix.
+    pub source_prefix: Option<String>,
+    /// Unique property keys required by filter/sort/column planning.
+    pub required_property_keys: Vec<String>,
+    /// Normalized filter predicates.
+    pub filters: Vec<BaseFilterClause>,
+    /// Normalized sort clauses.
+    pub sorts: Vec<BaseSortClause>,
+    /// Normalized column list.
+    pub columns: Vec<BaseColumnConfig>,
+    /// Query limit.
+    pub limit: usize,
+    /// Query offset.
+    pub offset: usize,
+    /// Per-key property query hints for executor layer wiring.
+    pub property_queries: Vec<PropertyQueryPlanRequest>,
+}
+
+/// Query planner that compiles base table definitions into executable plan metadata.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BaseTableQueryPlanner;
+
+impl BaseTableQueryPlanner {
+    /// Compile one view query plan from registry metadata and paging settings.
+    pub fn compile(
+        &self,
+        registry: &BaseViewRegistry,
+        request: &TableQueryPlanRequest,
+    ) -> Result<TableQueryPlan, BaseTableQueryPlanError> {
+        if request.view_name.trim().is_empty() {
+            return Err(BaseTableQueryPlanError::MissingViewName);
+        }
+        if request.page == 0 || request.page_size == 0 {
+            return Err(BaseTableQueryPlanError::InvalidPagination {
+                page: request.page,
+                page_size: request.page_size,
+            });
+        }
+
+        let view = registry.get(&request.view_name).ok_or_else(|| {
+            BaseTableQueryPlanError::ViewNotFound {
+                view_name: request.view_name.clone(),
+            }
+        })?;
+
+        let config: RegistryTableConfig =
+            serde_json::from_value(view.config.clone()).map_err(|source| {
+                BaseTableQueryPlanError::InvalidViewConfig {
+                    view_name: view.name.clone(),
+                    source,
+                }
+            })?;
+
+        let source_prefix = config.source.and_then(|source| {
+            let normalized = source.trim().trim_matches('/').to_string();
+            (!normalized.is_empty()).then_some(normalized)
+        });
+        let filters = config.filters;
+        let sorts = config.sorts;
+        let mut columns = config.columns;
+
+        let required_property_keys = collect_required_property_keys(&filters, &sorts, &columns);
+        if columns.is_empty() {
+            columns = required_property_keys
+                .iter()
+                .map(|key| BaseColumnConfig {
+                    key: key.clone(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                })
+                .collect();
+        }
+
+        let limit = request.page_size as usize;
+        let page_offset = (request.page - 1) as usize;
+        let offset =
+            page_offset
+                .checked_mul(limit)
+                .ok_or(BaseTableQueryPlanError::PaginationOverflow {
+                    page: request.page,
+                    page_size: request.page_size,
+                })?;
+        let property_queries =
+            build_property_query_hints(&required_property_keys, &filters, &sorts, limit, offset);
+
+        Ok(TableQueryPlan {
+            view_name: view.name.clone(),
+            source_prefix,
+            required_property_keys,
+            filters,
+            sorts,
+            columns,
+            limit,
+            offset,
+            property_queries,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RegistryTableConfig {
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    filters: Vec<BaseFilterClause>,
+    #[serde(default)]
+    sorts: Vec<BaseSortClause>,
+    #[serde(default)]
+    columns: Vec<BaseColumnConfig>,
+}
+
+fn collect_required_property_keys(
+    filters: &[BaseFilterClause],
+    sorts: &[BaseSortClause],
+    columns: &[BaseColumnConfig],
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut dedupe = HashSet::new();
+
+    for key in filters
+        .iter()
+        .map(|filter| filter.key.as_str())
+        .chain(sorts.iter().map(|sort| sort.key.as_str()))
+        .chain(columns.iter().map(|column| column.key.as_str()))
+    {
+        let normalized = key.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        let dedupe_key = normalized.to_ascii_lowercase();
+        if dedupe.insert(dedupe_key) {
+            keys.push(normalized.to_string());
+        }
+    }
+
+    keys
+}
+
+fn build_property_query_hints(
+    required_keys: &[String],
+    filters: &[BaseFilterClause],
+    sorts: &[BaseSortClause],
+    limit: usize,
+    offset: usize,
+) -> Vec<PropertyQueryPlanRequest> {
+    required_keys
+        .iter()
+        .map(|key| {
+            let sort = sorts
+                .iter()
+                .find(|sort_clause| sort_clause.key.eq_ignore_ascii_case(key))
+                .map(|sort_clause| match sort_clause.direction {
+                    BaseSortDirection::Asc => PropertyQuerySortHint::ValueAsc,
+                    BaseSortDirection::Desc => PropertyQuerySortHint::ValueDesc,
+                })
+                .unwrap_or(PropertyQuerySortHint::FilePathAsc);
+            let value_contains = filters
+                .iter()
+                .find(|filter| {
+                    filter.key.eq_ignore_ascii_case(key) && filter.op == BaseFilterOp::Contains
+                })
+                .and_then(|filter| json_scalar_to_string(&filter.value));
+
+            PropertyQueryPlanRequest {
+                key: key.clone(),
+                value_contains,
+                sort,
+                limit: Some(limit),
+                offset,
+            }
+        })
+        .collect()
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 /// Parse one `.base` document from YAML text.
 pub fn parse_base_document(input: &str) -> Result<BaseDocument, BaseParseError> {
     if input.trim().is_empty() {
@@ -758,13 +991,53 @@ pub enum BaseViewRegistryError {
     },
 }
 
+/// Table query planner failures.
+#[derive(Debug, Error)]
+pub enum BaseTableQueryPlanError {
+    /// Request view name was empty.
+    #[error("table query plan requires a non-empty view name")]
+    MissingViewName,
+    /// Pagination values were invalid.
+    #[error("invalid table query pagination page={page} page_size={page_size}")]
+    InvalidPagination {
+        /// One-based page number.
+        page: u32,
+        /// Page size.
+        page_size: u32,
+    },
+    /// Pagination overflow occurred during offset computation.
+    #[error("table query pagination overflow page={page} page_size={page_size}")]
+    PaginationOverflow {
+        /// One-based page number.
+        page: u32,
+        /// Page size.
+        page_size: u32,
+    },
+    /// Requested view does not exist in registry.
+    #[error("base view '{view_name}' not found in registry")]
+    ViewNotFound {
+        /// Requested view name.
+        view_name: String,
+    },
+    /// Registry config payload could not be decoded.
+    #[error("invalid config payload for base view '{view_name}': {source}")]
+    InvalidViewConfig {
+        /// View name.
+        view_name: String,
+        /// JSON deserialization error.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::{
         BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseParseError, BaseSortClause,
-        BaseSortDirection, BaseViewKind, BaseViewRegistry, BaseViewRegistryError,
+        BaseSortDirection, BaseTableQueryPlanError, BaseTableQueryPlanner, BaseViewKind,
+        BaseViewRegistry, BaseViewRegistryError, PropertyQuerySortHint, TableQueryPlanRequest,
         parse_base_document,
     };
 
@@ -960,6 +1233,113 @@ views:
         assert!(matches!(
             error,
             BaseViewRegistryError::DuplicateViewName { name } if name == "projects"
+        ));
+    }
+
+    #[test]
+    fn table_query_planner_compiles_registry_view_into_query_plan() {
+        let document = parse_base_document(
+            r#"
+views:
+  - name: Projects
+    type: table
+    source: notes/projects
+    filters:
+      - key: status
+        op: eq
+        value: active
+      - key: assignee
+        op: contains
+        value: han
+    sorts:
+      - key: due
+        direction: desc
+    columns:
+      - status
+      - due
+"#,
+        )
+        .expect("parse document");
+        let registry = BaseViewRegistry::from_document(&document).expect("build registry");
+
+        let plan = BaseTableQueryPlanner
+            .compile(
+                &registry,
+                &TableQueryPlanRequest {
+                    view_name: "projects".to_string(),
+                    page: 2,
+                    page_size: 25,
+                },
+            )
+            .expect("compile query plan");
+
+        assert_eq!(plan.view_name, "Projects");
+        assert_eq!(plan.source_prefix.as_deref(), Some("notes/projects"));
+        assert_eq!(
+            plan.required_property_keys,
+            vec![
+                "status".to_string(),
+                "assignee".to_string(),
+                "due".to_string(),
+            ]
+        );
+        assert_eq!(plan.limit, 25);
+        assert_eq!(plan.offset, 25);
+        assert_eq!(plan.property_queries.len(), 3);
+        assert_eq!(plan.property_queries[1].key, "assignee");
+        assert_eq!(
+            plan.property_queries[1].value_contains.as_deref(),
+            Some("han")
+        );
+        assert_eq!(
+            plan.property_queries[2].sort,
+            PropertyQuerySortHint::ValueDesc
+        );
+    }
+
+    #[test]
+    fn table_query_planner_rejects_missing_view_and_invalid_pagination() {
+        let document = parse_base_document(
+            r#"
+views:
+  - name: Projects
+    type: table
+"#,
+        )
+        .expect("parse document");
+        let registry = BaseViewRegistry::from_document(&document).expect("build registry");
+
+        let missing_view = BaseTableQueryPlanner
+            .compile(
+                &registry,
+                &TableQueryPlanRequest {
+                    view_name: "missing".to_string(),
+                    page: 1,
+                    page_size: 10,
+                },
+            )
+            .expect_err("missing view should fail");
+        assert!(matches!(
+            missing_view,
+            BaseTableQueryPlanError::ViewNotFound { view_name } if view_name == "missing"
+        ));
+
+        let invalid_page = BaseTableQueryPlanner
+            .compile(
+                &registry,
+                &TableQueryPlanRequest {
+                    view_name: "Projects".to_string(),
+                    page: 0,
+                    page_size: 10,
+                },
+            )
+            .expect_err("invalid page should fail");
+        assert!(matches!(
+            invalid_page,
+            BaseTableQueryPlanError::InvalidPagination {
+                page: 0,
+                page_size: 10
+            }
         ));
     }
 }

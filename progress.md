@@ -682,3 +682,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [base view registry added to expose deterministic view listing and name lookup with typed kind plus serialized config payload, including duplicate-name validation and registry tests]
 - residual_risk: registry currently validates duplicate names case-insensitively but does not yet enforce stricter naming conventions beyond non-empty normalized strings
+
+- timestamp: 2026-03-03T17:28:56Z
+- session: session-2026-03-03-a
+- ticket: BASE-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [base table query planner added to compile registry view configs into deterministic query plans with normalized pagination, required property key extraction, and per-key property-query hints aligned to PROP-006 sort/filter capabilities]
+- residual_risk: planner currently emits metadata plans only; execution semantics for non-contains operators and multi-key joins are deferred to BASE-004 executor logic
