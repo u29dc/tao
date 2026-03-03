@@ -213,3 +213,12 @@ Append-only execution log for autonomous runs.
   - outcomes: [bench crate and deterministic fixture generation scaffold added]
 - residual_risk: fixture generation runtime for 25k profile may be heavy in ci
 
+- timestamp: 2026-03-03T16:27:30Z
+- session: session-2026-03-03-a
+- ticket: INFRA-008
+- action: done
+- evidence:
+  - files: [Cargo.toml, Cargo.lock, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [release and bench profile tuning aligned to performance contract; lockfile synced]
+- residual_risk: panic=abort reduces runtime overhead but requires panic-free boundary discipline in ffi paths
