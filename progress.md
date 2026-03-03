@@ -332,3 +332,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [service-layer sdk transaction coordinator added and verified for atomic write/rollback behavior]
 - residual_risk: coordinator currently manages file metadata writes only; additional domain write coordinators will be layered as services expand
+
+- timestamp: 2026-03-03T18:49:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-core/src/lib.rs, crates/obs-sdk-core/src/event_bus.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [in-process domain event bus implemented with subscribe/unsubscribe and publish fan-out tests]
+- residual_risk: bus currently delivers events synchronously in-process; async/backpressure semantics can be layered later if required

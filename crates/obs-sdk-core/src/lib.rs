@@ -1,6 +1,5 @@
-//! obs-sdk-core placeholder crate.
+//! Core SDK primitives shared by subsystem crates.
 
-/// Returns the crate identifier.
-pub fn crate_name() -> &'static str {
-    "obs-sdk-core"
-}
+mod event_bus;
+
+pub use event_bus::{DomainEvent, DomainEventBus, NoteChangeKind, SubscriptionId};
