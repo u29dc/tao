@@ -9,7 +9,7 @@ import Foundation
 @Test func app_smoke_launch_open_navigate_edit_flow() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-app-smoke-\(UUID().uuidString)")
+        .appendingPathComponent("tao-app-smoke-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -81,7 +81,7 @@ import Foundation
 @Test func bridge_client_calls_vault_stats_and_note_get() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -123,7 +123,7 @@ import Foundation
 @Test func bridge_client_note_context_returns_note_and_links_in_single_call() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-note-context-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-note-context-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -163,7 +163,7 @@ import Foundation
 @Test func bridge_client_note_put_creates_and_updates_notes() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-write-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-write-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -208,7 +208,7 @@ import Foundation
 @Test func bridge_client_notes_list_pages_results() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-list-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-list-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -260,7 +260,7 @@ import Foundation
 @Test func bridge_client_note_links_returns_panels() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-links-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-links-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -288,7 +288,7 @@ import Foundation
 @Test func bridge_client_bases_list_and_missing_view_errors_are_typed() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-bases-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-bases-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -332,7 +332,7 @@ import Foundation
 @Test func bridge_client_events_poll_returns_note_write_events() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-events-test-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-events-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
@@ -494,7 +494,7 @@ private struct MockBridgeScriptFixture {
 private func makeMockBridgeScript(payload: String) throws -> MockBridgeScriptFixture {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent(.tao-bridge-mock-\(UUID().uuidString)")
+        .appendingPathComponent("tao-bridge-mock-\(UUID().uuidString)")
     try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
 
     let script = tempRoot.appendingPathComponent("mock-bridge.sh")

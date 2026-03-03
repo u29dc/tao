@@ -67,9 +67,9 @@ private struct AppErrorState: Identifiable {
 }
 
 private enum StartupPersistenceKeys {
-    static let vaultRoot = .tao.startup.vault_root"
-    static let dbPath = .tao.startup.db_path"
-    static let notePath = .tao.startup.note_path"
+    static let vaultRoot = "tao.startup.vault_root"
+    static let dbPath = "tao.startup.db_path"
+    static let notePath = "tao.startup.note_path"
 }
 
 private struct TaoRootSplitView: View {
@@ -135,7 +135,7 @@ private struct TaoRootSplitView: View {
                 Label(item.rawValue, systemImage: icon(for: item))
                     .tag(Optional(item))
             }
-            .navigationTitle(.tao")
+            .navigationTitle("tao")
         } content: {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Workspace")
