@@ -292,3 +292,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [forward-only migration runner with checksum verification and mismatch guard implemented]
 - residual_risk: migration manifest currently includes only `0001_init`; additional migrations will expand checksum coverage
+
+- timestamp: 2026-03-03T18:04:00Z
+- session: session-2026-03-03-a
+- ticket: DB-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/lib.rs, crates/obs-sdk-storage/src/files.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [files repository CRUD and transactional bulk upsert implemented with integration tests]
+- residual_risk: repository currently uses string ids directly; typed id wrappers can be introduced in sdk-core primitives later

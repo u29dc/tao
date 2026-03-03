@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod files;
+
+pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
+
 /// Initial schema migration identifier.
 pub const MIGRATION_0001_ID: &str = "0001_init";
 /// Initial schema SQL payload.
