@@ -387,6 +387,7 @@ version = "0.1.0"
 name = "obs-sdk-service"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "obs-sdk-core",
  "obs-sdk-markdown",
  "obs-sdk-properties",
