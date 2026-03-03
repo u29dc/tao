@@ -6,6 +6,7 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 mod config;
 mod feature_flags;
@@ -1864,6 +1865,204 @@ pub enum BaseValidationError {
     },
 }
 
+#[derive(Debug, Default)]
+struct BaseTableCacheState {
+    metadata_digest: Option<String>,
+    entries: HashMap<String, BaseTablePage>,
+}
+
+/// Cached base table query service with automatic invalidation on metadata changes.
+#[derive(Debug, Default)]
+pub struct BaseTableCachedQueryService {
+    executor: BaseTableExecutorService,
+    state: Mutex<BaseTableCacheState>,
+}
+
+impl BaseTableCachedQueryService {
+    /// Execute one table plan using cache when the metadata digest is unchanged.
+    pub fn execute(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+    ) -> Result<BaseTablePage, BaseTableCacheError> {
+        let metadata_digest = compute_base_table_metadata_digest(connection)?;
+        let cache_key = serde_json::to_string(plan)
+            .map_err(|source| BaseTableCacheError::SerializePlan { source })?;
+
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| BaseTableCacheError::LockPoisoned)?;
+            if state.metadata_digest.as_deref() != Some(&metadata_digest) {
+                state.entries.clear();
+                state.metadata_digest = Some(metadata_digest.clone());
+            }
+            if let Some(cached) = state.entries.get(&cache_key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let computed = self
+            .executor
+            .execute(connection, plan)
+            .map_err(|source| BaseTableCacheError::Execute { source })?;
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| BaseTableCacheError::LockPoisoned)?;
+        if state.metadata_digest.as_deref() != Some(&metadata_digest) {
+            state.entries.clear();
+            state.metadata_digest = Some(metadata_digest);
+        }
+        state.entries.insert(cache_key, computed.clone());
+        Ok(computed)
+    }
+
+    /// Explicitly clear all cached table pages.
+    pub fn invalidate_all(&self) -> Result<(), BaseTableCacheError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| BaseTableCacheError::LockPoisoned)?;
+        state.entries.clear();
+        state.metadata_digest = None;
+        Ok(())
+    }
+}
+
+fn compute_base_table_metadata_digest(
+    connection: &Connection,
+) -> Result<String, BaseTableCacheError> {
+    let mut hasher = blake3::Hasher::new();
+    hash_table_rows_into_digest(
+        connection,
+        &mut hasher,
+        "files",
+        r#"
+SELECT file_id, normalized_path, indexed_at, hash_blake3
+FROM files
+ORDER BY file_id ASC
+"#,
+    )?;
+    hash_table_rows_into_digest(
+        connection,
+        &mut hasher,
+        "properties",
+        r#"
+SELECT property_id, file_id, key, value_json, updated_at
+FROM properties
+ORDER BY property_id ASC
+"#,
+    )?;
+    hash_table_rows_into_digest(
+        connection,
+        &mut hasher,
+        "bases",
+        r#"
+SELECT base_id, file_id, config_json, updated_at
+FROM bases
+ORDER BY base_id ASC
+"#,
+    )?;
+
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn hash_table_rows_into_digest(
+    connection: &Connection,
+    hasher: &mut blake3::Hasher,
+    table_name: &'static str,
+    query: &'static str,
+) -> Result<(), BaseTableCacheError> {
+    hasher.update(table_name.as_bytes());
+    hasher.update(&[0x1d]);
+
+    let mut statement =
+        connection
+            .prepare(query)
+            .map_err(|source| BaseTableCacheError::DigestQuery {
+                operation: "prepare_digest_query",
+                source,
+            })?;
+    let mut rows = statement
+        .query([])
+        .map_err(|source| BaseTableCacheError::DigestQuery {
+            operation: "run_digest_query",
+            source,
+        })?;
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|source| BaseTableCacheError::DigestQuery {
+            operation: "iterate_digest_rows",
+            source,
+        })?
+    {
+        for column_index in 0..row.as_ref().column_count() {
+            let value =
+                row.get_ref(column_index)
+                    .map_err(|source| BaseTableCacheError::DigestQuery {
+                        operation: "read_digest_row_value",
+                        source,
+                    })?;
+            match value {
+                rusqlite::types::ValueRef::Null => {
+                    hasher.update(b"<null>");
+                }
+                rusqlite::types::ValueRef::Integer(value) => {
+                    hasher.update(value.to_string().as_bytes());
+                }
+                rusqlite::types::ValueRef::Real(value) => {
+                    hasher.update(value.to_string().as_bytes());
+                }
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    hasher.update(bytes);
+                }
+                rusqlite::types::ValueRef::Blob(bytes) => {
+                    hasher.update(bytes);
+                }
+            }
+            hasher.update(&[0x1f]);
+        }
+        hasher.update(&[0x1e]);
+    }
+
+    Ok(())
+}
+
+/// Cached base table query failures.
+#[derive(Debug, Error)]
+pub enum BaseTableCacheError {
+    /// Cache lock was poisoned.
+    #[error("base table cache lock poisoned")]
+    LockPoisoned,
+    /// Plan serialization failed while creating cache key.
+    #[error("failed to serialize table plan for cache key: {source}")]
+    SerializePlan {
+        /// JSON serialization error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Metadata digest query failed.
+    #[error("failed to compute base metadata digest during '{operation}': {source}")]
+    DigestQuery {
+        /// Operation name.
+        operation: &'static str,
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Underlying table execution failed.
+    #[error("failed to execute table plan while populating cache: {source}")]
+    Execute {
+        /// Execution error.
+        #[source]
+        source: BaseTableExecutorError,
+    },
+}
+
 /// Reconcile run result over files metadata and on-disk vault contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileResult {
@@ -2383,11 +2582,11 @@ mod tests {
 
     use super::{
         BacklinkGraphService, BaseColumnConfigPersistError, BaseColumnConfigPersistenceService,
-        BaseTableExecutorError, BaseTableExecutorService, BaseValidationError,
-        BaseValidationService, CasePolicy, HealthSnapshotService, MarkdownIngestPipeline,
-        NoteCrudError, NoteCrudService, PropertyQueryRequest, PropertyQueryService,
-        PropertyQuerySort, PropertyUpdateService, ReconcileService, SdkTransactionCoordinator,
-        ServiceTraceContext, StorageWriteService, WatcherStatus,
+        BaseTableCachedQueryService, BaseTableExecutorError, BaseTableExecutorService,
+        BaseValidationError, BaseValidationService, CasePolicy, HealthSnapshotService,
+        MarkdownIngestPipeline, NoteCrudError, NoteCrudService, PropertyQueryRequest,
+        PropertyQueryService, PropertyQuerySort, PropertyUpdateService, ReconcileService,
+        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -3872,5 +4071,87 @@ mod tests {
             missing,
             BaseValidationError::BaseNotFound { path_or_id } if path_or_id == "missing"
         ));
+    }
+
+    #[test]
+    fn base_table_cached_query_service_invalidates_on_metadata_change() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert file");
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p1".to_string(),
+                file_id: "f1".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"draft\"".to_string(),
+            },
+        )
+        .expect("insert property");
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec!["status".to_string()],
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            columns: vec![BaseColumnConfig {
+                key: "status".to_string(),
+                label: None,
+                width: None,
+                hidden: false,
+            }],
+            limit: 10,
+            offset: 0,
+            property_queries: Vec::new(),
+        };
+
+        let cache_service = BaseTableCachedQueryService::default();
+        let first = cache_service
+            .execute(&connection, &plan)
+            .expect("first cached execute");
+        assert_eq!(
+            first.rows[0].values.get("status"),
+            Some(&serde_json::json!("draft"))
+        );
+
+        let second = cache_service
+            .execute(&connection, &plan)
+            .expect("second cached execute");
+        assert_eq!(
+            second.rows[0].values.get("status"),
+            Some(&serde_json::json!("draft"))
+        );
+
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p1".to_string(),
+                file_id: "f1".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"published\"".to_string(),
+            },
+        )
+        .expect("update property");
+
+        let third = cache_service
+            .execute(&connection, &plan)
+            .expect("third cached execute");
+        assert_eq!(
+            third.rows[0].values.get("status"),
+            Some(&serde_json::json!("published"))
+        );
     }
 }
