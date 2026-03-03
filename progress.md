@@ -482,3 +482,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [feature flag registry implemented with typed known flags, unknown-flag tracking, runtime toggles, and config loader support for OBS_FEATURE_FLAGS]
 - residual_risk: registry currently toggles behavior flags in-memory; feature gating of downstream codepaths will be expanded as module implementations land
+
+- timestamp: 2026-03-03T16:36:24Z
+- session: session-2026-03-03-a
+- ticket: DB-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/bases.rs, crates/obs-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [bases repository implemented with upsert/get/delete/list join APIs and deterministic ordering tests]
+- residual_risk: current bases persistence stores raw config JSON only; typed base parsing/validation remains in later BASE tickets

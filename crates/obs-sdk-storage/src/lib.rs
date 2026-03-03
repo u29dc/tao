@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
+mod bases;
 mod files;
 mod links;
 mod properties;
 mod transaction;
 
+pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
 pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
 pub use links::{
     LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository, LinksRepositoryError,
