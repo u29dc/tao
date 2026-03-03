@@ -282,3 +282,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [initial sqlite schema migration added and validated as clean + idempotent]
 - residual_risk: foreign key integrity relies on sqlite pragma activation at connection open, which will be enforced in migration runner ticket
+
+- timestamp: 2026-03-03T17:52:00Z
+- session: session-2026-03-03-a
+- ticket: DB-002
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-storage/Cargo.toml, crates/obs-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [forward-only migration runner with checksum verification and mismatch guard implemented]
+- residual_risk: migration manifest currently includes only `0001_init`; additional migrations will expand checksum coverage
