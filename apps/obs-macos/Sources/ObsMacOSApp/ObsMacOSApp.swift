@@ -53,10 +53,33 @@ private struct ObsRootSplitView: View {
     @State private var isQuickOpenPresented = false
     @State private var quickOpenQuery = ""
     @FocusState private var isQuickOpenQueryFocused: Bool
+    @State private var baseRefs: [BridgeBaseRef] = []
+    @State private var selectedBaseId: String?
+    @State private var selectedBaseViewName: String?
+    @State private var baseTablePage: BridgeBaseTablePage?
+    @State private var basePageNumber: UInt32 = 1
+    @State private var basePageSize: UInt32 = 50
+    @State private var isLoadingBases = false
+    @State private var isLoadingBasePage = false
+    @State private var basesError: String?
     @StateObject private var fileTreeViewModel = FileTreeViewModel()
 
     private var quickOpenResults: [BridgeNoteSummary] {
         fileTreeViewModel.quickOpenMatches(query: quickOpenQuery, limit: 40)
+    }
+
+    private var selectedBaseRef: BridgeBaseRef? {
+        guard let selectedBaseId else {
+            return nil
+        }
+        return baseRefs.first(where: { $0.baseId == selectedBaseId })
+    }
+
+    private var visibleBaseColumns: [BridgeBaseColumn] {
+        guard let baseTablePage else {
+            return []
+        }
+        return baseTablePage.columns.filter { !$0.hidden }
     }
 
     var body: some View {
@@ -262,6 +285,36 @@ private struct ObsRootSplitView: View {
         .onChange(of: quickOpenCommandNonce) { _, _ in
             presentQuickOpen()
         }
+        .onChange(of: selectedSidebarItem) { _, newValue in
+            if newValue == .bases && openedVaultRoot != nil && baseRefs.isEmpty && !isLoadingBases {
+                loadBasesList()
+            }
+        }
+        .onChange(of: selectedBaseId) { _, newValue in
+            guard let newValue, let base = baseRefs.first(where: { $0.baseId == newValue }) else {
+                selectedBaseViewName = nil
+                baseTablePage = nil
+                return
+            }
+
+            if selectedBaseViewName == nil || !base.views.contains(selectedBaseViewName ?? "") {
+                selectedBaseViewName = base.views.first
+            } else {
+                basePageNumber = 1
+                loadSelectedBasePage()
+            }
+        }
+        .onChange(of: selectedBaseViewName) { oldValue, newValue in
+            guard oldValue != newValue else {
+                return
+            }
+            guard newValue != nil else {
+                baseTablePage = nil
+                return
+            }
+            basePageNumber = 1
+            loadSelectedBasePage()
+        }
         .sheet(isPresented: $isQuickOpenPresented) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Quick Open")
@@ -337,7 +390,7 @@ private struct ObsRootSplitView: View {
         case .notes:
             return "Lazy-loaded file tree"
         case .bases:
-            return "Bases table pane placeholder"
+            return "Base table views"
         case .none:
             return "Select a section"
         }
@@ -387,10 +440,106 @@ private struct ObsRootSplitView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         case .bases:
-            Text("Bases screen scaffold")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 12) {
+                if openedVaultRoot == nil {
+                    Text("Open a vault before loading bases.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 12) {
+                        Button("Load Bases") {
+                            loadBasesList()
+                        }
+                        .disabled(isLoadingBases || isLoadingBasePage)
+
+                        if isLoadingBases {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        if let baseTablePage {
+                            Text(basePaginationSummary(for: baseTablePage))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let basesError {
+                        Text(basesError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    if baseRefs.isEmpty {
+                        Text("No indexed bases found.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Base", selection: $selectedBaseId) {
+                            ForEach(baseRefs, id: \.baseId) { base in
+                                Text(base.filePath)
+                                    .tag(Optional(base.baseId))
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        if let selectedBaseRef {
+                            Picker("View", selection: $selectedBaseViewName) {
+                                ForEach(selectedBaseRef.views, id: \.self) { viewName in
+                                    Text(viewName)
+                                        .tag(Optional(viewName))
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+
+                        HStack(spacing: 12) {
+                            Button("Previous Page") {
+                                if basePageNumber > 1 {
+                                    basePageNumber -= 1
+                                    loadSelectedBasePage()
+                                }
+                            }
+                            .disabled(basePageNumber <= 1 || isLoadingBasePage)
+
+                            Button("Next Page") {
+                                guard baseTablePage?.hasMore == true else {
+                                    return
+                                }
+                                basePageNumber += 1
+                                loadSelectedBasePage()
+                            }
+                            .disabled(!(baseTablePage?.hasMore ?? false) || isLoadingBasePage)
+
+                            if isLoadingBasePage {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+
+                        if let baseTablePage {
+                            Table(baseTablePage.rows) {
+                                TableColumn("Path", value: \.filePath)
+                                TableColumn("Values") { row in
+                                    Text(baseRowSummary(row))
+                                        .lineLimit(1)
+                                }
+                            }
+                            .frame(minHeight: 240)
+                        } else if !isLoadingBasePage {
+                            Text("Select a base and view to load table rows.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onAppear {
+                if openedVaultRoot != nil && baseRefs.isEmpty && !isLoadingBases {
+                    loadBasesList()
+                }
+            }
         case .none:
             EmptyView()
         }
@@ -424,7 +573,18 @@ private struct ObsRootSplitView: View {
                     propertiesError = nil
                     linkPanels = nil
                     linksError = nil
+                    baseRefs = []
+                    selectedBaseId = nil
+                    selectedBaseViewName = nil
+                    baseTablePage = nil
+                    basePageNumber = 1
+                    basesError = nil
+                    isLoadingBases = false
+                    isLoadingBasePage = false
                     isLoadingStats = false
+                    if selectedSidebarItem == .bases {
+                        loadBasesList()
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -594,6 +754,154 @@ private struct ObsRootSplitView: View {
                 }
             }
         }
+    }
+
+    private func loadBasesList() {
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            basesError = "open a vault before loading bases"
+            return
+        }
+
+        isLoadingBases = true
+        basesError = nil
+
+        Task {
+            do {
+                let refs = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().basesList(vaultRoot: root, dbPath: db)
+                }.value
+                await MainActor.run {
+                    baseRefs = refs
+                    isLoadingBases = false
+                    basePageNumber = 1
+
+                    guard let first = refs.first else {
+                        selectedBaseId = nil
+                        selectedBaseViewName = nil
+                        baseTablePage = nil
+                        return
+                    }
+
+                    let nextBaseId =
+                        if let selectedBaseId, refs.contains(where: { $0.baseId == selectedBaseId }) {
+                            selectedBaseId
+                        } else {
+                            first.baseId
+                        }
+                    let selectedBase = refs.first(where: { $0.baseId == nextBaseId }) ?? first
+                    let nextViewName =
+                        if let selectedBaseViewName,
+                            selectedBase.views.contains(selectedBaseViewName)
+                        {
+                            selectedBaseViewName
+                        } else {
+                            selectedBase.views.first
+                        }
+                    let shouldReloadCurrent =
+                        selectedBaseId == nextBaseId && selectedBaseViewName == nextViewName
+                    selectedBaseId = nextBaseId
+                    selectedBaseViewName = nextViewName
+
+                    if shouldReloadCurrent {
+                        loadSelectedBasePage()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    basesError = "bases load failed: \(error)"
+                    isLoadingBases = false
+                }
+            }
+        }
+    }
+
+    private func loadSelectedBasePage() {
+        guard let selectedBaseId, let selectedBaseViewName else {
+            baseTablePage = nil
+            return
+        }
+
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            basesError = "open a vault before loading base table rows"
+            return
+        }
+
+        let requestBaseId = selectedBaseId
+        let requestViewName = selectedBaseViewName
+        let requestPage = basePageNumber
+        let requestPageSize = basePageSize
+
+        isLoadingBasePage = true
+        basesError = nil
+
+        Task {
+            do {
+                let page = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().basesView(
+                        vaultRoot: root,
+                        dbPath: db,
+                        pathOrId: requestBaseId,
+                        viewName: requestViewName,
+                        page: requestPage,
+                        pageSize: requestPageSize
+                    )
+                }.value
+                await MainActor.run {
+                    if selectedBaseId == requestBaseId
+                        && selectedBaseViewName == requestViewName
+                        && basePageNumber == requestPage
+                    {
+                        baseTablePage = page
+                    }
+                    isLoadingBasePage = false
+                }
+            } catch {
+                await MainActor.run {
+                    basesError = "bases table load failed: \(error)"
+                    baseTablePage = nil
+                    isLoadingBasePage = false
+                }
+            }
+        }
+    }
+
+    private func basePaginationSummary(for page: BridgeBaseTablePage) -> String {
+        guard page.total > 0 else {
+            return "Rows 0 of 0"
+        }
+
+        let start = UInt64(page.page - 1) * UInt64(page.pageSize) + 1
+        let end = min(page.total, UInt64(page.page) * UInt64(page.pageSize))
+        return "Rows \(start)-\(end) of \(page.total)"
+    }
+
+    private func baseRowSummary(_ row: BridgeBaseTableRow) -> String {
+        let columns = visibleBaseColumns
+        guard !columns.isEmpty else {
+            return row.values
+                .keys
+                .sorted()
+                .compactMap { key in
+                    guard let value = row.values[key], !value.isEmpty else {
+                        return nil
+                    }
+                    return "\(key): \(value)"
+                }
+                .joined(separator: " | ")
+        }
+
+        return columns
+            .compactMap { column in
+                guard let value = row.values[column.key], !value.isEmpty else {
+                    return nil
+                }
+                return "\(column.key): \(value)"
+            }
+            .joined(separator: " | ")
     }
 
     private func presentQuickOpen() {

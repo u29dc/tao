@@ -902,3 +902,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [added app-level Navigate command with `cmd+k` shortcut, quick-open sheet UI, query filtering over loaded note summaries, and direct note selection routing so command palette opens notes by search]
 - residual_risk: quick-open currently searches the loaded in-memory note summary window, so very large vaults still require additional pagination loads before all notes become discoverable
+
+- timestamp: 2026-03-03T18:42:35Z
+- session: session-2026-03-03-a
+- ticket: APP-009
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/Cargo.toml, crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-sdk-bridge, swift build, swift test, bun run util:check]
+  - outcomes: [added bridge `bases-list`/`bases-view` endpoints with planner+executor wiring and typed errors; Swift bridge client now exposes base list/table APIs; app Bases pane now loads indexed bases, selects views, renders paged table rows, and supports previous/next pagination controls]
+- residual_risk: base row rendering currently flattens selected column values into one summary cell in the macOS table, so follow-up UI refinement can split into true per-column table cells once dynamic column composition is introduced

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+obs-sdk-bases = { path = "../obs-sdk-bases" }
 obs-sdk-markdown = { path = "../obs-sdk-markdown" }
 obs-sdk-service = { path = "../obs-sdk-service" }
 obs-sdk-storage = { path = "../obs-sdk-storage" }

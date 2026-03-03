@@ -1,11 +1,17 @@
 //! Swift bridge adapter shell over SDK services.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use obs_sdk_bases::{BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest};
 use obs_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
-use obs_sdk_service::{HealthSnapshotService, NoteCrudService, WatcherStatus};
-use obs_sdk_storage::{FilesRepository, LinkWithPaths, LinksRepository, run_migrations};
+use obs_sdk_service::{
+    BaseTableExecutorService, HealthSnapshotService, NoteCrudService, WatcherStatus,
+};
+use obs_sdk_storage::{
+    BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, run_migrations,
+};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -37,6 +43,22 @@ pub const BRIDGE_ERROR_NOTE_LINKS_LOOKUP_FAILED: &str = "bridge.note_links.looku
 pub const BRIDGE_ERROR_NOTE_LINKS_NOT_FOUND: &str = "bridge.note_links.not_found";
 /// Bridge error code when note-links query fails.
 pub const BRIDGE_ERROR_NOTE_LINKS_QUERY_FAILED: &str = "bridge.note_links.query_failed";
+/// Bridge error code when bases-list lookup fails.
+pub const BRIDGE_ERROR_BASES_LIST_QUERY_FAILED: &str = "bridge.bases_list.query_failed";
+/// Bridge error code when bases-list config decode fails.
+pub const BRIDGE_ERROR_BASES_LIST_CONFIG_FAILED: &str = "bridge.bases_list.config_failed";
+/// Bridge error code when bases-view input is invalid.
+pub const BRIDGE_ERROR_BASES_VIEW_INVALID_INPUT: &str = "bridge.bases_view.invalid_input";
+/// Bridge error code when bases-view lookup fails.
+pub const BRIDGE_ERROR_BASES_VIEW_LOOKUP_FAILED: &str = "bridge.bases_view.lookup_failed";
+/// Bridge error code when bases-view target is missing.
+pub const BRIDGE_ERROR_BASES_VIEW_NOT_FOUND: &str = "bridge.bases_view.not_found";
+/// Bridge error code when bases-view config decode fails.
+pub const BRIDGE_ERROR_BASES_VIEW_CONFIG_FAILED: &str = "bridge.bases_view.config_failed";
+/// Bridge error code when bases-view plan compilation fails.
+pub const BRIDGE_ERROR_BASES_VIEW_PLAN_FAILED: &str = "bridge.bases_view.plan_failed";
+/// Bridge error code when bases-view execution fails.
+pub const BRIDGE_ERROR_BASES_VIEW_EXECUTE_FAILED: &str = "bridge.bases_view.execute_failed";
 /// Bridge error code when note-put path is invalid.
 pub const BRIDGE_ERROR_NOTE_PUT_INVALID_PATH: &str = "bridge.note_put.invalid_path";
 /// Bridge error code when note-put lookup fails.
@@ -253,6 +275,66 @@ pub struct BridgeLinkPanels {
     pub outgoing: Vec<BridgeLinkRef>,
     /// Backlinks into selected note.
     pub backlinks: Vec<BridgeLinkRef>,
+}
+
+/// Base metadata reference row exposed by `bases-list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeBaseRef {
+    /// Stable base identifier.
+    pub base_id: String,
+    /// Normalized base file path.
+    pub file_path: String,
+    /// Available view names defined in config.
+    pub views: Vec<String>,
+    /// Last base metadata update timestamp.
+    pub updated_at: String,
+}
+
+/// Base table column metadata for one view page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeBaseColumn {
+    /// Stable column key.
+    pub key: String,
+    /// Optional display label.
+    pub label: Option<String>,
+    /// Column hidden state.
+    pub hidden: bool,
+    /// Optional column width hint.
+    pub width: Option<u16>,
+}
+
+/// Base table row payload for UI rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeBaseTableRow {
+    /// Stable file id.
+    pub file_id: String,
+    /// Normalized source file path.
+    pub file_path: String,
+    /// Display-friendly cell values keyed by column key.
+    pub values: BTreeMap<String, String>,
+}
+
+/// Paged base table result payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeBaseTablePage {
+    /// Base identifier used by query.
+    pub base_id: String,
+    /// Base file path used by query.
+    pub file_path: String,
+    /// View name compiled by planner.
+    pub view_name: String,
+    /// One-based page number.
+    pub page: u32,
+    /// Requested page size.
+    pub page_size: u32,
+    /// Total matching rows before pagination.
+    pub total: u64,
+    /// Whether additional pages remain after this page.
+    pub has_more: bool,
+    /// Column metadata for table rendering.
+    pub columns: Vec<BridgeBaseColumn>,
+    /// Paged row payloads.
+    pub rows: Vec<BridgeBaseTableRow>,
 }
 
 /// Bridge write acknowledgement DTO.
@@ -521,6 +603,218 @@ impl BridgeKernel {
         })
     }
 
+    /// List indexed bases with available view names.
+    #[must_use]
+    pub fn bases_list(&self) -> BridgeEnvelope<Vec<BridgeBaseRef>> {
+        let bases = match BasesRepository::list_with_paths(&self.connection) {
+            Ok(bases) => bases,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(
+                        BRIDGE_ERROR_BASES_LIST_QUERY_FAILED,
+                        source.to_string(),
+                    )
+                    .with_hint("ensure base metadata is indexed and sqlite is readable"),
+                );
+            }
+        };
+
+        let mut refs = Vec::with_capacity(bases.len());
+        for base in bases {
+            let document = match serde_json::from_str::<BaseDocument>(&base.config_json) {
+                Ok(document) => document,
+                Err(source) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_BASES_LIST_CONFIG_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("reindex bases to repair malformed config payloads")
+                        .with_context("base_id", JsonValue::String(base.base_id))
+                        .with_context("file_path", JsonValue::String(base.file_path)),
+                    );
+                }
+            };
+
+            let views = document
+                .views
+                .into_iter()
+                .map(|view| view.name)
+                .collect::<Vec<_>>();
+            refs.push(BridgeBaseRef {
+                base_id: base.base_id,
+                file_path: base.file_path,
+                views,
+                updated_at: base.updated_at,
+            });
+        }
+
+        BridgeEnvelope::success(refs)
+    }
+
+    /// Execute one base table view page by base id/path and view name.
+    #[must_use]
+    pub fn bases_view(
+        &self,
+        path_or_id: &str,
+        view_name: &str,
+        page: u32,
+        page_size: u32,
+    ) -> BridgeEnvelope<BridgeBaseTablePage> {
+        let path_or_id = path_or_id.trim();
+        let view_name = view_name.trim();
+        if path_or_id.is_empty() || view_name.is_empty() || page == 0 || page_size == 0 {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_BASES_VIEW_INVALID_INPUT,
+                    "path_or_id, view_name, page, and page_size must be valid",
+                )
+                .with_hint("provide non-empty path_or_id/view_name and pagination >= 1")
+                .with_context("path_or_id", JsonValue::String(path_or_id.to_string()))
+                .with_context("view_name", JsonValue::String(view_name.to_string()))
+                .with_context("page", JsonValue::String(page.to_string()))
+                .with_context("page_size", JsonValue::String(page_size.to_string())),
+            );
+        }
+        if page_size > 1_000 {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_BASES_VIEW_INVALID_INPUT,
+                    "page_size must be between 1 and 1000",
+                )
+                .with_hint("set page_size in range [1, 1000]")
+                .with_context("page_size", JsonValue::String(page_size.to_string())),
+            );
+        }
+
+        let Some(base) = (match resolve_base_by_id_or_path(&self.connection, path_or_id) {
+            Ok(base) => base,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(
+                        BRIDGE_ERROR_BASES_VIEW_LOOKUP_FAILED,
+                        source.to_string(),
+                    )
+                    .with_hint("ensure bases metadata is indexed and readable")
+                    .with_context("path_or_id", JsonValue::String(path_or_id.to_string())),
+                );
+            }
+        }) else {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(BRIDGE_ERROR_BASES_VIEW_NOT_FOUND, "base id/path not found")
+                    .with_hint("call bases-list to discover valid base ids and paths")
+                    .with_context("path_or_id", JsonValue::String(path_or_id.to_string())),
+            );
+        };
+
+        let document = match serde_json::from_str::<BaseDocument>(&base.config_json) {
+            Ok(document) => document,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(
+                        BRIDGE_ERROR_BASES_VIEW_CONFIG_FAILED,
+                        source.to_string(),
+                    )
+                    .with_hint("reindex bases to repair malformed config payloads")
+                    .with_context("base_id", JsonValue::String(base.base_id.clone()))
+                    .with_context("file_path", JsonValue::String(base.file_path.clone())),
+                );
+            }
+        };
+        let registry = match BaseViewRegistry::from_document(&document) {
+            Ok(registry) => registry,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(
+                        BRIDGE_ERROR_BASES_VIEW_CONFIG_FAILED,
+                        source.to_string(),
+                    )
+                    .with_hint("fix duplicate/invalid base view definitions and reindex")
+                    .with_context("base_id", JsonValue::String(base.base_id.clone()))
+                    .with_context("file_path", JsonValue::String(base.file_path.clone())),
+                );
+            }
+        };
+
+        let planner = BaseTableQueryPlanner;
+        let plan = match planner.compile(
+            &registry,
+            &TableQueryPlanRequest {
+                view_name: view_name.to_string(),
+                page,
+                page_size,
+            },
+        ) {
+            Ok(plan) => plan,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(BRIDGE_ERROR_BASES_VIEW_PLAN_FAILED, source.to_string())
+                        .with_hint("verify the requested view exists and pagination is valid")
+                        .with_context("base_id", JsonValue::String(base.base_id.clone()))
+                        .with_context("file_path", JsonValue::String(base.file_path.clone()))
+                        .with_context("view_name", JsonValue::String(view_name.to_string()))
+                        .with_context("page", JsonValue::String(page.to_string()))
+                        .with_context("page_size", JsonValue::String(page_size.to_string())),
+                );
+            }
+        };
+
+        let page_result = match BaseTableExecutorService.execute(&self.connection, &plan) {
+            Ok(page_result) => page_result,
+            Err(source) => {
+                return BridgeEnvelope::failure(
+                    BridgeError::with_code(
+                        BRIDGE_ERROR_BASES_VIEW_EXECUTE_FAILED,
+                        source.to_string(),
+                    )
+                    .with_hint("ensure property/files metadata tables are healthy")
+                    .with_context("base_id", JsonValue::String(base.base_id.clone()))
+                    .with_context("file_path", JsonValue::String(base.file_path.clone()))
+                    .with_context("view_name", JsonValue::String(plan.view_name.clone())),
+                );
+            }
+        };
+
+        let offset = u64::try_from(plan.offset).unwrap_or(u64::MAX);
+        let returned = page_result.rows.len() as u64;
+        let has_more = page_result.total > offset.saturating_add(returned);
+        let rows = page_result
+            .rows
+            .into_iter()
+            .map(|row| BridgeBaseTableRow {
+                file_id: row.file_id,
+                file_path: row.file_path,
+                values: row
+                    .values
+                    .into_iter()
+                    .map(|(key, value)| (key, json_value_to_display(value)))
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let columns = plan
+            .columns
+            .iter()
+            .map(|column| BridgeBaseColumn {
+                key: column.key.clone(),
+                label: column.label.clone(),
+                hidden: column.hidden,
+                width: column.width,
+            })
+            .collect::<Vec<_>>();
+
+        BridgeEnvelope::success(BridgeBaseTablePage {
+            base_id: base.base_id,
+            file_path: base.file_path,
+            view_name: plan.view_name,
+            page,
+            page_size,
+            total: page_result.total,
+            has_more,
+            columns,
+            rows,
+        })
+    }
+
     /// Create or update one note safely through SDK write services.
     #[must_use]
     pub fn note_put(
@@ -703,6 +997,46 @@ fn query_note_summaries_page(
     Ok(BridgeNoteListPage { items, next_cursor })
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedBridgeBase {
+    base_id: String,
+    file_path: String,
+    config_json: String,
+}
+
+fn resolve_base_by_id_or_path(
+    connection: &Connection,
+    path_or_id: &str,
+) -> Result<Option<ResolvedBridgeBase>, obs_sdk_storage::BasesRepositoryError> {
+    let target = path_or_id.trim();
+    let bases = BasesRepository::list_with_paths(connection)?;
+    Ok(bases.into_iter().find_map(|base| {
+        if base.base_id == target || base.file_path == target {
+            return Some(ResolvedBridgeBase {
+                base_id: base.base_id,
+                file_path: base.file_path,
+                config_json: base.config_json,
+            });
+        }
+        None
+    }))
+}
+
+fn json_value_to_display(value: JsonValue) -> String {
+    match value {
+        JsonValue::Null => String::new(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::String(value) => value,
+        JsonValue::Array(value) => {
+            serde_json::to_string(&value).unwrap_or_else(|_| "[]".to_string())
+        }
+        JsonValue::Object(value) => {
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+        }
+    }
+}
+
 fn map_link_with_paths(row: LinkWithPaths) -> BridgeLinkRef {
     let kind = if row.block_id.is_some() {
         "block"
@@ -856,7 +1190,11 @@ pub enum BridgeInitError {
 mod tests {
     use std::fs;
 
-    use obs_sdk_storage::{LinkRecordInput, LinksRepository};
+    use obs_sdk_bases::parse_base_document;
+    use obs_sdk_storage::{
+        BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, LinkRecordInput,
+        LinksRepository,
+    };
     use tempfile::tempdir;
 
     use super::{
@@ -1084,6 +1422,94 @@ mod tests {
         );
         assert_eq!(value.backlinks.len(), 1);
         assert_eq!(value.backlinks[0].source_path.as_str(), "notes/incoming.md");
+    }
+
+    #[test]
+    fn bridge_kernel_bases_list_and_view_paginate_rows() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::create_dir_all(vault_root.join("views")).expect("create views");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        assert!(kernel.note_put("notes/a.md", "# A").ok);
+        assert!(kernel.note_put("notes/b.md", "# B").ok);
+        assert!(kernel.note_put("notes/c.md", "# C").ok);
+
+        let base_yaml = r#"
+views:
+  - name: Projects
+    type: table
+    source: notes
+    columns:
+      - key: title
+      - key: path
+"#;
+        let document = parse_base_document(base_yaml).expect("parse base yaml");
+        let config_json = serde_json::to_string(&document).expect("serialize base config");
+        fs::write(
+            vault_root.join("views/projects.base"),
+            base_yaml.trim_start(),
+        )
+        .expect("write base file");
+
+        let base_file_path = "views/projects.base".to_string();
+        FilesRepository::insert(
+            &kernel.connection,
+            &FileRecordInput {
+                file_id: "f-base".to_string(),
+                normalized_path: base_file_path.clone(),
+                match_key: base_file_path.to_lowercase(),
+                absolute_path: vault_root
+                    .join(&base_file_path)
+                    .to_string_lossy()
+                    .to_string(),
+                size_bytes: config_json.len() as u64,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: blake3::hash(config_json.as_bytes()).to_hex().to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert base file");
+        BasesRepository::upsert(
+            &kernel.connection,
+            &BaseRecordInput {
+                base_id: "b-projects".to_string(),
+                file_id: "f-base".to_string(),
+                config_json,
+            },
+        )
+        .expect("insert base row");
+
+        let listed = kernel.bases_list();
+        assert!(listed.ok);
+        let refs = listed.value.expect("bases list value");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].base_id, "b-projects");
+        assert_eq!(refs[0].file_path, "views/projects.base");
+        assert_eq!(refs[0].views, vec!["Projects".to_string()]);
+
+        let first_page = kernel.bases_view("b-projects", "Projects", 1, 2);
+        assert!(first_page.ok);
+        let first = first_page.value.expect("first page value");
+        assert_eq!(first.total, 3);
+        assert_eq!(first.rows.len(), 2);
+        assert!(first.has_more);
+        assert_eq!(first.columns.len(), 2);
+        assert_eq!(first.rows[0].file_path, "notes/a.md");
+        assert_eq!(
+            first.rows[0].values.get("title").map(String::as_str),
+            Some("a")
+        );
+
+        let second_page = kernel.bases_view("views/projects.base", "Projects", 2, 2);
+        assert!(second_page.ok);
+        let second = second_page.value.expect("second page value");
+        assert_eq!(second.total, 3);
+        assert_eq!(second.rows.len(), 1);
+        assert!(!second.has_more);
+        assert_eq!(second.rows[0].file_path, "notes/c.md");
     }
 
     #[test]

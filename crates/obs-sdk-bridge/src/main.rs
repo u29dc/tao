@@ -68,6 +68,36 @@ enum Commands {
         #[arg(long)]
         path: String,
     },
+    /// Return indexed bases and available view names.
+    BasesList {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+    },
+    /// Return one paged base table view result.
+    BasesView {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Base id or normalized base file path.
+        #[arg(long)]
+        path_or_id: String,
+        /// Target base view name.
+        #[arg(long)]
+        view_name: String,
+        /// One-based page number.
+        #[arg(long, default_value_t = 1)]
+        page: u32,
+        /// Page size.
+        #[arg(long, default_value_t = 50)]
+        page_size: u32,
+    },
     /// Create or update one note and return write acknowledgement.
     NotePut {
         /// Absolute vault root path.
@@ -127,6 +157,20 @@ fn main() {
             db_path,
             path,
         } => with_kernel(vault_root, db_path, |kernel| kernel.note_links(&path)),
+        Commands::BasesList {
+            vault_root,
+            db_path,
+        } => with_kernel(vault_root, db_path, |kernel| kernel.bases_list()),
+        Commands::BasesView {
+            vault_root,
+            db_path,
+            path_or_id,
+            view_name,
+            page,
+            page_size,
+        } => with_kernel(vault_root, db_path, |kernel| {
+            kernel.bases_view(&path_or_id, &view_name, page, page_size)
+        }),
         Commands::NotePut {
             vault_root,
             db_path,

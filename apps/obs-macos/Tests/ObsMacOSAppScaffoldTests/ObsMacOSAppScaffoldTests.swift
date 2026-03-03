@@ -173,6 +173,50 @@ import Foundation
     #expect(links.backlinks.isEmpty)
 }
 
+@Test func bridge_client_bases_list_and_missing_view_errors_are_typed() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-bases-test-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+    try """
+    # Alpha
+    bridge test
+    """.write(
+        to: notesDir.appendingPathComponent("a.md"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let client = ObsBridgeClient()
+    let list = try client.basesList(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path
+    )
+    #expect(list.isEmpty)
+
+    do {
+        _ = try client.basesView(
+            vaultRoot: vaultRoot.path,
+            dbPath: dbPath.path,
+            pathOrId: "missing",
+            viewName: "Projects"
+        )
+        Issue.record("expected missing base error")
+    } catch let ObsBridgeClientError.bridgeError(error) {
+        #expect(error == .basesViewNotFound(BridgeErrorDTO(
+            code: "bridge.bases_view.not_found",
+            message: "base id/path not found",
+            hint: "call bases-list to discover valid base ids and paths",
+            context: ["path_or_id": "missing"]
+        )))
+    }
+}
+
 @Test func bridge_client_events_poll_returns_note_write_events() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory

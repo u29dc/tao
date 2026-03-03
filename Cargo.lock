@@ -379,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "clap",
+ "obs-sdk-bases",
  "obs-sdk-markdown",
  "obs-sdk-service",
  "obs-sdk-storage",

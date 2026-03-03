@@ -77,6 +77,40 @@ public struct BridgeLinkPanels: Decodable {
     public let backlinks: [BridgeLinkRef]
 }
 
+public struct BridgeBaseRef: Decodable {
+    public let baseId: String
+    public let filePath: String
+    public let views: [String]
+    public let updatedAt: String
+}
+
+public struct BridgeBaseColumn: Decodable {
+    public let key: String
+    public let label: String?
+    public let hidden: Bool
+    public let width: UInt16?
+}
+
+public struct BridgeBaseTableRow: Decodable, Identifiable {
+    public let fileId: String
+    public let filePath: String
+    public let values: [String: String]
+
+    public var id: String { fileId }
+}
+
+public struct BridgeBaseTablePage: Decodable {
+    public let baseId: String
+    public let filePath: String
+    public let viewName: String
+    public let page: UInt32
+    public let pageSize: UInt32
+    public let total: UInt64
+    public let hasMore: Bool
+    public let columns: [BridgeBaseColumn]
+    public let rows: [BridgeBaseTableRow]
+}
+
 public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case initFailed(BridgeErrorDTO)
     case vaultStatsFailed(BridgeErrorDTO)
@@ -89,6 +123,14 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case noteLinksLookupFailed(BridgeErrorDTO)
     case noteLinksNotFound(BridgeErrorDTO)
     case noteLinksQueryFailed(BridgeErrorDTO)
+    case basesListQueryFailed(BridgeErrorDTO)
+    case basesListConfigFailed(BridgeErrorDTO)
+    case basesViewInvalidInput(BridgeErrorDTO)
+    case basesViewLookupFailed(BridgeErrorDTO)
+    case basesViewNotFound(BridgeErrorDTO)
+    case basesViewConfigFailed(BridgeErrorDTO)
+    case basesViewPlanFailed(BridgeErrorDTO)
+    case basesViewExecuteFailed(BridgeErrorDTO)
     case notePutInvalidPath(BridgeErrorDTO)
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
@@ -123,6 +165,22 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .noteLinksNotFound(error)
         case "bridge.note_links.query_failed":
             return .noteLinksQueryFailed(error)
+        case "bridge.bases_list.query_failed":
+            return .basesListQueryFailed(error)
+        case "bridge.bases_list.config_failed":
+            return .basesListConfigFailed(error)
+        case "bridge.bases_view.invalid_input":
+            return .basesViewInvalidInput(error)
+        case "bridge.bases_view.lookup_failed":
+            return .basesViewLookupFailed(error)
+        case "bridge.bases_view.not_found":
+            return .basesViewNotFound(error)
+        case "bridge.bases_view.config_failed":
+            return .basesViewConfigFailed(error)
+        case "bridge.bases_view.plan_failed":
+            return .basesViewPlanFailed(error)
+        case "bridge.bases_view.execute_failed":
+            return .basesViewExecuteFailed(error)
         case "bridge.note_put.invalid_path":
             return .notePutInvalidPath(error)
         case "bridge.note_put.lookup_failed":
@@ -157,6 +215,14 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .noteLinksLookupFailed(let error),
             .noteLinksNotFound(let error),
             .noteLinksQueryFailed(let error),
+            .basesListQueryFailed(let error),
+            .basesListConfigFailed(let error),
+            .basesViewInvalidInput(let error),
+            .basesViewLookupFailed(let error),
+            .basesViewNotFound(let error),
+            .basesViewConfigFailed(let error),
+            .basesViewPlanFailed(let error),
+            .basesViewExecuteFailed(let error),
             .notePutInvalidPath(let error),
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
@@ -194,6 +260,22 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "note links not found: \(error.message)"
         case .noteLinksQueryFailed(let error):
             return "note links query failed: \(error.message)"
+        case .basesListQueryFailed(let error):
+            return "bases list query failed: \(error.message)"
+        case .basesListConfigFailed(let error):
+            return "bases list config failed: \(error.message)"
+        case .basesViewInvalidInput(let error):
+            return "bases view invalid input: \(error.message)"
+        case .basesViewLookupFailed(let error):
+            return "bases view lookup failed: \(error.message)"
+        case .basesViewNotFound(let error):
+            return "bases view not found: \(error.message)"
+        case .basesViewConfigFailed(let error):
+            return "bases view config failed: \(error.message)"
+        case .basesViewPlanFailed(let error):
+            return "bases view plan failed: \(error.message)"
+        case .basesViewExecuteFailed(let error):
+            return "bases view execute failed: \(error.message)"
         case .notePutInvalidPath(let error):
             return "note put invalid path: \(error.message)"
         case .notePutLookupFailed(let error):
@@ -327,6 +409,39 @@ public struct ObsBridgeClient {
                 "--path", path
             ],
             as: BridgeLinkPanels.self
+        )
+    }
+
+    public func basesList(vaultRoot: String, dbPath: String) throws -> [BridgeBaseRef] {
+        try invoke(
+            subcommand: [
+                "bases-list",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath
+            ],
+            as: [BridgeBaseRef].self
+        )
+    }
+
+    public func basesView(
+        vaultRoot: String,
+        dbPath: String,
+        pathOrId: String,
+        viewName: String,
+        page: UInt32 = 1,
+        pageSize: UInt32 = 50
+    ) throws -> BridgeBaseTablePage {
+        try invoke(
+            subcommand: [
+                "bases-view",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath,
+                "--path-or-id", pathOrId,
+                "--view-name", viewName,
+                "--page", String(page),
+                "--page-size", String(pageSize)
+            ],
+            as: BridgeBaseTablePage.self
         )
     }
 
