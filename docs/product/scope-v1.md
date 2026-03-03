@@ -28,7 +28,7 @@ Deliver a macOS-native knowledge app with a Swift UI and pure Rust SDK core for 
 - Rust SDK is source-of-truth for domain semantics.
 - UI layers cannot reimplement parser/resolver logic.
 - `unsafe_code = "forbid"` workspace policy.
-- Deterministic ticket execution through `tickets.csv` contract.
+- Deterministic ticket execution through `plan/tickets.csv` contract.
 
 ## Acceptance Criteria
 

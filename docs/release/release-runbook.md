@@ -7,7 +7,7 @@ Use this runbook for `rc` and stable releases of `obs` workspace artifacts.
 ## Preflight Checklist
 
 1. Confirm branch is `main` and clean.
-2. Confirm release ticket dependencies are `done` in `tickets.csv`.
+2. Confirm release ticket dependencies are `done` in `plan/tickets.csv`.
 3. Run `bun run util:check`.
 4. Run `./scripts/check-perf-budgets.sh`.
 5. Run `swift test --package-path apps/obs-macos`.

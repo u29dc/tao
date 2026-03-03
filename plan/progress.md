@@ -1272,3 +1272,33 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [implemented bases route with bridge-backed base registry loading, base/view cycling, page navigation (`n`/`p`) and table row sort toggle (`s`); added table rendering with dynamic columns and stable row projection; added tests for sort-mode ordering and pagination gating]
 - residual_risk: bases row sort currently uses client-side path sorting within the returned page and does not recompile query planner order for arbitrary column sorts
+
+- timestamp: 2026-03-03T23:30:00Z
+- session: session-2026-03-03-b
+- ticket: PLAN-001
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, plan/progress.md, plan/blockers.md]
+  - commands: [mkdir -p plan, move control files into plan/]
+  - outcomes: [planning control files relocated to plan/ directory]
+- residual_risk: none
+
+- timestamp: 2026-03-03T23:34:00Z
+- session: session-2026-03-03-b
+- ticket: PLAN-002
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, docs/release/release-runbook.md, docs/specs/performance-budgets.md, docs/product/scope-v1.md, plan/run-state.json]
+  - commands: [update operational path references to plan/*]
+  - outcomes: [control-path references now resolve to plan/ locations]
+- residual_risk: historical references in plan/progress.md entries intentionally preserved as archival context
+
+- timestamp: 2026-03-03T23:36:00Z
+- session: session-2026-03-03-b
+- ticket: PLAN-003
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [append phase7+ roadmap extension and ticket families]
+  - outcomes: [phase7-phase11 roadmap and ticket mapping added]
+- residual_risk: detailed execution notes in section 21 must stay synchronized with future ticket edits

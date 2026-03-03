@@ -34,7 +34,7 @@ Define non-negotiable latency, throughput, and memory budgets for v1.
 
 - Any hard budget regression fails CI.
 - Soft budget regression opens blocker ticket with remediation plan.
-- Perf changes must include before/after benchmark evidence in `progress.md`.
+- Perf changes must include before/after benchmark evidence in `plan/progress.md`.
 
 ## Instrumentation Requirements
 
@@ -45,7 +45,7 @@ Define non-negotiable latency, throughput, and memory budgets for v1.
 ## SQLite Profile
 
 - Runtime pragma profile is documented in `docs/db/sqlite-pragma-profile.md`.
-- Any pragma change requires benchmark evidence and ticket-level regression notes in `progress.md`.
+- Any pragma change requires benchmark evidence and ticket-level regression notes in `plan/progress.md`.
 
 ## CI Integration
 

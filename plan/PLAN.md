@@ -852,10 +852,10 @@ This section defines the minimum deterministic protocol for long-running autonom
 
 ### 19.1 Required control files
 
-- `tickets.csv`: canonical machine-readable backlog.
-- `run-state.json`: current phase, active ticket, retry counters, last completed ticket, active blockers.
-- `progress.md`: append-only human-readable execution log with timestamped entries.
-- `blockers.md`: active blockers with owner, impact, and unblocking condition.
+- `plan/tickets.csv`: canonical machine-readable backlog.
+- `plan/run-state.json`: current phase, active ticket, retry counters, last completed ticket, active blockers.
+- `plan/progress.md`: append-only human-readable execution log with timestamped entries.
+- `plan/blockers.md`: active blockers with owner, impact, and unblocking condition.
 
 If any required control file is missing, the agent must create it before implementing feature code.
 
@@ -874,7 +874,7 @@ Rules:
 - Exactly one ticket may be `in_progress` at a time per autonomous worker session.
 - A ticket can transition from `blocked` to `in_progress` only when all blocker predicates are cleared.
 - `done` is terminal.
-- `failed` is terminal for the current run and must include root cause + recovery note in `progress.md`.
+- `failed` is terminal for the current run and must include root cause + recovery note in `plan/progress.md`.
 
 ### 19.3 Deterministic execution order
 
@@ -890,7 +890,7 @@ Ticket selection algorithm:
 - Default `max_retries` per ticket is `3`.
 - On failure:
   - increment retry counter
-  - write failure summary + stack trace excerpt + attempted fix in `progress.md`
+  - write failure summary + stack trace excerpt + attempted fix in `plan/progress.md`
   - if retries remain, return ticket to `todo`
   - if retries exhausted, set ticket to `failed`, add blocker entry, continue with other unblocked tickets
 - Never silently skip failed tickets.
@@ -901,7 +901,7 @@ A ticket can only be set to `done` if all are true:
 
 - Code/config/docs change exists in workspace and is relevant to ticket DoD.
 - Required checks for that ticket scope passed locally.
-- `progress.md` contains a one-line evidence pointer:
+- `plan/progress.md` contains a one-line evidence pointer:
   - changed files
   - commands run
   - pass/fail outcomes
@@ -925,14 +925,14 @@ No ticket that weakens gate integrity may be merged as `done`.
 
 Checkpoint every 30 minutes or every ticket completion, whichever is earlier:
 
-- persist `run-state.json`
+- persist `plan/run-state.json`
 - append progress entry
 - append blockers update (if any)
 - list next candidate ticket IDs
 
 On session restart:
 
-1. load `run-state.json`
+1. load `plan/run-state.json`
 2. verify file tree and lockfile integrity
 3. resume last `in_progress` ticket or select next deterministic candidate
 
@@ -952,7 +952,7 @@ When stopping, emit:
 
 ## 20) Machine-Executable Ticket Manifest Contract
 
-`tickets.csv` is authoritative for automation. `PLAN.md` is canonical narrative and architecture context.
+`plan/tickets.csv` is authoritative for automation. `plan/PLAN.md` is canonical narrative and architecture context.
 
 ### 20.1 CSV schema
 
@@ -981,13 +981,106 @@ Conventions:
 
 ### 20.2 Manifest integrity rules
 
-- Every dependency ID must exist in `tickets.csv`.
+- Every dependency ID must exist in `plan/tickets.csv`.
 - No circular dependencies.
 - Ticket IDs are immutable.
 - `REL-006` must remain explicitly dependency-bound and never use informal dependency text.
 
 ### 20.3 Sync rules between PLAN and CSV
 
-- If ticket title or DoD changes in `PLAN.md`, update `tickets.csv` in the same commit.
-- If phase mapping changes in Section 16, update `phase` values in `tickets.csv` in the same commit.
-- Any mismatch between `PLAN.md` and `tickets.csv` blocks autonomous execution until reconciled.
+- If ticket title or DoD changes in `plan/PLAN.md`, update `plan/tickets.csv` in the same commit.
+- If phase mapping changes in Section 16, update `phase` values in `plan/tickets.csv` in the same commit.
+- Any mismatch between `plan/PLAN.md` and `plan/tickets.csv` blocks autonomous execution until reconciled.
+
+## 21) Phase 7+ Roadmap Extension (Tao Transition)
+
+### 21.1 New Objective
+
+- Rebrand project identity from `obs` to `tao` end-to-end.
+- Replace subprocess bridge runtime with direct in-process Swift<->Rust FFI.
+- Simplify macOS app UX to production-minimal layout.
+- Keep TUI as empty shell only until later product phase.
+- Move control-plane artifacts to `plan/` and keep deterministic ticket execution.
+
+### 21.2 Ticket Families (Phase 7+)
+
+- Planning control: `PLAN-001..PLAN-003`
+- Identity rename: `REN-001..REN-006`
+- Build/runtime hardening: `CLEAN-001..CLEAN-002`, `BUILD-001..BUILD-003`
+- Config/bootstrap + DB auto-init: `CFG-001..CFG-004`, `SDK-017`, `CLI-007..CLI-009`
+- Direct FFI migration: `FFI-009..FFI-014`
+- macOS product-shell simplification: `APP-013..APP-017`
+- Fixture and benchmark hygiene: `VAULT-001..VAULT-002`, `BENCH-001..BENCH-002`
+- Documentation consolidation: `DOC-007..DOC-009`
+- TUI deferral reset: `TUI-006`
+- Validation and release: `QA-009..QA-010`, `REL-007`
+
+### 21.3 Additional Phase Plan
+
+### Phase 7 - control plane, rename, and build defaults
+
+- `PLAN-001..PLAN-003`
+- `REN-001..REN-006`
+- `CLEAN-001..CLEAN-002`
+- `BUILD-001..BUILD-003`
+
+Exit condition:
+
+- repo identity is `tao`, paths/scripts are updated, release-first defaults are active.
+
+### Phase 8 - config/bootstrap and CLI auto-init ergonomics
+
+- `CFG-001..CFG-004`
+- `SDK-017`
+- `CLI-007..CLI-009`
+
+Exit condition:
+
+- `--vault-root` alone is sufficient for standard workflows; config layering is operational.
+
+### Phase 9 - direct FFI runtime
+
+- `FFI-009..FFI-014`
+
+Exit condition:
+
+- Swift app no longer uses subprocess bridge transport; direct FFI path is benchmark-gated.
+
+### Phase 10 - app simplification and repository hygiene
+
+- `APP-013..APP-017`
+- `VAULT-001..VAULT-002`
+- `BENCH-001..BENCH-002`
+- `DOC-007..DOC-009`
+- `TUI-006`
+
+Exit condition:
+
+- app shell is minimal and responsive, docs consolidated, fixture/benchmark layout cleaned.
+
+### Phase 11 - final validation and release note handoff
+
+- `QA-009..QA-010`
+- `REL-007`
+
+Exit condition:
+
+- full zero-cache validation passes and migration/rebrand release notes are ready.
+
+### 21.4 Runtime Policy Addendum
+
+- Default execution paths must use release artifacts for user-facing flows.
+- `cargo run` may be used only for local development diagnostics and never as app runtime default.
+- Bridge boundary must prioritize coarse-grained APIs and persistent handles.
+
+### 21.5 Control File Location Contract
+
+Canonical control file paths are now:
+
+- `plan/PLAN.md`
+- `plan/tickets.csv`
+- `plan/run-state.json`
+- `plan/progress.md`
+- `plan/blockers.md`
+
+Any automation referencing root-level control files must be updated to these paths before execution.
