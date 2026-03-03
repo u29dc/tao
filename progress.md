@@ -1052,3 +1052,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [added fixture-driven base parser/table snapshot test that decodes indexed base raw payloads, compiles `ActiveProjects` view plans, asserts exact table row snapshots, and verifies invalid base configs fail parser validation]
 - residual_risk: snapshot currently validates key projected cells and row set, but does not yet cover pagination window permutations for the same view
+
+- timestamp: 2026-03-03T19:35:01Z
+- session: session-2026-03-03-a
+- ticket: PERF-001
+- action: done
+- evidence:
+  - files: [bench/reports/perf-001-bridge-1k.json, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 1000 --json-out bench/reports/perf-001-bridge-1k.json, bun run util:check]
+- outcomes: [captured and committed 1k-note bridge baseline report with p50/p95/max latencies for `note_get`, `notes_list`, `note_put`, and `events_poll` under documented perf budget thresholds]
+- residual_risk: single-host baseline reflects current Apple Silicon environment only and should be re-captured on CI-hosted runners for cross-machine drift checks
