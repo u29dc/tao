@@ -1231,6 +1231,400 @@ fn indexed_record_matches_fingerprint(
         && indexed.hash_blake3 == fingerprint.hash_blake3
 }
 
+/// Issue categories emitted by the index consistency checker.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConsistencyIssueKind {
+    /// Property row references a missing file row.
+    OrphanProperty,
+    /// Base row references a missing file row.
+    OrphanBase,
+    /// Render cache row references a missing file row.
+    OrphanRenderCache,
+    /// Link row source file reference is missing.
+    OrphanLinkSource,
+    /// Link row resolved target reference is missing.
+    BrokenLinkTarget,
+    /// Link unresolved flag conflicts with resolved target presence.
+    LinkResolutionMismatch,
+    /// File row absolute path is outside configured vault root.
+    OutsideVaultRoot,
+    /// File row absolute path does not exist on disk.
+    MissingOnDiskFile,
+}
+
+/// One consistency issue identified during index consistency checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexConsistencyIssue {
+    /// Issue category.
+    pub kind: ConsistencyIssueKind,
+    /// Stable row identifier associated with the issue.
+    pub record_id: String,
+    /// Human-readable issue context.
+    pub detail: String,
+}
+
+/// Consistency check report over persisted index tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexConsistencyReport {
+    /// Wall-clock timestamp of report completion.
+    pub checked_at_unix_ms: u128,
+    /// All issues found; empty means no inconsistencies detected.
+    pub issues: Vec<IndexConsistencyIssue>,
+}
+
+/// Service that validates index table referential and filesystem consistency.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IndexConsistencyChecker;
+
+impl IndexConsistencyChecker {
+    /// Run consistency checks and return an ordered issue report.
+    pub fn check(
+        &self,
+        vault_root: &Path,
+        connection: &Connection,
+    ) -> Result<IndexConsistencyReport, IndexConsistencyError> {
+        let canonical_vault_root = std::fs::canonicalize(vault_root).map_err(|source| {
+            IndexConsistencyError::CanonicalizeVaultRoot {
+                path: vault_root.to_path_buf(),
+                source,
+            }
+        })?;
+
+        let mut issues = Vec::new();
+
+        issues.extend(query_orphan_properties(connection)?);
+        issues.extend(query_orphan_bases(connection)?);
+        issues.extend(query_orphan_render_cache(connection)?);
+        issues.extend(query_orphan_link_sources(connection)?);
+        issues.extend(query_broken_link_targets(connection)?);
+        issues.extend(query_link_resolution_mismatches(connection)?);
+        issues.extend(query_filesystem_path_issues(
+            connection,
+            &canonical_vault_root,
+        )?);
+
+        issues.sort_by(|left, right| {
+            left.kind
+                .cmp(&right.kind)
+                .then(left.record_id.cmp(&right.record_id))
+        });
+
+        let checked_at_unix_ms =
+            current_unix_ms_raw().map_err(|source| IndexConsistencyError::Clock {
+                source: Box::new(source),
+            })?;
+
+        Ok(IndexConsistencyReport {
+            checked_at_unix_ms,
+            issues,
+        })
+    }
+}
+
+fn query_orphan_properties(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  p.property_id,
+  p.file_id
+FROM properties p
+LEFT JOIN files f ON f.file_id = p.file_id
+WHERE f.file_id IS NULL
+ORDER BY p.property_id ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_orphan_properties",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::OrphanProperty,
+                record_id: row.get("property_id")?,
+                detail: format!(
+                    "references missing file_id {}",
+                    row.get::<_, String>("file_id")?
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_orphan_properties",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_orphan_properties",
+            source: Box::new(source),
+        })
+}
+
+fn query_orphan_bases(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  b.base_id,
+  b.file_id
+FROM bases b
+LEFT JOIN files f ON f.file_id = b.file_id
+WHERE f.file_id IS NULL
+ORDER BY b.base_id ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_orphan_bases",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::OrphanBase,
+                record_id: row.get("base_id")?,
+                detail: format!(
+                    "references missing file_id {}",
+                    row.get::<_, String>("file_id")?
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_orphan_bases",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_orphan_bases",
+            source: Box::new(source),
+        })
+}
+
+fn query_orphan_render_cache(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  r.cache_key,
+  r.file_id
+FROM render_cache r
+LEFT JOIN files f ON f.file_id = r.file_id
+WHERE r.file_id IS NOT NULL
+  AND f.file_id IS NULL
+ORDER BY r.cache_key ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_orphan_render_cache",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::OrphanRenderCache,
+                record_id: row.get("cache_key")?,
+                detail: format!(
+                    "references missing file_id {}",
+                    row.get::<_, String>("file_id")?
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_orphan_render_cache",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_orphan_render_cache",
+            source: Box::new(source),
+        })
+}
+
+fn query_orphan_link_sources(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  l.link_id,
+  l.source_file_id
+FROM links l
+LEFT JOIN files f ON f.file_id = l.source_file_id
+WHERE f.file_id IS NULL
+ORDER BY l.link_id ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_orphan_link_sources",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::OrphanLinkSource,
+                record_id: row.get("link_id")?,
+                detail: format!(
+                    "references missing source_file_id {}",
+                    row.get::<_, String>("source_file_id")?
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_orphan_link_sources",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_orphan_link_sources",
+            source: Box::new(source),
+        })
+}
+
+fn query_broken_link_targets(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  l.link_id,
+  l.resolved_file_id
+FROM links l
+LEFT JOIN files f ON f.file_id = l.resolved_file_id
+WHERE l.resolved_file_id IS NOT NULL
+  AND f.file_id IS NULL
+ORDER BY l.link_id ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_broken_link_targets",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::BrokenLinkTarget,
+                record_id: row.get("link_id")?,
+                detail: format!(
+                    "references missing resolved_file_id {}",
+                    row.get::<_, String>("resolved_file_id")?
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_broken_link_targets",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_broken_link_targets",
+            source: Box::new(source),
+        })
+}
+
+fn query_link_resolution_mismatches(
+    connection: &Connection,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  link_id,
+  resolved_file_id,
+  is_unresolved
+FROM links
+WHERE (is_unresolved = 1 AND resolved_file_id IS NOT NULL)
+   OR (is_unresolved = 0 AND resolved_file_id IS NULL)
+ORDER BY link_id ASC
+"#,
+        )
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "prepare_link_resolution_mismatches",
+            source: Box::new(source),
+        })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let resolved_file_id: Option<String> = row.get("resolved_file_id")?;
+            let is_unresolved = row.get::<_, i64>("is_unresolved")? != 0;
+            Ok(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::LinkResolutionMismatch,
+                record_id: row.get("link_id")?,
+                detail: format!(
+                    "is_unresolved={} resolved_file_id={}",
+                    is_unresolved,
+                    resolved_file_id.unwrap_or_else(|| "<none>".to_string())
+                ),
+            })
+        })
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "query_link_resolution_mismatches",
+            source: Box::new(source),
+        })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|source| IndexConsistencyError::Sql {
+            operation: "map_link_resolution_mismatches",
+            source: Box::new(source),
+        })
+}
+
+fn query_filesystem_path_issues(
+    connection: &Connection,
+    canonical_vault_root: &Path,
+) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
+    let files = FilesRepository::list_all(connection).map_err(|source| {
+        IndexConsistencyError::ListIndexedFiles {
+            source: Box::new(source),
+        }
+    })?;
+
+    let mut issues = Vec::new();
+    for file in files {
+        let absolute_path = PathBuf::from(&file.absolute_path);
+        if !absolute_path.starts_with(canonical_vault_root) {
+            issues.push(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::OutsideVaultRoot,
+                record_id: file.file_id.clone(),
+                detail: format!(
+                    "absolute path '{}' is outside vault root '{}'",
+                    file.absolute_path,
+                    canonical_vault_root.to_string_lossy()
+                ),
+            });
+        }
+
+        if let Err(source) = fs::metadata(&absolute_path) {
+            issues.push(IndexConsistencyIssue {
+                kind: ConsistencyIssueKind::MissingOnDiskFile,
+                record_id: file.file_id,
+                detail: format!(
+                    "absolute path '{}' is not readable: {source}",
+                    file.absolute_path
+                ),
+            });
+        }
+    }
+
+    Ok(issues)
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -1757,6 +2151,43 @@ pub enum ReconciliationScanError {
     },
 }
 
+/// Index consistency checker failures.
+#[derive(Debug, Error)]
+pub enum IndexConsistencyError {
+    /// Vault root canonicalization failed.
+    #[error("failed to canonicalize vault root '{path}': {source}")]
+    CanonicalizeVaultRoot {
+        /// Input vault root path.
+        path: PathBuf,
+        /// Filesystem canonicalization error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Listing indexed file rows failed.
+    #[error("failed to list indexed file rows for consistency checks: {source}")]
+    ListIndexedFiles {
+        /// Files repository error.
+        #[source]
+        source: Box<obs_sdk_storage::FilesRepositoryError>,
+    },
+    /// SQL query operation failed.
+    #[error("consistency checker sql operation '{operation}' failed: {source}")]
+    Sql {
+        /// SQL operation identifier.
+        operation: &'static str,
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Reading system clock failed.
+    #[error("failed to read current time during consistency check: {source}")]
+    Clock {
+        /// System time conversion error.
+        #[source]
+        source: Box<std::time::SystemTimeError>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1771,8 +2202,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, FullIndexService,
-        IncrementalIndexService, ReconciliationScannerService, StaleCleanupService,
+        CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, ConsistencyIssueKind,
+        FullIndexService, IncrementalIndexService, IndexConsistencyChecker,
+        ReconciliationScannerService, StaleCleanupService,
     };
 
     #[test]
@@ -2193,6 +2625,108 @@ mod tests {
         assert_eq!(result.removed_paths, 0);
         assert_eq!(result.drift_paths, 0);
         assert_eq!(result.batches_applied, 0);
+    }
+
+    #[test]
+    fn consistency_checker_reports_orphans_and_broken_references() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::remove_file(temp.path().join("notes/b.md")).expect("remove b from disk");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a file row")
+            .expect("a file exists");
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("disable foreign key checks for injected corruption");
+        connection
+            .execute(
+                "INSERT INTO properties (property_id, file_id, key, value_type, value_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["prop_orphan_1", "file_missing_1", "status", "string", "\"draft\""],
+            )
+            .expect("insert orphan property");
+        connection
+            .execute(
+                "INSERT INTO render_cache (cache_key, file_id, html, content_hash) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["cache_orphan_1", "file_missing_2", "<p>x</p>", "abc123"],
+            )
+            .expect("insert orphan render cache");
+        connection
+            .execute(
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+                rusqlite::params!["link_broken_target", source_a.file_id, "missing-target", "file_missing_3", 0_i64],
+            )
+            .expect("insert broken target link");
+        connection
+            .execute(
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4)",
+                rusqlite::params!["link_resolution_mismatch", source_a.file_id, "mismatch", 0_i64],
+            )
+            .expect("insert resolution mismatch link");
+
+        let report = IndexConsistencyChecker
+            .check(temp.path(), &connection)
+            .expect("run consistency checker");
+
+        assert!(report.checked_at_unix_ms > 0);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == ConsistencyIssueKind::OrphanProperty)
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == ConsistencyIssueKind::OrphanRenderCache)
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == ConsistencyIssueKind::BrokenLinkTarget)
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == ConsistencyIssueKind::LinkResolutionMismatch)
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.kind == ConsistencyIssueKind::MissingOnDiskFile)
+        );
+    }
+
+    #[test]
+    fn consistency_checker_returns_empty_report_for_healthy_index() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let report = IndexConsistencyChecker
+            .check(temp.path(), &connection)
+            .expect("run consistency checker");
+        assert!(report.issues.is_empty());
     }
 
     #[test]

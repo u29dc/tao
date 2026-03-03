@@ -21,10 +21,11 @@ pub use import_export::{
 };
 pub use indexing::{
     CheckpointedIndexError, CheckpointedIndexResult, CheckpointedIndexService,
-    CoalescedBatchIndexResult, CoalescedBatchIndexService, FullIndexError, FullIndexResult,
-    FullIndexService, IncrementalIndexResult, IncrementalIndexService, ReconciliationScanError,
-    ReconciliationScanResult, ReconciliationScannerService, StaleCleanupError, StaleCleanupResult,
-    StaleCleanupService,
+    CoalescedBatchIndexResult, CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexError,
+    FullIndexResult, FullIndexService, IncrementalIndexResult, IncrementalIndexService,
+    IndexConsistencyChecker, IndexConsistencyError, IndexConsistencyIssue, IndexConsistencyReport,
+    ReconciliationScanError, ReconciliationScanResult, ReconciliationScannerService,
+    StaleCleanupError, StaleCleanupResult, StaleCleanupService,
 };
 pub use tracing_hooks::ServiceTraceContext;
 

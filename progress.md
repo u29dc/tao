@@ -572,3 +572,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [reconciliation scanner detects inserted/updated/removed drift paths from vault-vs-index comparison and repairs missed watcher events using bounded coalesced incremental batches]
 - residual_risk: path ordering now prioritizes inserts before updates to improve same-run link resolution, but highly interdependent multi-hop link graphs may still need a second incremental pass for full convergence
+
+- timestamp: 2026-03-03T17:02:11Z
+- session: session-2026-03-03-a
+- ticket: IDX-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [index consistency checker added with typed issue report for orphan properties/bases/render-cache rows, broken link references, unresolved flag mismatches, outside-root paths, and missing on-disk files]
+- residual_risk: injected-corruption tests require disabling sqlite foreign key checks, so runtime checker still assumes corruption can come from external/manual writes or earlier schema enforcement gaps
