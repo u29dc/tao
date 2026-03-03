@@ -352,3 +352,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [note create/update/delete service implemented with filesystem + metadata coordination and integration tests]
 - residual_risk: create currently fails on existing file (create_new); dedicated rename/move conflict policies remain in SDK-009
+
+- timestamp: 2026-03-03T19:12:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-009
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-storage/src/files.rs, crates/obs-sdk-storage/src/transaction.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [note rename/move service flows implemented with link-resolution consistency integration tests]
+- residual_risk: rename currently assumes local filesystem rename semantics; cross-device moves would need copy+fsync fallback handling

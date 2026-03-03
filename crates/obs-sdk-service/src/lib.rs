@@ -149,12 +149,11 @@ impl SdkTransactionCoordinator {
     pub fn replace_file_metadata(
         &self,
         connection: &mut Connection,
-        file_id: &str,
+        _file_id: &str,
         replacement: &FileRecordInput,
     ) -> Result<(), SdkTransactionError> {
         with_transaction(connection, |transaction| {
-            let _ = transaction.files_delete_by_id(file_id)?;
-            transaction.files_insert(replacement)?;
+            transaction.files_upsert(replacement)?;
             Ok(())
         })
         .map_err(|source| SdkTransactionError::Transaction { source })
@@ -346,6 +345,67 @@ impl NoteCrudService {
 
         Ok(removed)
     }
+
+    /// Rename or move a note to a new relative path and refresh metadata.
+    pub fn rename_note(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        new_relative_path: &Path,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        validate_relative_note_path(new_relative_path)?;
+
+        let existing = FilesRepository::get_by_id(connection, file_id)
+            .map_err(|source| NoteCrudError::Repository { source })?;
+        let Some(existing) = existing else {
+            return Err(NoteCrudError::MissingFileRecord {
+                file_id: file_id.to_string(),
+            });
+        };
+
+        let old_absolute = vault_root.join(&existing.normalized_path);
+        let new_absolute = vault_root.join(new_relative_path);
+        if let Some(parent) = new_absolute.parent() {
+            fs::create_dir_all(parent).map_err(|source| NoteCrudError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        fs::rename(&old_absolute, &new_absolute).map_err(|source| NoteCrudError::RenameFile {
+            from: old_absolute.clone(),
+            to: new_absolute.clone(),
+            source,
+        })?;
+
+        let record = fingerprint_to_file_record(file_id, vault_root, new_relative_path)?;
+        self.coordinator
+            .replace_file_metadata(connection, file_id, &record)
+            .map_err(|source| NoteCrudError::Coordinator { source })?;
+
+        self.events.publish(DomainEvent::NoteChanged {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path.clone(),
+            kind: NoteChangeKind::Renamed,
+        });
+
+        Ok(NoteCrudResult {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path,
+        })
+    }
+
+    /// Move note convenience wrapper over `rename_note`.
+    pub fn move_note(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        destination_relative_path: &Path,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        self.rename_note(vault_root, connection, file_id, destination_relative_path)
+    }
 }
 
 fn validate_relative_note_path(relative_path: &Path) -> Result<(), NoteCrudError> {
@@ -399,6 +459,12 @@ fn fingerprint_to_file_record(
 /// Errors returned by note create/update/delete operations.
 #[derive(Debug, Error)]
 pub enum NoteCrudError {
+    /// File metadata row does not exist for requested file id.
+    #[error("no file metadata found for file id '{file_id}'")]
+    MissingFileRecord {
+        /// Missing file id.
+        file_id: String,
+    },
     /// Provided relative note path is invalid.
     #[error("invalid note path '{path}'")]
     InvalidPath {
@@ -419,6 +485,17 @@ pub enum NoteCrudError {
     WriteFile {
         /// File path.
         path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Renaming note file failed.
+    #[error("failed to rename note file from '{from}' to '{to}': {source}")]
+    RenameFile {
+        /// Previous file path.
+        from: PathBuf,
+        /// New file path.
+        to: PathBuf,
         /// Filesystem error.
         #[source]
         source: std::io::Error,
@@ -519,7 +596,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use obs_sdk_storage::{FileRecordInput, FilesRepository, run_migrations};
+    use obs_sdk_storage::{
+        FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, run_migrations,
+    };
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -731,5 +810,70 @@ mod tests {
             .expect_err("path escaping should fail");
 
         assert!(matches!(error, NoteCrudError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn note_crud_service_rename_keeps_link_resolution_consistent() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "target",
+                Path::new("notes/target.md"),
+                "# target",
+            )
+            .expect("create target");
+        service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "source",
+                Path::new("notes/source.md"),
+                "# source",
+            )
+            .expect("create source");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l1".to_string(),
+                source_file_id: "source".to_string(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some("target".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert link");
+
+        let renamed = service
+            .rename_note(
+                &vault_root,
+                &mut connection,
+                "target",
+                Path::new("archive/renamed-target.md"),
+            )
+            .expect("rename note");
+        assert_eq!(renamed.normalized_path, "archive/renamed-target.md");
+
+        assert!(!vault_root.join("notes/target.md").exists());
+        assert!(vault_root.join("archive/renamed-target.md").exists());
+
+        let backlinks = LinksRepository::list_backlinks_with_paths(&connection, "target")
+            .expect("list backlinks");
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(
+            backlinks[0].resolved_path.as_deref(),
+            Some("archive/renamed-target.md")
+        );
     }
 }

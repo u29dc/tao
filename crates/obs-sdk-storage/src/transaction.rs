@@ -19,6 +19,11 @@ impl<'tx> StorageTransaction<'tx> {
         FilesRepository::insert(&self.transaction, record).map_err(StorageTransactionError::from)
     }
 
+    /// Insert or update one file record inside the active transaction.
+    pub fn files_upsert(&self, record: &FileRecordInput) -> Result<(), StorageTransactionError> {
+        FilesRepository::upsert(&self.transaction, record).map_err(StorageTransactionError::from)
+    }
+
     /// Lookup file by id inside the active transaction.
     pub fn files_get_by_id(
         &self,

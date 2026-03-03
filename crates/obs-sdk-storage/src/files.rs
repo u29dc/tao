@@ -89,6 +89,55 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         Ok(())
     }
 
+    /// Insert or update one file row keyed by `file_id`.
+    pub fn upsert(
+        connection: &Connection,
+        record: &FileRecordInput,
+    ) -> Result<(), FilesRepositoryError> {
+        connection
+            .execute(
+                r#"
+INSERT INTO files (
+  file_id,
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(file_id)
+DO UPDATE SET
+  normalized_path = excluded.normalized_path,
+  match_key = excluded.match_key,
+  absolute_path = excluded.absolute_path,
+  size_bytes = excluded.size_bytes,
+  modified_unix_ms = excluded.modified_unix_ms,
+  hash_blake3 = excluded.hash_blake3,
+  is_markdown = excluded.is_markdown,
+  indexed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+                params![
+                    record.file_id,
+                    record.normalized_path,
+                    record.match_key,
+                    record.absolute_path,
+                    record.size_bytes,
+                    record.modified_unix_ms,
+                    record.hash_blake3,
+                    i64::from(record.is_markdown)
+                ],
+            )
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "upsert",
+                source,
+            })?;
+
+        Ok(())
+    }
+
     /// Read one file row by file id.
     pub fn get_by_id(
         connection: &Connection,
