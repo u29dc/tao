@@ -203,3 +203,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [dedicated cargo-audit ci workflow integrated and validated locally]
 - residual_risk: audit db network dependency in ci remains external
 
+- timestamp: 2026-03-03T16:02:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-007
+- action: done
+- evidence:
+  - files: [Cargo.toml, crates/obs-bench/*, bench/fixtures/README.md, scripts/generate-fixtures.sh, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [bench crate and deterministic fixture generation scaffold added]
+- residual_risk: fixture generation runtime for 25k profile may be heavy in ci
+

@@ -14,6 +14,7 @@ members = [
   "crates/obs-sdk-bridge",
   "crates/obs-cli",
   "crates/obs-tui",
+  "crates/obs-bench",
 ]
 
 [workspace.package]
