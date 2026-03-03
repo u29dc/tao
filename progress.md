@@ -53,3 +53,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [typed service contracts and dto versioning policy defined]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:19:00Z
+- session: session-2026-03-03-a
+- ticket: DOC-005
+- action: done
+- evidence:
+  - files: [docs/specs/error-codes.md, tickets.csv, run-state.json]
+  - commands: [write error code catalog]
+  - outcomes: [stable sdk error code registry added]
+- residual_risk: none
+
