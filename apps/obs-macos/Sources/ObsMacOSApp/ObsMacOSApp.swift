@@ -36,6 +36,9 @@ private struct ObsRootSplitView: View {
     @State private var propertiesStatus: String?
     @State private var propertiesError: String?
     @State private var isSavingProperties = false
+    @State private var linkPanels: BridgeLinkPanels?
+    @State private var linksError: String?
+    @State private var isLoadingLinks = false
     @StateObject private var fileTreeViewModel = FileTreeViewModel()
 
     var body: some View {
@@ -158,6 +161,54 @@ private struct ObsRootSplitView: View {
                             }
                             if let propertiesError {
                                 Text(propertiesError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
+
+                            Divider()
+                            Text("Links")
+                                .font(.headline)
+
+                            if isLoadingLinks {
+                                ProgressView("Loading links...")
+                            } else if let linkPanels {
+                                HStack(alignment: .top, spacing: 24) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Outgoing")
+                                            .font(.caption.weight(.semibold))
+                                        if linkPanels.outgoing.isEmpty {
+                                            Text("none")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            ForEach(Array(linkPanels.outgoing.enumerated()), id: \.offset) { _, link in
+                                                Text(link.targetPath ?? link.sourcePath)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Backlinks")
+                                            .font(.caption.weight(.semibold))
+                                        if linkPanels.backlinks.isEmpty {
+                                            Text("none")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            ForEach(Array(linkPanels.backlinks.enumerated()), id: \.offset) { _, link in
+                                                Text(link.sourcePath)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let linksError {
+                                Text(linksError)
                                     .font(.caption)
                                     .foregroundStyle(.red)
                             }
@@ -290,6 +341,8 @@ private struct ObsRootSplitView: View {
                     noteError = nil
                     propertiesStatus = nil
                     propertiesError = nil
+                    linkPanels = nil
+                    linksError = nil
                     isLoadingStats = false
                 }
             } catch {
@@ -323,6 +376,8 @@ private struct ObsRootSplitView: View {
         guard let path, path.hasSuffix(".md") else {
             selectedNote = nil
             noteError = nil
+            linkPanels = nil
+            linksError = nil
             return
         }
 
@@ -346,7 +401,10 @@ private struct ObsRootSplitView: View {
                     frontMatterDraft = note.frontMatter ?? ""
                     propertiesStatus = nil
                     propertiesError = nil
+                    linkPanels = nil
+                    linksError = nil
                     isLoadingNote = false
+                    loadLinkPanels(path: note.path)
                 }
             } catch {
                 await MainActor.run {
@@ -354,6 +412,8 @@ private struct ObsRootSplitView: View {
                     noteError = "note read failed: \(error)"
                     propertiesStatus = nil
                     propertiesError = nil
+                    linkPanels = nil
+                    linksError = nil
                     isLoadingNote = false
                 }
             }
@@ -420,6 +480,36 @@ private struct ObsRootSplitView: View {
                 await MainActor.run {
                     propertiesError = "properties save failed: \(error)"
                     isSavingProperties = false
+                }
+            }
+        }
+    }
+
+    private func loadLinkPanels(path: String) {
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            linksError = "open a vault before loading links"
+            return
+        }
+
+        isLoadingLinks = true
+        linksError = nil
+
+        Task {
+            do {
+                let panels = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().noteLinks(vaultRoot: root, dbPath: db, path: path)
+                }.value
+                await MainActor.run {
+                    linkPanels = panels
+                    isLoadingLinks = false
+                }
+            } catch {
+                await MainActor.run {
+                    linkPanels = nil
+                    linksError = "links load failed: \(error)"
+                    isLoadingLinks = false
                 }
             }
         }

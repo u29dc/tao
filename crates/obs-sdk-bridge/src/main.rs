@@ -56,6 +56,18 @@ enum Commands {
         #[arg(long, default_value_t = 128)]
         limit: u64,
     },
+    /// Return outgoing/backlink panels for one note.
+    NoteLinks {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Note normalized path.
+        #[arg(long)]
+        path: String,
+    },
     /// Create or update one note and return write acknowledgement.
     NotePut {
         /// Absolute vault root path.
@@ -110,6 +122,11 @@ fn main() {
         } => with_kernel(vault_root, db_path, |kernel| {
             kernel.notes_list(after_path.as_deref(), limit)
         }),
+        Commands::NoteLinks {
+            vault_root,
+            db_path,
+            path,
+        } => with_kernel(vault_root, db_path, |kernel| kernel.note_links(&path)),
         Commands::NotePut {
             vault_root,
             db_path,

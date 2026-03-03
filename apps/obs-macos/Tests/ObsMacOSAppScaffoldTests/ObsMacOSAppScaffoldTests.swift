@@ -145,6 +145,34 @@ import Foundation
     #expect(secondPage.nextCursor == nil)
 }
 
+@Test func bridge_client_note_links_returns_panels() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-links-test-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = ObsBridgeClient()
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/source.md",
+        content: "# Source"
+    )
+
+    let links = try client.noteLinks(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/source.md"
+    )
+    #expect(links.outgoing.isEmpty)
+    #expect(links.backlinks.isEmpty)
+}
+
 @Test func bridge_client_events_poll_returns_note_write_events() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory

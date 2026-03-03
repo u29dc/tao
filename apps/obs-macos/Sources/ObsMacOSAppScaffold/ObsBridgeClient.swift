@@ -62,6 +62,21 @@ public struct BridgeEventBatch: Decodable {
     public let nextCursor: UInt64
 }
 
+public struct BridgeLinkRef: Decodable {
+    public let sourcePath: String
+    public let targetPath: String?
+    public let heading: String?
+    public let blockId: String?
+    public let displayText: String?
+    public let kind: String
+    public let resolved: Bool
+}
+
+public struct BridgeLinkPanels: Decodable {
+    public let outgoing: [BridgeLinkRef]
+    public let backlinks: [BridgeLinkRef]
+}
+
 public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case initFailed(BridgeErrorDTO)
     case vaultStatsFailed(BridgeErrorDTO)
@@ -70,6 +85,10 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case noteGetParseFailed(BridgeErrorDTO)
     case notesListInvalidLimit(BridgeErrorDTO)
     case notesListQueryFailed(BridgeErrorDTO)
+    case noteLinksInvalidPath(BridgeErrorDTO)
+    case noteLinksLookupFailed(BridgeErrorDTO)
+    case noteLinksNotFound(BridgeErrorDTO)
+    case noteLinksQueryFailed(BridgeErrorDTO)
     case notePutInvalidPath(BridgeErrorDTO)
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
@@ -96,6 +115,14 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .notesListInvalidLimit(error)
         case "bridge.notes_list.query_failed":
             return .notesListQueryFailed(error)
+        case "bridge.note_links.invalid_path":
+            return .noteLinksInvalidPath(error)
+        case "bridge.note_links.lookup_failed":
+            return .noteLinksLookupFailed(error)
+        case "bridge.note_links.not_found":
+            return .noteLinksNotFound(error)
+        case "bridge.note_links.query_failed":
+            return .noteLinksQueryFailed(error)
         case "bridge.note_put.invalid_path":
             return .notePutInvalidPath(error)
         case "bridge.note_put.lookup_failed":
@@ -126,6 +153,10 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .noteGetParseFailed(let error),
             .notesListInvalidLimit(let error),
             .notesListQueryFailed(let error),
+            .noteLinksInvalidPath(let error),
+            .noteLinksLookupFailed(let error),
+            .noteLinksNotFound(let error),
+            .noteLinksQueryFailed(let error),
             .notePutInvalidPath(let error),
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
@@ -155,6 +186,14 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "notes list invalid limit: \(error.message)"
         case .notesListQueryFailed(let error):
             return "notes list query failed: \(error.message)"
+        case .noteLinksInvalidPath(let error):
+            return "note links invalid path: \(error.message)"
+        case .noteLinksLookupFailed(let error):
+            return "note links lookup failed: \(error.message)"
+        case .noteLinksNotFound(let error):
+            return "note links not found: \(error.message)"
+        case .noteLinksQueryFailed(let error):
+            return "note links query failed: \(error.message)"
         case .notePutInvalidPath(let error):
             return "note put invalid path: \(error.message)"
         case .notePutLookupFailed(let error):
@@ -273,6 +312,22 @@ public struct ObsBridgeClient {
             subcommand.append(contentsOf: ["--after-path", afterPath])
         }
         return try invoke(subcommand: subcommand, as: BridgeNoteListPage.self)
+    }
+
+    public func noteLinks(
+        vaultRoot: String,
+        dbPath: String,
+        path: String
+    ) throws -> BridgeLinkPanels {
+        try invoke(
+            subcommand: [
+                "note-links",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath,
+                "--path", path
+            ],
+            as: BridgeLinkPanels.self
+        )
     }
 
     public func eventsPoll(

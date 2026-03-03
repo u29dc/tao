@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use obs_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use obs_sdk_service::{HealthSnapshotService, NoteCrudService, WatcherStatus};
-use obs_sdk_storage::{FilesRepository, run_migrations};
+use obs_sdk_storage::{FilesRepository, LinkWithPaths, LinksRepository, run_migrations};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -29,6 +29,14 @@ pub const BRIDGE_ERROR_NOTE_GET_PARSE_FAILED: &str = "bridge.note_get.parse_fail
 pub const BRIDGE_ERROR_NOTES_LIST_INVALID_LIMIT: &str = "bridge.notes_list.invalid_limit";
 /// Bridge error code when notes-list query fails.
 pub const BRIDGE_ERROR_NOTES_LIST_QUERY_FAILED: &str = "bridge.notes_list.query_failed";
+/// Bridge error code when note-links path is invalid.
+pub const BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH: &str = "bridge.note_links.invalid_path";
+/// Bridge error code when note-links source lookup fails.
+pub const BRIDGE_ERROR_NOTE_LINKS_LOOKUP_FAILED: &str = "bridge.note_links.lookup_failed";
+/// Bridge error code when note-links source note is missing.
+pub const BRIDGE_ERROR_NOTE_LINKS_NOT_FOUND: &str = "bridge.note_links.not_found";
+/// Bridge error code when note-links query fails.
+pub const BRIDGE_ERROR_NOTE_LINKS_QUERY_FAILED: &str = "bridge.note_links.query_failed";
 /// Bridge error code when note-put path is invalid.
 pub const BRIDGE_ERROR_NOTE_PUT_INVALID_PATH: &str = "bridge.note_put.invalid_path";
 /// Bridge error code when note-put lookup fails.
@@ -217,6 +225,34 @@ pub struct BridgeNoteListPage {
     pub items: Vec<BridgeNoteSummary>,
     /// Cursor for the next page when available.
     pub next_cursor: Option<String>,
+}
+
+/// Bridge link reference row for outgoing/backlink panels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeLinkRef {
+    /// Source normalized path.
+    pub source_path: String,
+    /// Resolved target path when available.
+    pub target_path: Option<String>,
+    /// Optional heading slug target.
+    pub heading: Option<String>,
+    /// Optional block id target.
+    pub block_id: Option<String>,
+    /// Optional display text.
+    pub display_text: Option<String>,
+    /// Link kind label.
+    pub kind: String,
+    /// Whether target is resolved.
+    pub resolved: bool,
+}
+
+/// Bridge links payload containing outgoing and backlink panels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeLinkPanels {
+    /// Outgoing links from selected note.
+    pub outgoing: Vec<BridgeLinkRef>,
+    /// Backlinks into selected note.
+    pub backlinks: Vec<BridgeLinkRef>,
 }
 
 /// Bridge write acknowledgement DTO.
@@ -410,6 +446,81 @@ impl BridgeKernel {
         }
     }
 
+    /// Return outgoing/backlink panels for one note by normalized path.
+    #[must_use]
+    pub fn note_links(&self, normalized_path: &str) -> BridgeEnvelope<BridgeLinkPanels> {
+        let normalized_path = normalized_path.trim();
+        if normalized_path.is_empty() {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH,
+                    "normalized path must not be empty",
+                )
+                .with_hint("provide a vault-relative markdown path"),
+            );
+        }
+
+        let source =
+            match FilesRepository::get_by_normalized_path(&self.connection, normalized_path) {
+                Ok(Some(file)) => file,
+                Ok(None) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_LINKS_NOT_FOUND,
+                            "note is not indexed for links lookup",
+                        )
+                        .with_hint("reindex the vault and retry")
+                        .with_context("path", JsonValue::String(normalized_path.to_string())),
+                    );
+                }
+                Err(source) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_LINKS_LOOKUP_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("ensure bridge database is available")
+                        .with_context("path", JsonValue::String(normalized_path.to_string())),
+                    );
+                }
+            };
+
+        let outgoing =
+            match LinksRepository::list_outgoing_with_paths(&self.connection, &source.file_id) {
+                Ok(rows) => rows.into_iter().map(map_link_with_paths).collect(),
+                Err(source) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_LINKS_QUERY_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("ensure links index tables are readable")
+                        .with_context("path", JsonValue::String(normalized_path.to_string())),
+                    );
+                }
+            };
+
+        let backlinks =
+            match LinksRepository::list_backlinks_with_paths(&self.connection, &source.file_id) {
+                Ok(rows) => rows.into_iter().map(map_link_with_paths).collect(),
+                Err(source) => {
+                    return BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_LINKS_QUERY_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("ensure links index tables are readable")
+                        .with_context("path", JsonValue::String(normalized_path.to_string())),
+                    );
+                }
+            };
+
+        BridgeEnvelope::success(BridgeLinkPanels {
+            outgoing,
+            backlinks,
+        })
+    }
+
     /// Create or update one note safely through SDK write services.
     #[must_use]
     pub fn note_put(
@@ -592,6 +703,26 @@ fn query_note_summaries_page(
     Ok(BridgeNoteListPage { items, next_cursor })
 }
 
+fn map_link_with_paths(row: LinkWithPaths) -> BridgeLinkRef {
+    let kind = if row.block_id.is_some() {
+        "block"
+    } else if row.heading_slug.is_some() {
+        "heading"
+    } else {
+        "wikilink"
+    };
+
+    BridgeLinkRef {
+        source_path: row.source_path,
+        target_path: row.resolved_path,
+        heading: row.heading_slug,
+        block_id: row.block_id,
+        display_text: None,
+        kind: kind.to_string(),
+        resolved: !row.is_unresolved && row.resolved_file_id.is_some(),
+    }
+}
+
 fn ensure_bridge_event_log(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS bridge_events (
@@ -725,6 +856,7 @@ pub enum BridgeInitError {
 mod tests {
     use std::fs;
 
+    use obs_sdk_storage::{LinkRecordInput, LinksRepository};
     use tempfile::tempdir;
 
     use super::{
@@ -897,6 +1029,61 @@ mod tests {
                 .body
                 .contains("second")
         );
+    }
+
+    #[test]
+    fn bridge_kernel_note_links_returns_outgoing_and_backlinks() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let source = kernel.note_put("notes/source.md", "# Source");
+        let source_id = source.value.expect("source").file_id;
+        let target = kernel.note_put("notes/target.md", "# Target");
+        let target_id = target.value.expect("target").file_id;
+        let incoming = kernel.note_put("notes/incoming.md", "# Incoming");
+        let incoming_id = incoming.value.expect("incoming").file_id;
+
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-outgoing".to_string(),
+                source_file_id: source_id.clone(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some(target_id.clone()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert outgoing link");
+
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-backlink".to_string(),
+                source_file_id: incoming_id,
+                raw_target: "source".to_string(),
+                resolved_file_id: Some(source_id),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert backlink");
+
+        let links = kernel.note_links("notes/source.md");
+        assert!(links.ok);
+        let value = links.value.expect("links value");
+        assert_eq!(value.outgoing.len(), 1);
+        assert_eq!(
+            value.outgoing[0].target_path.as_deref(),
+            Some("notes/target.md")
+        );
+        assert_eq!(value.backlinks.len(), 1);
+        assert_eq!(value.backlinks[0].source_path.as_str(), "notes/incoming.md");
     }
 
     #[test]

@@ -882,3 +882,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [properties pane added to inspector with parsed frontmatter key/value display, editable raw frontmatter text area, and `Save Properties` flow that persists through bridge `notePut` then reloads the note]
 - residual_risk: property editing currently rewrites full frontmatter block text without schema/type guardrails, so richer typed property controls remain future UX hardening work
+
+- timestamp: 2026-03-03T18:27:04Z
+- session: session-2026-03-03-a
+- ticket: APP-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [bridge `note-links` endpoint added with outgoing/backlink DTOs and CLI command; Swift client now exposes typed `noteLinks` API; inspector renders outgoing and backlink panels for selected notes with loading/error states]
+- residual_risk: current bridge link panel payload omits display-text extraction and advanced fragment semantics, so richer link presentation can be layered without changing panel wiring
