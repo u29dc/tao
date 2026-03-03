@@ -612,3 +612,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [block-id extraction and block-fragment resolver added; indexing now validates block fragments against indexed block ids and marks missing blocks unresolved]
 - residual_risk: block-id extraction currently follows inline marker parsing rules and may miss atypical/escaped markdown edge cases that need full markdown AST support
+
+- timestamp: 2026-03-03T17:12:00Z
+- session: session-2026-03-03-a
+- ticket: LINK-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/links.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [links repository now exposes unresolved-link listing with joined paths and deterministic ordering, with repository tests covering resolved/unresolved separation]
+- residual_risk: unresolved tracking remains table-driven and currently does not include explicit unresolved reason taxonomy (path vs heading vs block)

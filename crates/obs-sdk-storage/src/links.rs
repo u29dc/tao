@@ -232,6 +232,51 @@ ORDER BY sf.normalized_path ASC, l.link_id ASC
         })
         .collect()
     }
+
+    /// List unresolved links across vault with joined source/target paths.
+    pub fn list_unresolved_with_paths(
+        connection: &Connection,
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+WHERE l.is_unresolved = 1
+ORDER BY sf.normalized_path ASC, l.link_id ASC
+"#,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "prepare_list_unresolved_with_paths",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map([], row_to_link_with_paths)
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_unresolved_with_paths",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_unresolved_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
 }
 
 fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
@@ -339,5 +384,66 @@ mod tests {
             backlinks[0].resolved_path.as_deref(),
             Some("notes/target.md")
         );
+    }
+
+    #[test]
+    fn unresolved_link_query_returns_only_unresolved_rows_in_stable_order() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(&connection, &file("source-a", "notes/a.md"))
+            .expect("insert source a");
+        FilesRepository::insert(&connection, &file("source-b", "notes/b.md"))
+            .expect("insert source b");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-resolved".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "b".to_string(),
+                resolved_file_id: Some("source-b".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+            },
+        )
+        .expect("insert resolved");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-unresolved-b".to_string(),
+                source_file_id: "source-b".to_string(),
+                raw_target: "missing-b".to_string(),
+                resolved_file_id: None,
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: true,
+            },
+        )
+        .expect("insert unresolved b");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-unresolved-a".to_string(),
+                source_file_id: "source-a".to_string(),
+                raw_target: "missing-a".to_string(),
+                resolved_file_id: None,
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: true,
+            },
+        )
+        .expect("insert unresolved a");
+
+        let unresolved =
+            LinksRepository::list_unresolved_with_paths(&connection).expect("list unresolved");
+
+        assert_eq!(unresolved.len(), 2);
+        assert_eq!(unresolved[0].source_path, "notes/a.md");
+        assert_eq!(unresolved[0].link_id, "l-unresolved-a");
+        assert_eq!(unresolved[1].source_path, "notes/b.md");
+        assert_eq!(unresolved[1].link_id, "l-unresolved-b");
+        assert!(unresolved.iter().all(|row| row.is_unresolved));
     }
 }
