@@ -113,3 +113,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [typed event kinds envelope and delivery rules documented]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:33:00Z
+- session: session-2026-03-03-a
+- ticket: ARC-005
+- action: done
+- evidence:
+  - files: [docs/architecture/link-resolver-policy.md, tickets.csv, run-state.json]
+  - commands: [write resolver tie-break policy]
+  - outcomes: [deterministic ambiguity and fragment resolution policy added]
+- residual_risk: none
+
