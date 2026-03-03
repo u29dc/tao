@@ -492,3 +492,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [bases repository implemented with upsert/get/delete/list join APIs and deterministic ordering tests]
 - residual_risk: current bases persistence stores raw config JSON only; typed base parsing/validation remains in later BASE tickets
+
+- timestamp: 2026-03-03T16:38:10Z
+- session: session-2026-03-03-a
+- ticket: DB-007
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/render_cache.rs, crates/obs-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [render cache repository implemented with upsert/get/list/delete operations and persistence tests]
+- residual_risk: current render cache storage focuses on row persistence; cross-service invalidation orchestration remains in indexing tickets

@@ -9,6 +9,7 @@ mod bases;
 mod files;
 mod links;
 mod properties;
+mod render_cache;
 mod transaction;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
@@ -19,6 +20,9 @@ pub use links::{
 pub use properties::{
     PropertiesRepository, PropertiesRepositoryError, PropertyRecord, PropertyRecordInput,
     PropertyWithPath,
+};
+pub use render_cache::{
+    RenderCacheRecord, RenderCacheRecordInput, RenderCacheRepository, RenderCacheRepositoryError,
 };
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
