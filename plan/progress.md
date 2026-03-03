@@ -1442,3 +1442,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
   - outcomes: [vault config bootstrap/read added through SdkConfigLoader, with tests confirming vault-root config.toml auto-creation when missing]
 - residual_risk: root/vault config files are loaded independently but precedence merge into effective settings is pending CFG-004
+
+- timestamp: 2026-03-03T23:59:00Z
+- session: session-2026-03-03-b
+- ticket: CFG-004
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+  - outcomes: [effective sdk config now applies precedence defaults < root config.toml < vault config.toml, while preserving higher-priority env and explicit overrides]
+- residual_risk: cli/sdk bootstrap APIs still expose only final resolved runtime values; richer bootstrap metadata wiring is handled in SDK-017

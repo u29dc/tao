@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tao_sdk_config::load_or_bootstrap;
+use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, load_or_bootstrap};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
@@ -66,7 +66,7 @@ impl SdkConfigLoader {
         env: &HashMap<String, String>,
         cwd: &Path,
     ) -> Result<SdkConfig, SdkConfigError> {
-        load_or_bootstrap(cwd).map_err(|source| SdkConfigError::RootConfig {
+        let root_config = load_or_bootstrap(cwd).map_err(|source| SdkConfigError::RootConfig {
             path: cwd.join("config.toml"),
             source,
         })?;
@@ -77,15 +77,34 @@ impl SdkConfigLoader {
             cwd.to_path_buf(),
         );
         let vault_root = canonicalize_existing_directory(vault_root_input)?;
-        load_or_bootstrap(&vault_root).map_err(|source| SdkConfigError::VaultConfig {
-            path: vault_root.join("config.toml"),
-            source,
-        })?;
+        let vault_config =
+            load_or_bootstrap(&vault_root).map_err(|source| SdkConfigError::VaultConfig {
+                path: vault_root.join("config.toml"),
+                source,
+            })?;
+
+        let effective_config = TaoConfig::defaults()
+            .merge(&root_config)
+            .merge(&vault_config);
+
+        let configured_data_dir = vault_config
+            .storage
+            .data_dir
+            .as_ref()
+            .map(|path| absolutize_from(&vault_root, path.clone()))
+            .or_else(|| {
+                root_config
+                    .storage
+                    .data_dir
+                    .as_ref()
+                    .map(|path| absolutize_from(cwd, path.clone()))
+            })
+            .unwrap_or_else(|| vault_root.join(".tao"));
 
         let data_dir_input = choose_path(
             overrides.data_dir,
             env.get(ENV_DATA_DIR).map(PathBuf::from),
-            vault_root.join(".tao"),
+            configured_data_dir,
         );
         let data_dir = absolutize_from(&vault_root, data_dir_input);
         fs::create_dir_all(&data_dir).map_err(|source| SdkConfigError::CreateDataDir {
@@ -93,10 +112,24 @@ impl SdkConfigLoader {
             source,
         })?;
 
+        let configured_db_path = vault_config
+            .storage
+            .db_path
+            .as_ref()
+            .map(|path| absolutize_from(&vault_root, path.clone()))
+            .or_else(|| {
+                root_config
+                    .storage
+                    .db_path
+                    .as_ref()
+                    .map(|path| absolutize_from(cwd, path.clone()))
+            })
+            .unwrap_or_else(|| data_dir.join("index.sqlite"));
+
         let db_path_input = choose_path(
             overrides.db_path,
             env.get(ENV_DB_PATH).map(PathBuf::from),
-            data_dir.join("index.sqlite"),
+            configured_db_path,
         );
         let db_path = absolutize_from(&data_dir, db_path_input);
         if db_path.file_name().is_none() {
@@ -118,7 +151,11 @@ impl SdkConfigLoader {
         } else if let Some(value) = env.get(ENV_CASE_POLICY) {
             parse_case_policy(value)?
         } else {
-            CasePolicy::Sensitive
+            effective_config
+                .runtime
+                .case_policy
+                .map(case_policy_from_config)
+                .unwrap_or(CasePolicy::Sensitive)
         };
 
         let tracing_enabled = if let Some(value) = overrides.tracing_enabled {
@@ -126,7 +163,7 @@ impl SdkConfigLoader {
         } else if let Some(value) = env.get(ENV_TRACING_ENABLED) {
             parse_bool(value)?
         } else {
-            true
+            effective_config.runtime.tracing_enabled.unwrap_or(true)
         };
 
         let feature_flags = if let Some(value) = overrides.feature_flags {
@@ -134,7 +171,7 @@ impl SdkConfigLoader {
         } else if let Some(value) = env.get(ENV_FEATURE_FLAGS) {
             parse_feature_flags(value)
         } else {
-            Vec::new()
+            normalize_feature_flags(effective_config.runtime.feature_flags.unwrap_or_default())
         };
 
         Ok(SdkConfig {
@@ -174,6 +211,13 @@ fn canonicalize_existing_directory(path: PathBuf) -> Result<PathBuf, SdkConfigEr
     }
 
     fs::canonicalize(&path).map_err(|source| SdkConfigError::CanonicalizeVaultRoot { path, source })
+}
+
+fn case_policy_from_config(value: PathCasePolicy) -> CasePolicy {
+    match value {
+        PathCasePolicy::Sensitive => CasePolicy::Sensitive,
+        PathCasePolicy::Insensitive => CasePolicy::Insensitive,
+    }
 }
 
 fn parse_case_policy(value: &str) -> Result<CasePolicy, SdkConfigError> {
@@ -478,5 +522,56 @@ mod tests {
             fs::canonicalize(vault).expect("canonical vault")
         );
         assert!(vault_config.exists(), "vault config should be bootstrapped");
+    }
+
+    #[test]
+    fn load_from_map_applies_config_precedence_defaults_root_then_vault() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        fs::write(
+            temp.path().join("config.toml"),
+            r#"[runtime]
+case_policy = "insensitive"
+tracing_enabled = false
+feature_flags = ["root-flag"]
+
+[storage]
+data_dir = "root-data"
+db_path = "root.sqlite"
+"#,
+        )
+        .expect("write root config");
+
+        fs::write(
+            vault.join("config.toml"),
+            r#"[runtime]
+tracing_enabled = true
+feature_flags = ["vault-flag"]
+
+[storage]
+data_dir = ".vault-data"
+db_path = ".vault.sqlite"
+"#,
+        )
+        .expect("write vault config");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect("load config");
+
+        let canonical_vault = fs::canonicalize(&vault).expect("canonical vault");
+        assert_eq!(loaded.case_policy, CasePolicy::Insensitive);
+        assert!(loaded.tracing_enabled);
+        assert_eq!(loaded.feature_flags, vec!["vault-flag".to_string()]);
+        assert_eq!(loaded.data_dir, canonical_vault.join(".vault-data"));
+        assert_eq!(loaded.db_path, canonical_vault.join(".vault.sqlite"));
     }
 }
