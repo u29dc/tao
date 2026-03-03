@@ -16,5 +16,6 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 obs-sdk-bridge = { path = "../obs-sdk-bridge" }
+obs-sdk-links = { path = "../obs-sdk-links" }
 serde_json.workspace = true
 tempfile = "3.17.1"

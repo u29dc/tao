@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel};
+use obs_sdk_links::resolve_target;
 use serde_json::{Value as JsonValue, json};
 use tempfile::tempdir;
 
@@ -82,7 +83,8 @@ fn run() -> Result<()> {
     let args = Args::parse();
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
-        Scenario::Parse | Scenario::Resolve | Scenario::Search => run_cpu_smoke_benchmark(&args),
+        Scenario::Resolve => run_resolve_benchmark(&args),
+        Scenario::Parse | Scenario::Search => run_cpu_smoke_benchmark(&args),
     }
 }
 
@@ -106,6 +108,68 @@ fn run_cpu_smoke_benchmark(args: &Args) -> Result<()> {
             "generated_at_unix": now_unix(),
         });
         write_json_report(path, &report)?;
+    }
+
+    Ok(())
+}
+
+fn run_resolve_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("resolve benchmark iterations must be greater than zero");
+    }
+
+    let candidate_total = usize::try_from(args.bridge_notes.max(1_000))
+        .context("convert resolve candidate count to usize")?;
+    let mut candidates = Vec::with_capacity(candidate_total + (candidate_total / 5));
+    for index in 0..candidate_total {
+        candidates.push(format!("notes/note-{index:05}.md"));
+    }
+    for index in 0..(candidate_total / 5) {
+        candidates.push(format!("archive/note-{index:05}.md"));
+    }
+
+    let links_per_iteration = 256_u64;
+    let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let benchmark_start = Instant::now();
+
+    for iteration in 0..args.iterations {
+        let start = Instant::now();
+        for offset in 0..links_per_iteration {
+            let index = usize::try_from((iteration + offset) % args.bridge_notes.max(1_000))
+                .context("convert resolver index to usize")?;
+            let target = format!("[[note-{index:05}]]");
+            let resolution = resolve_target(&target, Some("notes/current.md"), &candidates);
+            std::hint::black_box(resolution.resolved_path);
+        }
+        samples.push(elapsed_ms(start));
+    }
+
+    let elapsed_ms_total = elapsed_ms(benchmark_start);
+    let summary = LatencySummary::from_samples(samples)?;
+    let total_ops = args.iterations.saturating_mul(links_per_iteration);
+    let throughput_ops_per_sec = if elapsed_ms_total == 0.0 {
+        0.0
+    } else {
+        (total_ops as f64) / (elapsed_ms_total / 1_000.0)
+    };
+
+    println!(
+        "resolve p50_ms={:.3} p95_ms={:.3} max_ms={:.3} ops_per_sec={:.1}",
+        summary.p50_ms, summary.p95_ms, summary.max_ms, throughput_ops_per_sec
+    );
+
+    let report = json!({
+        "scenario": "resolve",
+        "iterations": args.iterations,
+        "links_per_iteration": links_per_iteration,
+        "candidates_total": candidates.len(),
+        "generated_at_unix": now_unix(),
+        "latency": summary.as_json(),
+        "throughput_ops_per_sec": round_ms(throughput_ops_per_sec),
+    });
+    if let Some(path) = &args.json_out {
+        write_json_report(path, &report)?;
+        println!("resolve report written to {}", path.display());
     }
 
     Ok(())

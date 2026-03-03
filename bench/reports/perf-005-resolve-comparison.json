@@ -1,0 +1,22 @@
+{
+  "scenario": "resolve",
+  "baseline": {
+    "report": "bench/reports/perf-005-resolve-baseline.json",
+    "throughput_ops_per_sec": 196.497,
+    "p50_ms": 1297.227,
+    "p95_ms": 1329.517
+  },
+  "optimized": {
+    "report": "bench/reports/perf-005-resolve-optimized.json",
+    "throughput_ops_per_sec": 463.695,
+    "p50_ms": 549.127,
+    "p95_ms": 574.196
+  },
+  "delta": {
+    "throughput_ops_per_sec": 267.198,
+    "throughput_multiplier": 2.36,
+    "p50_ms": -748.1,
+    "p95_ms": -755.321
+  },
+  "status": "pass"
+}

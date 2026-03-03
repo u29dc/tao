@@ -1092,3 +1092,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-sdk-storage, bun run util:check]
 - outcomes: [implemented default SQLite pragma profile application in migration startup (`foreign_keys`, `journal_mode=WAL`, `synchronous=NORMAL`, `temp_store=MEMORY`, `cache_size`, `wal_autocheckpoint`, `busy_timeout`), added file-db assertion test for profile values, and documented selected profile for runtime governance]
 - residual_risk: pragma profile is globally applied at connection startup and currently not environment-overridable, so future tuning by host class may require config-level profile variants
+
+- timestamp: 2026-03-03T19:40:02Z
+- session: session-2026-03-03-a
+- ticket: PERF-005
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-bench/Cargo.toml, crates/obs-bench/src/main.rs, crates/obs-sdk-links/src/lib.rs, bench/reports/perf-005-resolve-baseline.json, bench/reports/perf-005-resolve-optimized.json, bench/reports/perf-005-resolve-comparison.json, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-baseline.json, cargo run -p obs-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-optimized.json, bun run util:check]
+- outcomes: [replaced resolve benchmark placeholder with real resolver workload harness, optimized resolver hot path to reduce per-candidate normalization/allocation in basename and path-match flows, and validated throughput improvement from 196.497 ops/s to 463.695 ops/s (2.36x) with lower p50/p95 latency]
+- residual_risk: benchmark uses synthetic candidate sets and may not fully represent deeply nested or unicode-heavy production vault path distributions

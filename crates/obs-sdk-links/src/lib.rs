@@ -114,23 +114,37 @@ pub fn resolve_target(
         .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
     let target = normalize_path_like(&target);
 
-    let mut matched_candidates: Vec<String> = if target.contains('/') {
-        candidates
-            .iter()
-            .filter(|candidate| normalized_candidate_equals_target(candidate, &target))
-            .cloned()
-            .collect()
+    let mut matched_candidates = Vec::new();
+    if target.contains('/') {
+        for candidate in candidates {
+            if normalized_candidate_equals_target(candidate, &target) {
+                matched_candidates.push(candidate.clone());
+            }
+        }
     } else {
         let target_basename = basename_without_extension(&target);
-        candidates
-            .iter()
-            .filter(|candidate| {
-                basename_without_extension(&normalize_path_like(candidate))
+        for candidate in candidates {
+            let candidate_trimmed = candidate.trim();
+            if candidate_trimmed.contains('\\') {
+                let normalized_candidate = normalize_path_like(candidate_trimmed);
+                if basename_without_extension(&normalized_candidate)
                     .eq_ignore_ascii_case(&target_basename)
-            })
-            .cloned()
-            .collect()
-    };
+                {
+                    matched_candidates.push(candidate.clone());
+                }
+                continue;
+            }
+
+            let candidate_without_extension = strip_markdown_extension(candidate_trimmed);
+            let candidate_basename = candidate_without_extension
+                .rsplit('/')
+                .next()
+                .unwrap_or(candidate_without_extension);
+            if candidate_basename.eq_ignore_ascii_case(&target_basename) {
+                matched_candidates.push(candidate.clone());
+            }
+        }
+    }
 
     if matched_candidates.is_empty() {
         return LinkResolution {
@@ -348,9 +362,16 @@ fn normalize_path_like(value: &str) -> String {
 }
 
 fn normalized_candidate_equals_target(candidate: &str, target: &str) -> bool {
-    let candidate = normalize_path_like(candidate);
-    let candidate_without_ext = strip_markdown_extension(&candidate);
-    let target_without_ext = strip_markdown_extension(target);
+    if candidate.contains('\\') || target.contains('\\') {
+        let normalized_candidate = normalize_path_like(candidate);
+        let normalized_target = normalize_path_like(target);
+        let candidate_without_ext = strip_markdown_extension(&normalized_candidate);
+        let target_without_ext = strip_markdown_extension(&normalized_target);
+        return candidate_without_ext.eq_ignore_ascii_case(target_without_ext);
+    }
+
+    let candidate_without_ext = strip_markdown_extension(candidate.trim());
+    let target_without_ext = strip_markdown_extension(target.trim());
     candidate_without_ext.eq_ignore_ascii_case(target_without_ext)
 }
 

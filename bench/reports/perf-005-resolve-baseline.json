@@ -1,0 +1,13 @@
+{
+  "candidates_total": 12000,
+  "generated_at_unix": 1772566256,
+  "iterations": 20,
+  "latency": {
+    "max_ms": 1336.016,
+    "p50_ms": 1297.227,
+    "p95_ms": 1329.517
+  },
+  "links_per_iteration": 256,
+  "scenario": "resolve",
+  "throughput_ops_per_sec": 196.497
+}

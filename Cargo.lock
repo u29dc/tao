@@ -350,6 +350,7 @@ dependencies = [
  "anyhow",
  "clap",
  "obs-sdk-bridge",
+ "obs-sdk-links",
  "serde_json",
  "tempfile",
 ]
@@ -459,6 +460,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "rusqlite",
+ "tempfile",
  "thiserror",
 ]
 
