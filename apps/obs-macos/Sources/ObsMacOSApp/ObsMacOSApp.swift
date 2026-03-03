@@ -29,6 +29,9 @@ private struct ObsRootSplitView: View {
     @State private var statsSummary = "Bridge read APIs not called yet."
     @State private var bridgeError: String?
     @State private var isLoadingStats = false
+    @State private var selectedNote: BridgeNoteView?
+    @State private var noteError: String?
+    @State private var isLoadingNote = false
     @StateObject private var fileTreeViewModel = FileTreeViewModel()
 
     var body: some View {
@@ -96,17 +99,44 @@ private struct ObsRootSplitView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Inspector")
                     .font(.headline)
-                if let selectedTreePath {
-                    Text("Selected: \(selectedTreePath)")
-                        .foregroundStyle(.secondary)
+                if isLoadingNote {
+                    ProgressView("Loading note...")
+                } else if let selectedNote {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(selectedNote.title)
+                                .font(.title3.weight(.semibold))
+                            Text(.init(selectedNote.body))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else if let noteError {
+                    Text(noteError)
+                        .foregroundStyle(.red)
                 } else {
-                    Text("Select a file from the tree to inspect its path.")
+                    if let selectedTreePath {
+                        Text("Selected: \(selectedTreePath)")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Select a file from the tree to inspect its note.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let selectedNote {
+                    Divider()
+                    Text("Path: \(selectedNote.path)")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(20)
+        }
+        .onChange(of: selectedTreePath) { _, newValue in
+            loadSelectedNote(path: newValue)
         }
     }
 
@@ -204,6 +234,8 @@ private struct ObsRootSplitView: View {
                         "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
                     openedVaultRoot = root
                     fileTreeViewModel.bindVault(vaultRoot: root, dbPath: db)
+                    selectedNote = nil
+                    noteError = nil
                     isLoadingStats = false
                 }
             } catch {
@@ -231,5 +263,41 @@ private struct ObsRootSplitView: View {
         vaultRoot = url.path
         dbPath = url.appendingPathComponent(".obs.sqlite").path
         loadVaultStats()
+    }
+
+    private func loadSelectedNote(path: String?) {
+        guard let path, path.hasSuffix(".md") else {
+            selectedNote = nil
+            noteError = nil
+            return
+        }
+
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            noteError = "open a vault before reading notes"
+            return
+        }
+
+        isLoadingNote = true
+        noteError = nil
+
+        Task {
+            do {
+                let note = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().noteGet(vaultRoot: root, dbPath: db, path: path)
+                }.value
+                await MainActor.run {
+                    selectedNote = note
+                    isLoadingNote = false
+                }
+            } catch {
+                await MainActor.run {
+                    selectedNote = nil
+                    noteError = "note read failed: \(error)"
+                    isLoadingNote = false
+                }
+            }
+        }
     }
 }

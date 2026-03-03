@@ -862,3 +862,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [lazy-loaded file tree view model added with paged `notesList` ingestion, hierarchical path-to-tree conversion, load-more cursor behavior, and selection wiring in Notes pane; app now navigates large note sets incrementally]
 - residual_risk: current tree hydration requests fixed-size pages and rebuilds the tree in-memory each append, so future perf passes may switch to incremental node insertion for very large vaults
+
+- timestamp: 2026-03-03T18:22:08Z
+- session: session-2026-03-03-a
+- ticket: APP-005
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [note selection now triggers bridge `noteGet` reads with async loading/error handling, and inspector pane renders selected note markdown/title content directly from Rust-backed payloads]
+- residual_risk: markdown rendering currently uses native `Text(.init(...))` without advanced syntax theming or embedded resource handling, so rich renderer parity remains a future UI enhancement
