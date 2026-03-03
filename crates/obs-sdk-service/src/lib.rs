@@ -1042,6 +1042,182 @@ pub enum PropertyUpdateError {
     },
 }
 
+/// Sorting strategies supported by property query APIs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyQuerySort {
+    /// Sort by file path ascending.
+    FilePathAsc,
+    /// Sort by file path descending.
+    FilePathDesc,
+    /// Sort by update timestamp ascending.
+    UpdatedAtAsc,
+    /// Sort by update timestamp descending.
+    UpdatedAtDesc,
+    /// Sort by raw JSON value ascending.
+    ValueAsc,
+    /// Sort by raw JSON value descending.
+    ValueDesc,
+}
+
+/// Request payload for property query APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyQueryRequest {
+    /// Property key to query across files.
+    pub key: String,
+    /// Optional substring filter applied to JSON value payload.
+    pub value_contains: Option<String>,
+    /// Optional max rows to return.
+    pub limit: Option<usize>,
+    /// Row offset for pagination.
+    pub offset: usize,
+    /// Sort strategy.
+    pub sort: PropertyQuerySort,
+}
+
+/// Property query row returned by query APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyQueryRow {
+    /// Stable property id.
+    pub property_id: String,
+    /// Owning file id.
+    pub file_id: String,
+    /// Owning file normalized path.
+    pub file_path: String,
+    /// Property key.
+    pub key: String,
+    /// Property value type.
+    pub value_type: String,
+    /// Property value payload JSON.
+    pub value_json: String,
+    /// Updated timestamp.
+    pub updated_at: String,
+}
+
+/// Property query result page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyQueryResult {
+    /// Total rows matching filters before pagination.
+    pub total: u64,
+    /// Page rows after sort/pagination.
+    pub rows: Vec<PropertyQueryRow>,
+}
+
+/// Query service for filtering and sorting property rows across files.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PropertyQueryService;
+
+impl PropertyQueryService {
+    /// Query property rows by key with filter/sort/pagination controls.
+    pub fn query(
+        &self,
+        connection: &Connection,
+        request: &PropertyQueryRequest,
+    ) -> Result<PropertyQueryResult, PropertyQueryError> {
+        let key = request.key.trim();
+        if key.is_empty() {
+            return Err(PropertyQueryError::InvalidKey);
+        }
+        if matches!(request.limit, Some(0)) {
+            return Err(PropertyQueryError::InvalidLimit { limit: 0 });
+        }
+
+        let mut rows = PropertiesRepository::list_by_key_with_paths(connection, key)
+            .map_err(|source| PropertyQueryError::Repository { source })?;
+
+        if let Some(filter) = request
+            .value_contains
+            .as_deref()
+            .map(str::trim)
+            .filter(|filter| !filter.is_empty())
+        {
+            let filter = filter.to_lowercase();
+            rows.retain(|row| row.value_json.to_lowercase().contains(&filter));
+        }
+
+        rows.sort_by(|left, right| compare_property_rows(left, right, request.sort));
+
+        let total = rows.len() as u64;
+        let iter = rows.into_iter().skip(request.offset);
+        let paged_rows = match request.limit {
+            Some(limit) => iter.take(limit).collect::<Vec<_>>(),
+            None => iter.collect::<Vec<_>>(),
+        };
+
+        let rows = paged_rows
+            .into_iter()
+            .map(|row| PropertyQueryRow {
+                property_id: row.property_id,
+                file_id: row.file_id,
+                file_path: row.file_path,
+                key: row.key,
+                value_type: row.value_type,
+                value_json: row.value_json,
+                updated_at: row.updated_at,
+            })
+            .collect();
+
+        Ok(PropertyQueryResult { total, rows })
+    }
+}
+
+fn compare_property_rows(
+    left: &obs_sdk_storage::PropertyWithPath,
+    right: &obs_sdk_storage::PropertyWithPath,
+    sort: PropertyQuerySort,
+) -> std::cmp::Ordering {
+    match sort {
+        PropertyQuerySort::FilePathAsc => left
+            .file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+        PropertyQuerySort::FilePathDesc => right
+            .file_path
+            .cmp(&left.file_path)
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+        PropertyQuerySort::UpdatedAtAsc => left
+            .updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+        PropertyQuerySort::UpdatedAtDesc => right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+        PropertyQuerySort::ValueAsc => left
+            .value_json
+            .cmp(&right.value_json)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+        PropertyQuerySort::ValueDesc => right
+            .value_json
+            .cmp(&left.value_json)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.property_id.cmp(&right.property_id)),
+    }
+}
+
+/// Property query failures.
+#[derive(Debug, Error)]
+pub enum PropertyQueryError {
+    /// Query key was empty.
+    #[error("property query key must not be empty")]
+    InvalidKey,
+    /// Query limit was invalid.
+    #[error("property query limit must be greater than zero")]
+    InvalidLimit {
+        /// Invalid limit value.
+        limit: usize,
+    },
+    /// Properties repository query failed.
+    #[error("property query repository operation failed: {source}")]
+    Repository {
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::PropertiesRepositoryError,
+    },
+}
+
 /// Reconcile run result over files metadata and on-disk vault contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileResult {
@@ -1550,15 +1726,16 @@ mod tests {
     use obs_sdk_properties::TypedPropertyValue;
     use obs_sdk_storage::{
         FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
-        run_migrations,
+        PropertyRecordInput, run_migrations,
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
 
     use super::{
         BacklinkGraphService, CasePolicy, HealthSnapshotService, MarkdownIngestPipeline,
-        NoteCrudError, NoteCrudService, PropertyUpdateService, ReconcileService,
-        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
+        NoteCrudError, NoteCrudService, PropertyQueryRequest, PropertyQueryService,
+        PropertyQuerySort, PropertyUpdateService, ReconcileService, SdkTransactionCoordinator,
+        ServiceTraceContext, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -2313,5 +2490,204 @@ mod tests {
 
         assert_eq!(result.key, "status");
         assert_eq!(trace_context.correlation_id(), "cid-property-1");
+    }
+
+    #[test]
+    fn property_query_service_filters_sorts_and_paginates_rows() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record("f1", "notes/a.md", "notes/a.md", "/vault/notes/a.md"),
+        )
+        .expect("insert f1");
+        FilesRepository::insert(
+            &connection,
+            &file_record("f2", "notes/b.md", "notes/b.md", "/vault/notes/b.md"),
+        )
+        .expect("insert f2");
+        FilesRepository::insert(
+            &connection,
+            &file_record("f3", "notes/c.md", "notes/c.md", "/vault/notes/c.md"),
+        )
+        .expect("insert f3");
+
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p1".to_string(),
+                file_id: "f1".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"draft\"".to_string(),
+            },
+        )
+        .expect("insert p1");
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p2".to_string(),
+                file_id: "f2".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"published\"".to_string(),
+            },
+        )
+        .expect("insert p2");
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p3".to_string(),
+                file_id: "f3".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"public\"".to_string(),
+            },
+        )
+        .expect("insert p3");
+
+        let service = PropertyQueryService;
+        let first_page = service
+            .query(
+                &connection,
+                &PropertyQueryRequest {
+                    key: " status ".to_string(),
+                    value_contains: Some("PUB".to_string()),
+                    limit: Some(1),
+                    offset: 0,
+                    sort: PropertyQuerySort::FilePathDesc,
+                },
+            )
+            .expect("query first page");
+        assert_eq!(first_page.total, 2);
+        assert_eq!(first_page.rows.len(), 1);
+        assert_eq!(first_page.rows[0].file_path, "notes/c.md");
+        assert_eq!(first_page.rows[0].property_id, "p3");
+
+        let second_page = service
+            .query(
+                &connection,
+                &PropertyQueryRequest {
+                    key: "status".to_string(),
+                    value_contains: Some("pub".to_string()),
+                    limit: Some(1),
+                    offset: 1,
+                    sort: PropertyQuerySort::FilePathDesc,
+                },
+            )
+            .expect("query second page");
+        assert_eq!(second_page.total, 2);
+        assert_eq!(second_page.rows.len(), 1);
+        assert_eq!(second_page.rows[0].file_path, "notes/b.md");
+        assert_eq!(second_page.rows[0].property_id, "p2");
+    }
+
+    #[test]
+    fn property_query_service_supports_updated_at_sorting() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record("f1", "notes/a.md", "notes/a.md", "/vault/notes/a.md"),
+        )
+        .expect("insert f1");
+        FilesRepository::insert(
+            &connection,
+            &file_record("f2", "notes/b.md", "notes/b.md", "/vault/notes/b.md"),
+        )
+        .expect("insert f2");
+
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p1".to_string(),
+                file_id: "f1".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"draft\"".to_string(),
+            },
+        )
+        .expect("insert p1");
+        PropertiesRepository::upsert(
+            &connection,
+            &PropertyRecordInput {
+                property_id: "p2".to_string(),
+                file_id: "f2".to_string(),
+                key: "status".to_string(),
+                value_type: "string".to_string(),
+                value_json: "\"published\"".to_string(),
+            },
+        )
+        .expect("insert p2");
+
+        connection
+            .execute(
+                "UPDATE properties SET updated_at = ?1 WHERE property_id = ?2",
+                rusqlite::params!["2026-03-03T12:00:00.000Z", "p1"],
+            )
+            .expect("set p1 timestamp");
+        connection
+            .execute(
+                "UPDATE properties SET updated_at = ?1 WHERE property_id = ?2",
+                rusqlite::params!["2026-03-03T12:00:01.000Z", "p2"],
+            )
+            .expect("set p2 timestamp");
+
+        let rows = PropertyQueryService
+            .query(
+                &connection,
+                &PropertyQueryRequest {
+                    key: "status".to_string(),
+                    value_contains: None,
+                    limit: None,
+                    offset: 0,
+                    sort: PropertyQuerySort::UpdatedAtDesc,
+                },
+            )
+            .expect("query by updated_at desc")
+            .rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].property_id, "p2");
+        assert_eq!(rows[1].property_id, "p1");
+    }
+
+    #[test]
+    fn property_query_service_rejects_invalid_requests() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = PropertyQueryService;
+        let missing_key = service
+            .query(
+                &connection,
+                &PropertyQueryRequest {
+                    key: "   ".to_string(),
+                    value_contains: None,
+                    limit: None,
+                    offset: 0,
+                    sort: PropertyQuerySort::FilePathAsc,
+                },
+            )
+            .expect_err("empty key should fail");
+        assert!(matches!(missing_key, super::PropertyQueryError::InvalidKey));
+
+        let zero_limit = service
+            .query(
+                &connection,
+                &PropertyQueryRequest {
+                    key: "status".to_string(),
+                    value_contains: None,
+                    limit: Some(0),
+                    offset: 0,
+                    sort: PropertyQuerySort::FilePathAsc,
+                },
+            )
+            .expect_err("zero limit should fail");
+        assert!(matches!(
+            zero_limit,
+            super::PropertyQueryError::InvalidLimit { limit: 0 }
+        ));
     }
 }

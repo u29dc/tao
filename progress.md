@@ -652,3 +652,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [markdown parsing now tolerates unclosed front matter fences by treating content as body, and indexing tests verify malformed front matter does not crash indexing or link resolution]
 - residual_risk: tolerance currently prefers resilience over strict diagnostics, so malformed fence detection is not surfaced as an explicit runtime warning yet
+
+- timestamp: 2026-03-03T17:20:55Z
+- session: session-2026-03-03-a
+- ticket: PROP-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [property query service now exposes key-based filter/sort/pagination with deterministic ordering and request validation; service tests cover filtering, paging, updated_at sorting, and invalid request handling]
+- residual_risk: value filtering currently operates on serialized JSON payload text, so future bases query planner may add type-aware predicate operators for stronger semantics
