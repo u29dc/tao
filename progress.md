@@ -990,5 +990,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
   - commands: [cargo run -p obs-cli -- --json links outgoing/backlinks ..., cargo run -p obs-cli -- --json properties set/get ..., bun run util:check]
-  - outcomes: [implemented `links.outgoing`/`links.backlinks` wrappers using bridge link panels with stable item payloads; implemented `properties.get` using indexed property rows and `properties.set` using typed property update service with CLI value parsing for primitives/json arrays]
+- outcomes: [implemented `links.outgoing`/`links.backlinks` wrappers using bridge link panels with stable item payloads; implemented `properties.get` using indexed property rows and `properties.set` using typed property update service with CLI value parsing for primitives/json arrays]
 - residual_risk: property set currently stringifies JSON object payloads because SDK typed property model supports scalar/list/null only, so nested object edits require future schema support
+
+- timestamp: 2026-03-03T19:15:25Z
+- session: session-2026-03-03-a
+- ticket: CLI-006
+- action: done
+- evidence:
+  - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-cli -- --json bases list/view ..., cargo run -p obs-cli -- --json search query ..., bun run util:check]
+  - outcomes: [implemented `bases.list` and `bases.view` wrappers over indexed base rows with fallback decoding for current `{raw: ...}` base storage payloads, plus deterministic search windowing over indexed markdown file paths/titles with limit/offset in stable JSON envelopes]
+- residual_risk: current search wrapper is metadata/path-title based rather than full-text ranking, and bases table output currently includes `.base` rows when view filters do not exclude non-markdown sources

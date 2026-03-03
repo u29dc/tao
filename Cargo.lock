@@ -360,6 +360,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "obs-sdk-bases",
  "obs-sdk-bridge",
  "obs-sdk-properties",
  "obs-sdk-service",

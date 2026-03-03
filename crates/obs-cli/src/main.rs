@@ -3,12 +3,17 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use obs_sdk_bases::{
+    BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest,
+    parse_base_document,
+};
 use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use obs_sdk_properties::TypedPropertyValue;
 use obs_sdk_service::{
-    FullIndexService, HealthSnapshotService, PropertyUpdateService, ReconcileService, WatcherStatus,
+    BaseTableExecutorService, FullIndexService, HealthSnapshotService, PropertyUpdateService,
+    ReconcileService, WatcherStatus,
 };
-use obs_sdk_storage::{FilesRepository, PropertiesRepository, run_migrations};
+use obs_sdk_storage::{BasesRepository, FilesRepository, PropertiesRepository, run_migrations};
 use obs_sdk_vault::CasePolicy;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -582,10 +587,88 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
 fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
     match command {
         BasesCommands::List(args) => {
-            placeholder_result("bases.list", "bases list is not implemented yet", args)
+            let connection = open_initialized_connection(&args)?;
+            let bases = BasesRepository::list_with_paths(&connection)
+                .map_err(|source| anyhow!("query bases failed: {source}"))?;
+            let items = bases
+                .into_iter()
+                .map(|base| -> Result<JsonValue> {
+                    let document = decode_base_document(&base.config_json)?;
+                    Ok(serde_json::json!({
+                        "base_id": base.base_id,
+                        "file_path": base.file_path,
+                        "views": document
+                            .views
+                            .into_iter()
+                            .map(|view| view.name)
+                            .collect::<Vec<_>>(),
+                        "updated_at": base.updated_at,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(CommandResult {
+                command: "bases.list".to_string(),
+                summary: "bases list completed".to_string(),
+                args: serde_json::json!({
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
         }
         BasesCommands::View(args) => {
-            placeholder_result("bases.view", "bases view is not implemented yet", args)
+            let vault_args = VaultPathArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+            };
+            let connection = open_initialized_connection(&vault_args)?;
+            let base = BasesRepository::list_with_paths(&connection)
+                .map_err(|source| anyhow!("query bases failed: {source}"))?
+                .into_iter()
+                .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
+                .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
+            let document = decode_base_document(&base.config_json)?;
+            let registry = BaseViewRegistry::from_document(&document)
+                .map_err(|source| anyhow!("decode base view registry failed: {source}"))?;
+            let plan = BaseTableQueryPlanner
+                .compile(
+                    &registry,
+                    &TableQueryPlanRequest {
+                        view_name: args.view_name.clone(),
+                        page: args.page,
+                        page_size: args.page_size,
+                    },
+                )
+                .map_err(|source| anyhow!("compile base table query plan failed: {source}"))?;
+            let page = BaseTableExecutorService
+                .execute(&connection, &plan)
+                .map_err(|source| anyhow!("execute base table query failed: {source}"))?;
+            let has_more = (args.page as usize * args.page_size as usize) < page.total as usize;
+            let rows = page
+                .rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "file_id": row.file_id,
+                        "file_path": row.file_path,
+                        "values": row.values,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "bases.view".to_string(),
+                summary: "bases view completed".to_string(),
+                args: serde_json::json!({
+                    "base_id": base.base_id,
+                    "file_path": base.file_path,
+                    "view_name": plan.view_name,
+                    "page": args.page,
+                    "page_size": args.page_size,
+                    "total": page.total,
+                    "has_more": has_more,
+                    "columns": plan.columns,
+                    "rows": rows,
+                }),
+            })
         }
     }
 }
@@ -593,21 +676,62 @@ fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
 fn handle_search(command: SearchCommands) -> Result<CommandResult> {
     match command {
         SearchCommands::Query(args) => {
-            placeholder_result("search.query", "search query is not implemented yet", args)
+            let query = args.query.trim();
+            if query.is_empty() {
+                return Err(anyhow!("search query must not be empty"));
+            }
+
+            let vault_args = VaultPathArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+            };
+            let connection = open_initialized_connection(&vault_args)?;
+
+            let query_lc = query.to_ascii_lowercase();
+            let matches = FilesRepository::list_all(&connection)
+                .map_err(|source| anyhow!("query indexed files for search failed: {source}"))?
+                .into_iter()
+                .filter(|file| file.is_markdown)
+                .filter(|file| {
+                    let path_lc = file.normalized_path.to_ascii_lowercase();
+                    if path_lc.contains(&query_lc) {
+                        return true;
+                    }
+                    search_title_from_path(&file.normalized_path)
+                        .to_ascii_lowercase()
+                        .contains(&query_lc)
+                })
+                .map(|file| {
+                    serde_json::json!({
+                        "file_id": file.file_id,
+                        "path": file.normalized_path,
+                        "title": search_title_from_path(&file.normalized_path),
+                        "indexed_at": file.indexed_at,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let total = matches.len();
+            let offset = args.offset as usize;
+            let limit = args.limit as usize;
+            let items = matches
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "search.query".to_string(),
+                summary: "search query completed".to_string(),
+                args: serde_json::json!({
+                    "query": query,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "total": total,
+                    "items": items,
+                }),
+            })
         }
     }
-}
-
-fn placeholder_result<A: Serialize>(
-    command: &str,
-    summary: &str,
-    args: A,
-) -> Result<CommandResult> {
-    Ok(CommandResult {
-        command: command.to_string(),
-        summary: summary.to_string(),
-        args: serde_json::to_value(args)?,
-    })
 }
 
 fn open_bridge_kernel(vault_root: &str, db_path: &str) -> Result<BridgeKernel> {
@@ -691,6 +815,29 @@ fn typed_property_value_to_json(value: &TypedPropertyValue) -> JsonValue {
         }
         TypedPropertyValue::Null => JsonValue::Null,
     }
+}
+
+fn search_title_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn decode_base_document(config_json: &str) -> Result<BaseDocument> {
+    if let Ok(document) = serde_json::from_str::<BaseDocument>(config_json) {
+        return Ok(document);
+    }
+
+    let raw_value = serde_json::from_str::<JsonValue>(config_json)
+        .map_err(|source| anyhow!("parse base config json failed: {source}"))?;
+    let Some(raw_yaml) = raw_value.get("raw").and_then(JsonValue::as_str) else {
+        return Err(anyhow!(
+            "base config json is not a supported document payload"
+        ));
+    };
+    parse_base_document(raw_yaml).map_err(|source| anyhow!("parse base yaml failed: {source}"))
 }
 
 fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {

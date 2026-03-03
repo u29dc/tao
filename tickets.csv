@@ -96,7 +96,7 @@
 "CLI-003","Add vault command group wrappers","cli","phase4","CLI-001|SDK-010","done","P2","codex","3","0","","open/stats/reindex/reconcile commands work"
 "CLI-004","Add note command group wrappers","cli","phase4","CLI-001|SDK-009","done","P2","codex","3","0","","read/write commands map to sdk calls"
 "CLI-005","Add links and properties wrappers","cli","phase4","CLI-001|LINK-006|PROP-006","done","P2","codex","3","0","","link/property commands operate on vault"
-"CLI-006","Add bases/search wrappers","cli","phase4","CLI-001|BASE-008","todo","P2","unassigned","3","0","","bases view and search command outputs stable JSON"
+"CLI-006","Add bases/search wrappers","cli","phase4","CLI-001|BASE-008","done","P2","codex","3","0","","bases view and search command outputs stable JSON"
 "TUI-001","Scaffold TUI crate","tui","phase6","INFRA-001","todo","P3","unassigned","3","0","","terminal app starts with placeholder route"
 "TUI-002","Implement route shell and keymap","tui","phase6","TUI-001","todo","P3","unassigned","3","0","","route switching and command palette work"
 "TUI-003","Implement note list and viewer route","tui","phase6","TUI-002|SDK-010","todo","P3","unassigned","3","0","","view notes and note content"
