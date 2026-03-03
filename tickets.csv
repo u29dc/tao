@@ -2,7 +2,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "DOC-001","Create architecture ADR index","doc","phase0","","done","P0","codex","3","0","","`docs/adr/README.md` with numbering and template"
 "DOC-002","Write product scope contract v1","doc","phase0","DOC-001","done","P0","codex","3","0","","Scope doc lists in/out items and acceptance criteria"
 "DOC-003","Write Obsidian compatibility matrix","doc","phase0","DOC-001","done","P0","codex","3","0","","Matrix covers links, properties, bases, markdown subset"
-"DOC-004","Write SDK API surface spec","doc","phase0","DOC-001","todo","P0","unassigned","3","0","","Typed interface doc for all read/write/system APIs"
+"DOC-004","Write SDK API surface spec","doc","phase0","DOC-001","done","P0","codex","3","0","","Typed interface doc for all read/write/system APIs"
 "DOC-005","Write error code catalog","doc","phase0","DOC-004","todo","P0","unassigned","3","0","","Stable error code table with remediation hints"
 "DOC-006","Write performance budget contract","doc","phase0","DOC-001","todo","P0","unassigned","3","0","","Budget doc checked into repo and referenced by CI"
 "ARC-001","Define workspace crate boundaries","arc","phase0","DOC-002","todo","P0","unassigned","3","0","","`Cargo.toml` workspace members and crate docs committed"

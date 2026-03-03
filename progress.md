@@ -43,3 +43,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [feature-by-feature compatibility targets documented]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:16:00Z
+- session: session-2026-03-03-a
+- ticket: DOC-004
+- action: done
+- evidence:
+  - files: [docs/specs/sdk-api-surface.md, tickets.csv, run-state.json]
+  - commands: [write sdk api surface spec]
+  - outcomes: [typed service contracts and dto versioning policy defined]
+- residual_risk: none
+
