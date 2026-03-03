@@ -183,3 +183,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [swift build/test ci scaffold added and validated locally]
 - residual_risk: full xcodeproj app shell still pending APP-001
 
+- timestamp: 2026-03-03T15:55:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-005
+- action: attempt
+- evidence:
+  - files: [apps/obs-macos/.build/*]
+  - commands: [git rm -r --cached apps/obs-macos/.build]
+  - outcomes: [remove generated swift artifacts accidentally committed in prior commit]
+- residual_risk: none
+

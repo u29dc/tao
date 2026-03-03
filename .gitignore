@@ -4,3 +4,5 @@ target/
 dist/
 build/
 .tmp/
+apps/obs-macos/.build/
+apps/obs-macos/.swiftpm/
