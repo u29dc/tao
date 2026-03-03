@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="ObsMacOSApp"
-PACKAGE_DIR="apps/obs-macos"
+APP_NAME="TaoMacOSApp"
+PACKAGE_DIR="apps/tao-macos"
 DIST_DIR="dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}-macos-signed.zip"
@@ -23,15 +23,15 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>ObsMacOSApp</string>
+  <string>TaoMacOSApp</string>
   <key>CFBundleIdentifier</key>
-  <string>com.u29dc.obs.macos</string>
+  <string>com.u29dc.tao.macos</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundleShortVersionString</key>
   <string>0.1.0</string>
   <key>CFBundleExecutable</key>
-  <string>ObsMacOSApp</string>
+  <string>TaoMacOSApp</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

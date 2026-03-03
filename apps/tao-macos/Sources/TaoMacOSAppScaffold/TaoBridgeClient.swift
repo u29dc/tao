@@ -116,7 +116,7 @@ public struct BridgeBaseTablePage: Decodable {
     public let rows: [BridgeBaseTableRow]
 }
 
-public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
+public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case initFailed(BridgeErrorDTO)
     case vaultStatsFailed(BridgeErrorDTO)
     case noteGetInvalidPath(BridgeErrorDTO)
@@ -315,12 +315,12 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-public enum ObsBridgeClientError: Error, CustomStringConvertible {
+public enum TaoBridgeClientError: Error, CustomStringConvertible {
     case launchFailed(String)
     case processFailed(Int32, String)
     case decodeFailed(String)
     case incompatibleSchema(expectedMajor: Int, actual: String)
-    case bridgeError(ObsBridgeTypedError)
+    case bridgeError(TaoBridgeTypedError)
     case missingValue
 
     public var description: String {
@@ -341,7 +341,7 @@ public enum ObsBridgeClientError: Error, CustomStringConvertible {
     }
 }
 
-public struct ObsBridgeClient {
+public struct TaoBridgeClient {
     private static let supportedSchemaMajor = 1
     private let bridgeCommand: [String]
     private let repositoryRoot: URL
@@ -505,11 +505,11 @@ public struct ObsBridgeClient {
         do {
             envelope = try decoder.decode(BridgeEnvelope<Value>.self, from: payload)
         } catch {
-            throw ObsBridgeClientError.decodeFailed(error.localizedDescription)
+            throw TaoBridgeClientError.decodeFailed(error.localizedDescription)
         }
 
         guard Self.isCompatibleSchemaVersion(envelope.schemaVersion) else {
-            throw ObsBridgeClientError.incompatibleSchema(
+            throw TaoBridgeClientError.incompatibleSchema(
                 expectedMajor: Self.supportedSchemaMajor,
                 actual: envelope.schemaVersion
             )
@@ -517,15 +517,15 @@ public struct ObsBridgeClient {
 
         if envelope.ok {
             guard let value = envelope.value else {
-                throw ObsBridgeClientError.missingValue
+                throw TaoBridgeClientError.missingValue
             }
             return value
         }
 
         if let error = envelope.error {
-            throw ObsBridgeClientError.bridgeError(.fromBridgeDTO(error))
+            throw TaoBridgeClientError.bridgeError(.fromBridgeDTO(error))
         }
-        throw ObsBridgeClientError.missingValue
+        throw TaoBridgeClientError.missingValue
     }
 
     private func runProcess(arguments: [String]) throws -> Data {
@@ -542,7 +542,7 @@ public struct ObsBridgeClient {
         do {
             try process.run()
         } catch {
-            throw ObsBridgeClientError.launchFailed(error.localizedDescription)
+            throw TaoBridgeClientError.launchFailed(error.localizedDescription)
         }
 
         process.waitUntilExit()
@@ -551,7 +551,7 @@ public struct ObsBridgeClient {
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
 
         guard process.terminationStatus == 0 else {
-            throw ObsBridgeClientError.processFailed(process.terminationStatus, stderr)
+            throw TaoBridgeClientError.processFailed(process.terminationStatus, stderr)
         }
         return stdout
     }

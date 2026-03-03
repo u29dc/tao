@@ -6,39 +6,39 @@ Define module boundaries so Swift remains a native UI adapter over Rust SDK.
 
 ## Proposed Swift Targets
 
-- `ObsApp`: app lifecycle, window scene, startup routing.
-- `ObsFeatureNavigation`: vault picker, file tree/list, command palette.
-- `ObsFeatureNote`: note reading/editing screen orchestration.
-- `ObsFeatureProperties`: properties panel and editing controls.
-- `ObsFeatureBases`: bases table view and interactions.
-- `ObsBridgeClient`: Swift-facing wrapper over Rust bridge bindings.
-- `ObsDesignSystem`: typography, spacing, color tokens, motion policy.
-- `ObsTestingSupport`: fixture loading and test doubles for UI tests.
+- `TaoApp`: app lifecycle, window scene, startup routing.
+- `TaoFeatureNavigation`: vault picker, file tree/list, command palette.
+- `TaoFeatureNote`: note reading/editing screen orchestration.
+- `TaoFeatureProperties`: properties panel and editing controls.
+- `TaoFeatureBases`: bases table view and interactions.
+- `TaoBridgeClient`: Swift-facing wrapper over Rust bridge bindings.
+- `TaoDesignSystem`: typography, spacing, color tokens, motion policy.
+- `TaoTestingSupport`: fixture loading and test doubles for UI tests.
 
 ## Dependency Rules
 
-- Feature modules depend on `ObsBridgeClient` interfaces, not raw FFI types.
-- `ObsBridgeClient` depends on generated bindings and DTO mappers.
-- `ObsDesignSystem` has no dependency on feature modules.
+- Feature modules depend on `TaoBridgeClient` interfaces, not raw FFI types.
+- `TaoBridgeClient` depends on generated bindings and DTO mappers.
+- `TaoDesignSystem` has no dependency on feature modules.
 - No module may perform vault parsing, link resolution, or DB access directly.
 
 ## Folder Layout (initial)
 
 ```text
-apps/obs-macos/
+apps/tao-macos/
   README.md
-  ObsApp/
-  ObsFeatureNavigation/
-  ObsFeatureNote/
-  ObsFeatureProperties/
-  ObsFeatureBases/
-  ObsBridgeClient/
-  ObsDesignSystem/
-  ObsTestingSupport/
+  TaoApp/
+  TaoFeatureNavigation/
+  TaoFeatureNote/
+  TaoFeatureProperties/
+  TaoFeatureBases/
+  TaoBridgeClient/
+  TaoDesignSystem/
+  TaoTestingSupport/
 ```
 
 ## Build Contract
 
 - Swift build must succeed headless in CI.
-- Bridge API mismatches fail compile in `ObsBridgeClient`.
+- Bridge API mismatches fail compile in `TaoBridgeClient`.
 - UI smoke tests must launch app and open sample vault.

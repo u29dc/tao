@@ -7,7 +7,7 @@ This policy defines versioning and compatibility for:
 - Rust SDK crates (`crates/tao-sdk-*`)
 - CLI binary (`obs`)
 - Bridge binary and DTO contract (`tao-sdk-bridge`)
-- macOS app scaffold (`apps/obs-macos`)
+- macOS app scaffold (`apps/tao-macos`)
 
 ## SemVer Rules
 

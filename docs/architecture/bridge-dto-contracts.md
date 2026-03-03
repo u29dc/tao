@@ -84,7 +84,7 @@ BridgeLinkRef {
 ## Backward Compatibility Rules
 
 - Rust bridge crate exposes adapters for prior minor DTO versions for one release window.
-- Swift `ObsBridgeClient` must map unknown enum values to `unknown` case.
+- Swift `TaoBridgeClient` must map unknown enum values to `unknown` case.
 - Unknown fields must be ignored, not rejected.
 
 ## Validation

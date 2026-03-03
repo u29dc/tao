@@ -1,5 +1,5 @@
 import Foundation
-import ObsMacOSAppScaffold
+import TaoMacOSAppScaffold
 
 struct FileTreeNode: Identifiable, Hashable {
     let id: String
@@ -61,7 +61,7 @@ final class FileTreeViewModel: ObservableObject {
         Task {
             do {
                 let page = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().notesList(
+                    try TaoBridgeClient().notesList(
                         vaultRoot: requestVaultRoot,
                         dbPath: requestDbPath,
                         afterPath: requestCursor,

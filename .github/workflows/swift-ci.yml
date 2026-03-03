@@ -20,8 +20,8 @@ jobs:
 
       - name: swift build
         run: swift build
-        working-directory: apps/obs-macos
+        working-directory: apps/tao-macos
 
       - name: swift test
         run: swift test
-        working-directory: apps/obs-macos
+        working-directory: apps/tao-macos

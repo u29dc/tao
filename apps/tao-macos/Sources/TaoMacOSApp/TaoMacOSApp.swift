@@ -1,14 +1,14 @@
 import SwiftUI
 import AppKit
-import ObsMacOSAppScaffold
+import TaoMacOSAppScaffold
 
 @main
-struct ObsMacOSApp: App {
+struct TaoMacOSApp: App {
     @State private var quickOpenCommandNonce = 0
 
     var body: some Scene {
         WindowGroup {
-            ObsRootSplitView(quickOpenCommandNonce: $quickOpenCommandNonce)
+            TaoRootSplitView(quickOpenCommandNonce: $quickOpenCommandNonce)
                 .frame(minWidth: 1120, minHeight: 720)
         }
         .commands {
@@ -72,7 +72,7 @@ private enum StartupPersistenceKeys {
     static let notePath = "obs.startup.note_path"
 }
 
-private struct ObsRootSplitView: View {
+private struct TaoRootSplitView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var quickOpenCommandNonce: Int
     @State private var selectedSidebarItem: SidebarItem? = .notes
@@ -187,7 +187,7 @@ private struct ObsRootSplitView: View {
                         .foregroundStyle(.red)
                 }
                 Divider()
-                Text("Bridge Module: \(ObsMacOSAppScaffold.moduleName())")
+                Text("Bridge Module: \(TaoMacOSAppScaffold.moduleName())")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -761,7 +761,7 @@ private struct ObsRootSplitView: View {
         operation: String,
         recoveryAction: AppRecoveryAction?
     ) {
-        if let clientError = error as? ObsBridgeClientError {
+        if let clientError = error as? TaoBridgeClientError {
             switch clientError {
             case .bridgeError(let typedError):
                 appErrorState = AppErrorState(
@@ -809,7 +809,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 let stats = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().vaultStats(vaultRoot: root, dbPath: db)
+                    try TaoBridgeClient().vaultStats(vaultRoot: root, dbPath: db)
                 }.value
 
                 await MainActor.run {
@@ -906,7 +906,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 let context = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().noteContext(vaultRoot: root, dbPath: db, path: path)
+                    try TaoBridgeClient().noteContext(vaultRoot: root, dbPath: db, path: path)
                 }.value
                 await MainActor.run {
                     selectedNote = context.note
@@ -982,7 +982,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 _ = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().notePut(
+                    try TaoBridgeClient().notePut(
                         vaultRoot: root,
                         dbPath: db,
                         path: selectedNote.path,
@@ -1023,7 +1023,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 let panels = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().noteLinks(vaultRoot: root, dbPath: db, path: path)
+                    try TaoBridgeClient().noteLinks(vaultRoot: root, dbPath: db, path: path)
                 }.value
                 await MainActor.run {
                     linkPanels = panels
@@ -1059,7 +1059,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 let refs = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().basesList(vaultRoot: root, dbPath: db)
+                    try TaoBridgeClient().basesList(vaultRoot: root, dbPath: db)
                 }.value
                 await MainActor.run {
                     baseRefs = refs
@@ -1136,7 +1136,7 @@ private struct ObsRootSplitView: View {
         Task {
             do {
                 let page = try await Task.detached(priority: .userInitiated) {
-                    try ObsBridgeClient().basesView(
+                    try TaoBridgeClient().basesView(
                         vaultRoot: root,
                         dbPath: db,
                         pathOrId: requestBaseId,

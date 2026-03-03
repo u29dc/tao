@@ -88,7 +88,7 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-002
 - action: done
 - evidence:
-  - files: [docs/architecture/swift-app-boundaries.md, apps/obs-macos/README.md, tickets.csv, run-state.json]
+  - files: [docs/architecture/swift-app-boundaries.md, apps/tao-macos/README.md, tickets.csv, run-state.json]
   - commands: [write swift module boundaries and app scaffold readme]
   - outcomes: [swift adapter boundaries and target layout documented]
 - residual_risk: none
@@ -178,7 +178,7 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-005
 - action: done
 - evidence:
-  - files: [.github/workflows/swift-ci.yml, apps/obs-macos/Package.swift, apps/obs-macos/Sources/*, apps/obs-macos/Tests/*, tickets.csv, run-state.json]
+  - files: [.github/workflows/swift-ci.yml, apps/tao-macos/Package.swift, apps/tao-macos/Sources/*, apps/tao-macos/Tests/*, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [swift build/test ci scaffold added and validated locally]
 - residual_risk: full xcodeproj app shell still pending APP-001
@@ -188,8 +188,8 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-005
 - action: attempt
 - evidence:
-  - files: [apps/obs-macos/.build/*]
-  - commands: [git rm -r --cached apps/obs-macos/.build]
+  - files: [apps/tao-macos/.build/*]
+  - commands: [git rm -r --cached apps/tao-macos/.build]
   - outcomes: [remove generated swift artifacts accidentally committed in prior commit]
 - residual_risk: none
 
@@ -758,7 +758,7 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
   - outcomes: [Swift bridge client bindings added for `vault_stats` and `note_get`, backed by bridge shell command output and typed envelope decoding; Swift test confirms both read calls succeed end-to-end]
 - residual_risk: current Swift bridge binding path invokes the Rust bridge shell via subprocess, so direct in-process FFI transport and zero-copy optimization remain for later bridge hardening tickets
@@ -768,7 +768,7 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, Cargo.lock, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, Cargo.lock, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge write DTO and `note_put` API added with deterministic id generation and safe create-or-update semantics; bridge shell exposes `note-put`; Swift client and tests now verify write+read round-trip behavior through the bridge]
 - residual_risk: bridge write path currently rewrites full note content per call and relies on subprocess json transport, so partial-update and in-process ffi optimization remain for later tickets
@@ -778,7 +778,7 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge schema version upgraded to `v1.0` with explicit parser and major-version compatibility checks in Rust and Swift; Swift client now rejects incompatible major versions at envelope decode time; compatibility tests cover `v1`/minor acceptance and `v2` rejection]
 - residual_risk: compatibility policy currently validates major version only, so richer feature-negotiation for optional capabilities is deferred to later bridge evolution tickets
@@ -788,9 +788,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
-  - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `ObsBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
+  - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `TaoBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
 - residual_risk: typed mapping currently covers existing bridge codes and preserves unknown fallback, so new codes still require explicit app-level UX copy when surfaced in APP-010
 
 - timestamp: 2026-03-03T18:05:08Z
@@ -798,7 +798,7 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge now persists note-change events in a sqlite-backed `bridge_events` log and exposes `events-poll` cursor API through bridge shell; Swift client adds typed event polling API and tests confirm create/update writes are delivered and cursor-based polling drains incrementally]
 - residual_risk: current subscription transport is poll-based rather than push-streaming, so real-time event fanout and backpressure policies are deferred to future transport optimization tickets
@@ -808,7 +808,7 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift test, bun run util:check]
   - outcomes: [paged `notes-list` windowing API added with cursor+limit controls and deterministic path ordering; Rust bridge tests verify two-page traversal; Swift client now exposes `notesList` API and integration tests verify stable paging semantics over larger note sets]
 - residual_risk: note summary titles currently derive from path stem for list latency predictability, so richer title extraction from parsed markdown remains a future enhancement if UI requires higher fidelity in large lists
@@ -828,9 +828,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-001
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Package.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [macOS executable target `ObsMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
+  - outcomes: [macOS executable target `TaoMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
 - residual_risk: app shell currently contains placeholder pane content and no persisted state, so feature tickets APP-002 onward fill bridge integration and workflow behavior
 
 - timestamp: 2026-03-03T18:17:09Z
@@ -838,9 +838,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-002
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [app shell now directly invokes `ObsBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
+  - outcomes: [app shell now directly invokes `TaoBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
 - residual_risk: bridge read invocation currently depends on manual vault/sqlite path entry, so APP-003 introduces guided vault-open UX and persisted session context
 
 - timestamp: 2026-03-03T18:18:24Z
@@ -848,7 +848,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-003
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [native macOS vault picker flow added via `NSOpenPanel`; selecting a folder sets vault/database paths, triggers bridge stats load, and surfaces opened-vault root state in the UI header]
 - residual_risk: opened vault and database path state is currently in-memory only, so startup restoration for last session remains a dedicated follow-up in APP-012
@@ -858,7 +858,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-004
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [lazy-loaded file tree view model added with paged `notesList` ingestion, hierarchical path-to-tree conversion, load-more cursor behavior, and selection wiring in Notes pane; app now navigates large note sets incrementally]
 - residual_risk: current tree hydration requests fixed-size pages and rebuilds the tree in-memory each append, so future perf passes may switch to incremental node insertion for very large vaults
@@ -868,7 +868,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-005
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [note selection now triggers bridge `noteGet` reads with async loading/error handling, and inspector pane renders selected note markdown/title content directly from Rust-backed payloads]
 - residual_risk: markdown rendering currently uses native `Text(.init(...))` without advanced syntax theming or embedded resource handling, so rich renderer parity remains a future UI enhancement
@@ -878,7 +878,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-006
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [properties pane added to inspector with parsed frontmatter key/value display, editable raw frontmatter text area, and `Save Properties` flow that persists through bridge `notePut` then reloads the note]
 - residual_risk: property editing currently rewrites full frontmatter block text without schema/type guardrails, so richer typed property controls remain future UX hardening work
@@ -888,7 +888,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [bridge `note-links` endpoint added with outgoing/backlink DTOs and CLI command; Swift client now exposes typed `noteLinks` API; inspector renders outgoing and backlink panels for selected notes with loading/error states]
 - residual_risk: current bridge link panel payload omits display-text extraction and advanced fragment semantics, so richer link presentation can be layered without changing panel wiring
@@ -898,7 +898,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-008
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [added app-level Navigate command with `cmd+k` shortcut, quick-open sheet UI, query filtering over loaded note summaries, and direct note selection routing so command palette opens notes by search]
 - residual_risk: quick-open currently searches the loaded in-memory note summary window, so very large vaults still require additional pagination loads before all notes become discoverable
@@ -908,7 +908,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-009
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [cargo test -p tao-sdk-bridge, swift build, swift test, bun run util:check]
   - outcomes: [added bridge `bases-list`/`bases-view` endpoints with planner+executor wiring and typed errors; Swift bridge client now exposes base list/table APIs; app Bases pane now loads indexed bases, selects views, renders paged table rows, and supports previous/next pagination controls]
 - residual_risk: base row rendering currently flattens selected column values into one summary cell in the macOS table, so follow-up UI refinement can split into true per-column table cells once dynamic column composition is introduced
@@ -918,7 +918,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-010
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [app now surfaces typed bridge errors in a unified banner with error code/hint/context fields and operation-specific recovery buttons; recovery actions route to retry handlers for vault stats, note load/save, links, and bases table operations]
 - residual_risk: error actions currently retry the last in-memory operation context only, so future hardening can persist richer failure context for retries across app restart boundaries
@@ -928,7 +928,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-011
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [added global reduced-motion handling in the app view layer by disabling implicit animations when accessibility reduce-motion is enabled and gating key UI animation bindings behind the setting]
 - residual_risk: current app motion profile is still intentionally minimal, so additional feature-specific transitions introduced later must continue to honor the same reduce-motion guardrails
@@ -938,7 +938,7 @@ Append-only execution log for autonomous runs.
 - ticket: APP-012
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [added persisted startup state for vault/db/note paths, launch-time restoration with path safety checks, restoration-aware failure cleanup, and automatic state updates whenever vault or note selection changes]
 - residual_risk: restored note selection currently replays immediately after vault stats load without waiting for full tree hydration, so future UX polish can add explicit restored-state loading indicators
@@ -1118,8 +1118,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-007
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test --package-path apps/obs-macos, bun run util:check]
+  - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added explicit Swift smoke test `app_smoke_launch_open_navigate_edit_flow` that validates launch health, note open, list/navigation across notes, edit via bridge write, and readback correctness in one end-to-end scenario]
 - residual_risk: smoke coverage currently validates bridge-backed UI workflows and not visual-level AppKit rendering assertions, so future UI automation can add screenshot/state verification
 
@@ -1138,8 +1138,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, bench/reports/perf-006-bridge-call-batching.json, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-bridge, swift test --package-path apps/obs-macos, bun run util:check]
+  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, bench/reports/perf-006-bridge-call-batching.json, tickets.csv, run-state.json]
+  - commands: [cargo test -p tao-sdk-bridge, swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added batched bridge endpoint `note-context` (single call for note+links), switched note open flow to one boundary invocation, increased tree page size from 256 to 1024 to reduce list paging calls, and documented call-count reduction evidence for key app flows]
 - residual_risk: call-count report is deterministic path analysis and should be supplemented by runtime telemetry counters once app-level perf instrumentation ticket lands
 
@@ -1148,8 +1148,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-007
 - action: done
 - evidence:
-  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, crates/tao-bench/src/main.rs, bench/reports/perf-007-startup-1k.json, bench/reports/perf-007-startup-1k-time.txt, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/obs-macos, bun run util:check]
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, crates/tao-bench/src/main.rs, bench/reports/perf-007-startup-1k.json, bench/reports/perf-007-startup-1k-time.txt, tickets.csv, run-state.json]
+  - commands: [cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added dedicated startup benchmark scenario that measures bridge startup pipeline (`open -> vault_stats -> notes_list -> note_context`) and emits p50/p95/max report, optimized app startup tree hydration to skip eager note-list loading when restoring a selected note, and validated startup p95 at 12.797ms against 900ms hard budget target]
 - residual_risk: startup benchmark currently models bridge/service startup path rather than full macOS compositor/UI boot, so Instruments-based cold-launch traces remain a future improvement
 
@@ -1219,7 +1219,7 @@ Append-only execution log for autonomous runs.
 - action: done
 - evidence:
   - files: [docs/release/v1.0.0-rc.1.md, docs/release/release-runbook.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/obs-macos, cargo run -p tao-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
+  - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/tao-macos, cargo run -p tao-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
 - outcomes: [published v1.0.0-rc.1 acceptance report with dependency verification, command evidence, perf budget metrics, migration preflight envelope, and artifact checksums; corrected release runbook migration preflight package target from `obs` to `tao-cli`]
 - residual_risk: rc report confirms ad-hoc signing and does not include Developer ID notarization
 
@@ -1331,4 +1331,14 @@ Append-only execution log for autonomous runs.
   - files: [Cargo.toml, Cargo.lock, package.json, scripts/release-package-cli.sh, crates/tao-*/**, docs/architecture/workspace-boundaries.md, docs/release/versioning-policy.md]
   - commands: [rename crates/obs-* directories to crates/tao-*, replace crate/package identifiers, cargo check --workspace, cargo run -p tao-cli -- --help, cargo run -p tao-bench -- --help]
   - outcomes: [workspace crate names/imports/binaries migrated to tao namespace and validated by cargo metadata/check]
-- residual_risk: Swift app path/module identity remains in apps/obs-macos and is addressed by REN-004
+- residual_risk: Swift app path/module identity remains in apps/tao-macos and is addressed by REN-004
+
+- timestamp: 2026-03-04T00:26:00Z
+- session: session-2026-03-03-b
+- ticket: REN-004
+- action: done
+- evidence:
+  - files: [apps/tao-macos/**, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, scripts/package-macos-app.sh, docs/architecture/swift-app-boundaries.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [rename apps/obs-macos to apps/tao-macos, rename swift package/product/module symbols, swift package --package-path apps/tao-macos clean, swift test --package-path apps/tao-macos]
+  - outcomes: [Swift package path/modules moved to tao naming with passing build/tests]
+- residual_risk: runtime defaults still include obs-specific env and db path names pending REN-005

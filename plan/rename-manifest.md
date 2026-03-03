@@ -16,7 +16,7 @@ Rename project identity from `obs` to `tao` across source, build scripts, packag
 - binary names `obs`, `tao-tui`, `tao-sdk-bridge` -> `tao`, `tao-tui`, `tao-sdk-bridge`
 
 3. Directory identity:
-- `apps/obs-macos` -> `apps/tao-macos`
+- `apps/tao-macos` -> `apps/tao-macos`
 - Rust crate directories `crates/tao-*` -> `crates/tao-*`
 
 4. Runtime/config identity:

@@ -1,19 +1,19 @@
-# obs-macos
+# tao-macos
 
-Native macOS Swift application shell for `obs`.
+Native macOS Swift application shell for `tao`.
 
 This app must remain a UI adapter over Rust SDK services and must not contain domain logic.
 
 ## Planned Targets
 
-- ObsApp
-- ObsFeatureNavigation
-- ObsFeatureNote
-- ObsFeatureProperties
-- ObsFeatureBases
-- ObsBridgeClient
-- ObsDesignSystem
-- ObsTestingSupport
+- TaoApp
+- TaoFeatureNavigation
+- TaoFeatureNote
+- TaoFeatureProperties
+- TaoFeatureBases
+- TaoBridgeClient
+- TaoDesignSystem
+- TaoTestingSupport
 
 ## Status
 

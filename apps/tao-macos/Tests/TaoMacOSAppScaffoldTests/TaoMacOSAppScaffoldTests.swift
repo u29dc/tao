@@ -1,9 +1,9 @@
 import Testing
 import Foundation
-@testable import ObsMacOSAppScaffold
+@testable import TaoMacOSAppScaffold
 
 @Test func module_name_is_stable() {
-    #expect(ObsMacOSAppScaffold.moduleName() == "ObsMacOSAppScaffold")
+    #expect(TaoMacOSAppScaffold.moduleName() == "TaoMacOSAppScaffold")
 }
 
 @Test func app_smoke_launch_open_navigate_edit_flow() throws {
@@ -17,7 +17,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
 
     let launchStats = try client.vaultStats(
         vaultRoot: vaultRoot.path,
@@ -100,7 +100,7 @@ import Foundation
         encoding: .utf8
     )
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     let stats = try client.vaultStats(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path
@@ -131,7 +131,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
@@ -171,7 +171,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     let created = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
@@ -216,7 +216,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
@@ -268,7 +268,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
@@ -304,7 +304,7 @@ import Foundation
         encoding: .utf8
     )
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     let list = try client.basesList(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path
@@ -319,7 +319,7 @@ import Foundation
             viewName: "Projects"
         )
         Issue.record("expected missing base error")
-    } catch let ObsBridgeClientError.bridgeError(error) {
+    } catch let TaoBridgeClientError.bridgeError(error) {
         #expect(error == .basesViewNotFound(BridgeErrorDTO(
             code: "bridge.bases_view.not_found",
             message: "base id/path not found",
@@ -340,7 +340,7 @@ import Foundation
     let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
-    let client = ObsBridgeClient()
+    let client = TaoBridgeClient()
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
@@ -377,10 +377,10 @@ import Foundation
 }
 
 @Test func bridge_client_accepts_compatible_minor_schema_versions() throws {
-    #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1"))
-    #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1.8"))
-    #expect(!ObsBridgeClient.isCompatibleSchemaVersion("v2"))
-    #expect(!ObsBridgeClient.isCompatibleSchemaVersion("v1.beta"))
+    #expect(TaoBridgeClient.isCompatibleSchemaVersion("v1"))
+    #expect(TaoBridgeClient.isCompatibleSchemaVersion("v1.8"))
+    #expect(!TaoBridgeClient.isCompatibleSchemaVersion("v2"))
+    #expect(!TaoBridgeClient.isCompatibleSchemaVersion("v1.beta"))
 }
 
 @Test func bridge_client_rejects_incompatible_schema_from_bridge_output() throws {
@@ -391,7 +391,7 @@ import Foundation
     )
     defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
 
-    let client = ObsBridgeClient(
+    let client = TaoBridgeClient(
         bridgeCommand: [fixture.script.path],
         repositoryRoot: fixture.tempRoot
     )
@@ -403,7 +403,7 @@ import Foundation
             path: "notes/mock.md"
         )
         Issue.record("expected schema compatibility failure")
-    } catch let error as ObsBridgeClientError {
+    } catch let error as TaoBridgeClientError {
         switch error {
         case .incompatibleSchema(let expectedMajor, let actual):
             #expect(expectedMajor == 1)
@@ -422,7 +422,7 @@ import Foundation
     )
     defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
 
-    let client = ObsBridgeClient(
+    let client = TaoBridgeClient(
         bridgeCommand: [fixture.script.path],
         repositoryRoot: fixture.tempRoot
     )
@@ -435,7 +435,7 @@ import Foundation
             content: "x"
         )
         Issue.record("expected mapped bridge error")
-    } catch let error as ObsBridgeClientError {
+    } catch let error as TaoBridgeClientError {
         switch error {
         case .bridgeError(let typedError):
             switch typedError {
@@ -459,7 +459,7 @@ import Foundation
     )
     defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
 
-    let client = ObsBridgeClient(
+    let client = TaoBridgeClient(
         bridgeCommand: [fixture.script.path],
         repositoryRoot: fixture.tempRoot
     )
@@ -470,7 +470,7 @@ import Foundation
             dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path
         )
         Issue.record("expected unknown bridge error mapping")
-    } catch let error as ObsBridgeClientError {
+    } catch let error as TaoBridgeClientError {
         switch error {
         case .bridgeError(let typedError):
             switch typedError {

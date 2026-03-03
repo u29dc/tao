@@ -20,7 +20,7 @@ jobs:
 
       - name: swift test
         run: swift test
-        working-directory: apps/obs-macos
+        working-directory: apps/tao-macos
 
       - name: build signed app bundle
         run: ./scripts/package-macos-app.sh
@@ -28,7 +28,7 @@ jobs:
       - name: upload signed app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obs-macos-signed-app
+          name: tao-macos-signed-app
           path: |
-            dist/ObsMacOSApp.app
-            dist/ObsMacOSApp-macos-signed.zip
+            dist/TaoMacOSApp.app
+            dist/TaoMacOSApp-macos-signed.zip
