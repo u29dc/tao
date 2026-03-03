@@ -1312,3 +1312,13 @@ Append-only execution log for autonomous runs.
   - commands: [write deterministic rename manifest with exclusions and validation queries]
   - outcomes: [safe rename procedure and allowlist established]
 - residual_risk: none
+
+- timestamp: 2026-03-03T23:49:00Z
+- session: session-2026-03-03-b
+- ticket: REN-002
+- action: done
+- evidence:
+  - files: [plan/tickets.csv, plan/run-state.json]
+  - commands: [gh repo rename tao --yes, git remote set-url origin git@github.com:u29dc/tao.git, gh repo view --json nameWithOwner]
+  - outcomes: [repository renamed to u29dc/tao and local origin remapped]
+- residual_risk: none
