@@ -1,0 +1,11 @@
+{
+  "plan_version": "2026-03-03",
+  "manifest_path": "tickets.csv",
+  "phase": "phase0",
+  "active_ticket": null,
+  "last_completed_ticket": null,
+  "session_status": "idle",
+  "retry": {},
+  "blockers": [],
+  "updated_at": null
+}
