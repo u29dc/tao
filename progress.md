@@ -153,3 +153,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [workspace unsafe forbid lint policy enabled and validated]
 - residual_risk: strict clippy groups beyond all are deferred to avoid placeholder churn
 
+- timestamp: 2026-03-03T15:47:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-003
+- action: done
+- evidence:
+  - files: [.gitignore, package.json, commitlint.config.js, lint-staged.config.js, .husky/*, bun.lock, tickets.csv, run-state.json]
+  - commands: [bun install, bun run util:check]
+  - outcomes: [root scripts hooks and commitlint stack aligned and quality gate passed]
+- residual_risk: none
+

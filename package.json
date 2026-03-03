@@ -1,0 +1,29 @@
+{
+  "name": "obs",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:u29dc/obs.git"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "obs:dev": "cargo run -p obs-cli --",
+    "build": "cargo build --workspace --release && OUT_DIR=\"${OBS_HOME:-${TOOLS_HOME:-$HOME/.tools}/obs}\" && mkdir -p \"$OUT_DIR\" && cp target/release/obs \"$OUT_DIR/obs\" && cp target/release/obs-tui \"$OUT_DIR/obs-tui\"",
+    "util:format": "cargo fmt --all",
+    "util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    "util:types": "cargo check --workspace",
+    "util:test": "cargo test --workspace",
+    "util:build": "cargo build --workspace",
+    "util:audit": "cargo audit",
+    "util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.5",
+    "@commitlint/cli": "^20.4.2",
+    "@commitlint/config-conventional": "^20.4.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.3.1"
+  }
+}
