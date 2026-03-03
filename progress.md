@@ -962,3 +962,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-cli, cargo run -p obs-cli -- --json vault open --vault-root /tmp/vault --db-path /tmp/obs.sqlite, bun run util:check]
   - outcomes: [added global `--json` flag with single-envelope stdout output (`ok/value/error`) for all scaffolded commands, refactored CLI dispatch to structured command results, and added tests covering grouped help + envelope JSON shape]
 - residual_risk: current envelope `error` branch is not exercised by command execution yet because handlers are still placeholders pending SDK-backed wrappers
+
+- timestamp: 2026-03-03T19:05:03Z
+- session: session-2026-03-03-a
+- ticket: CLI-003
+- action: done
+- evidence:
+  - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-cli -- --json vault open/reindex/stats/reconcile ..., bun run util:check]
+  - outcomes: [replaced vault command placeholders with SDK-backed wrappers that validate vault/db paths, run migrations, and execute open/stats/reindex/reconcile with stable JSON payloads; added test hardening with temporary vault paths so JSON envelope tests remain deterministic]
+- residual_risk: wrapper currently assumes case-sensitive policy for reindex/reconcile and fixed watcher/index-lag values for stats, so runtime flags for these knobs remain future work

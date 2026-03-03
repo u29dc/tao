@@ -1,7 +1,12 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use obs_sdk_service::{FullIndexService, HealthSnapshotService, ReconcileService, WatcherStatus};
+use obs_sdk_storage::run_migrations;
+use obs_sdk_vault::CasePolicy;
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -262,21 +267,91 @@ fn render_output(json: bool, result: &CommandResult) -> Result<String> {
 fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
     match command {
         VaultCommands::Open(args) => {
-            placeholder_result("vault.open", "vault open is not implemented yet", args)
+            let connection = open_initialized_connection(&args)?;
+            let migration_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .context("query migration count")?;
+            Ok(CommandResult {
+                command: "vault.open".to_string(),
+                summary: "vault open completed".to_string(),
+                args: serde_json::json!({
+                    "vault_root": args.vault_root,
+                    "db_path": args.db_path,
+                    "db_ready": true,
+                    "migrations_applied": migration_count,
+                }),
+            })
         }
         VaultCommands::Stats(args) => {
-            placeholder_result("vault.stats", "vault stats is not implemented yet", args)
+            let connection = open_initialized_connection(&args)?;
+            let snapshot = HealthSnapshotService
+                .snapshot(
+                    Path::new(&args.vault_root),
+                    &connection,
+                    0,
+                    WatcherStatus::Stopped,
+                )
+                .map_err(|source| anyhow!("vault stats failed: {source}"))?;
+            Ok(CommandResult {
+                command: "vault.stats".to_string(),
+                summary: "vault stats completed".to_string(),
+                args: serde_json::json!({
+                    "vault_root": snapshot.vault_root,
+                    "files_total": snapshot.files_total,
+                    "markdown_files": snapshot.markdown_files,
+                    "db_healthy": snapshot.db_healthy,
+                    "db_migrations": snapshot.db_migrations,
+                    "index_lag": snapshot.index_lag,
+                    "watcher_status": snapshot.watcher_status,
+                    "last_index_updated_at": snapshot.last_index_updated_at,
+                }),
+            })
         }
-        VaultCommands::Reindex(args) => placeholder_result(
-            "vault.reindex",
-            "vault reindex is not implemented yet",
-            args,
-        ),
-        VaultCommands::Reconcile(args) => placeholder_result(
-            "vault.reconcile",
-            "vault reconcile is not implemented yet",
-            args,
-        ),
+        VaultCommands::Reindex(args) => {
+            let mut connection = open_initialized_connection(&args)?;
+            let result = FullIndexService::default()
+                .rebuild(
+                    Path::new(&args.vault_root),
+                    &mut connection,
+                    CasePolicy::Sensitive,
+                )
+                .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+            Ok(CommandResult {
+                command: "vault.reindex".to_string(),
+                summary: "vault reindex completed".to_string(),
+                args: serde_json::json!({
+                    "indexed_files": result.indexed_files,
+                    "markdown_files": result.markdown_files,
+                    "links_total": result.links_total,
+                    "unresolved_links": result.unresolved_links,
+                    "properties_total": result.properties_total,
+                    "bases_total": result.bases_total,
+                }),
+            })
+        }
+        VaultCommands::Reconcile(args) => {
+            let mut connection = open_initialized_connection(&args)?;
+            let result = ReconcileService
+                .reconcile_vault(
+                    Path::new(&args.vault_root),
+                    &mut connection,
+                    CasePolicy::Sensitive,
+                )
+                .map_err(|source| anyhow!("vault reconcile failed: {source}"))?;
+            Ok(CommandResult {
+                command: "vault.reconcile".to_string(),
+                summary: "vault reconcile completed".to_string(),
+                args: serde_json::json!({
+                    "scanned_files": result.scanned_files,
+                    "inserted_files": result.inserted_files,
+                    "updated_files": result.updated_files,
+                    "removed_files": result.removed_files,
+                    "unchanged_files": result.unchanged_files,
+                }),
+            })
+        }
     }
 }
 
@@ -355,6 +430,24 @@ fn placeholder_result<A: Serialize>(
     })
 }
 
+fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {
+    let vault_root = Path::new(&args.vault_root);
+    if !vault_root.exists() {
+        return Err(anyhow!("vault root does not exist: {}", args.vault_root));
+    }
+    if !vault_root.is_dir() {
+        return Err(anyhow!(
+            "vault root is not a directory: {}",
+            args.vault_root
+        ));
+    }
+
+    let mut connection = Connection::open(&args.db_path)
+        .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
+    run_migrations(&mut connection).map_err(|source| anyhow!("run migrations failed: {source}"))?;
+    Ok(connection)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cli, dispatch, render_output};
@@ -379,15 +472,18 @@ mod tests {
 
     #[test]
     fn json_output_is_one_envelope_object() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().to_path_buf();
+        let db_path = vault_root.join("obs.sqlite");
         let cli = Cli::parse_from([
-            "obs",
-            "--json",
-            "vault",
-            "open",
-            "--vault-root",
-            "/tmp/vault",
-            "--db-path",
-            "/tmp/obs.sqlite",
+            "obs".to_string(),
+            "--json".to_string(),
+            "vault".to_string(),
+            "open".to_string(),
+            "--vault-root".to_string(),
+            vault_root.to_string_lossy().to_string(),
+            "--db-path".to_string(),
+            db_path.to_string_lossy().to_string(),
         ]);
         let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");

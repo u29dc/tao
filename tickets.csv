@@ -93,7 +93,7 @@
 "APP-012","Implement startup state restoration","app","phase4","APP-003","done","P2","codex","3","0","","restores last vault and last note safely"
 "CLI-001","Scaffold CLI crate and command tree","cli","phase4","INFRA-001","done","P2","codex","3","0","","`obs --help` with grouped commands"
 "CLI-002","Implement one-envelope JSON output","cli","phase4","CLI-001|DOC-005","done","P2","codex","3","0","","`--json` prints one object to stdout"
-"CLI-003","Add vault command group wrappers","cli","phase4","CLI-001|SDK-010","todo","P2","unassigned","3","0","","open/stats/reindex/reconcile commands work"
+"CLI-003","Add vault command group wrappers","cli","phase4","CLI-001|SDK-010","done","P2","codex","3","0","","open/stats/reindex/reconcile commands work"
 "CLI-004","Add note command group wrappers","cli","phase4","CLI-001|SDK-009","todo","P2","unassigned","3","0","","read/write commands map to sdk calls"
 "CLI-005","Add links and properties wrappers","cli","phase4","CLI-001|LINK-006|PROP-006","todo","P2","unassigned","3","0","","link/property commands operate on vault"
 "CLI-006","Add bases/search wrappers","cli","phase4","CLI-001|BASE-008","todo","P2","unassigned","3","0","","bases view and search command outputs stable JSON"
