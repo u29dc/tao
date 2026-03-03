@@ -10,6 +10,7 @@ const ENV_DATA_DIR: &str = "OBS_DATA_DIR";
 const ENV_DB_PATH: &str = "OBS_DB_PATH";
 const ENV_CASE_POLICY: &str = "OBS_CASE_POLICY";
 const ENV_TRACING_ENABLED: &str = "OBS_TRACING_ENABLED";
+const ENV_FEATURE_FLAGS: &str = "OBS_FEATURE_FLAGS";
 
 /// Runtime SDK configuration loaded from defaults, environment, and explicit overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub struct SdkConfig {
     pub case_policy: CasePolicy,
     /// Toggle for service-level tracing hooks.
     pub tracing_enabled: bool,
+    /// Enabled feature flags by canonical key.
+    pub feature_flags: Vec<String>,
 }
 
 /// Explicit override values with highest precedence.
@@ -39,6 +42,8 @@ pub struct SdkConfigOverrides {
     pub case_policy: Option<CasePolicy>,
     /// Override tracing toggle.
     pub tracing_enabled: Option<bool>,
+    /// Override enabled feature flags.
+    pub feature_flags: Option<Vec<String>>,
 }
 
 /// Loader for SDK configuration with deterministic precedence.
@@ -114,12 +119,21 @@ impl SdkConfigLoader {
             true
         };
 
+        let feature_flags = if let Some(value) = overrides.feature_flags {
+            normalize_feature_flags(value)
+        } else if let Some(value) = env.get(ENV_FEATURE_FLAGS) {
+            parse_feature_flags(value)
+        } else {
+            Vec::new()
+        };
+
         Ok(SdkConfig {
             vault_root,
             data_dir,
             db_path,
             case_policy,
             tracing_enabled,
+            feature_flags,
         })
     }
 }
@@ -175,6 +189,22 @@ fn parse_bool(value: &str) -> Result<bool, SdkConfigError> {
             value: value.to_string(),
         })
     }
+}
+
+fn parse_feature_flags(value: &str) -> Vec<String> {
+    let parsed: Vec<String> = value
+        .split(',')
+        .map(|segment| segment.trim().to_ascii_lowercase())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    normalize_feature_flags(parsed)
+}
+
+fn normalize_feature_flags(mut flags: Vec<String>) -> Vec<String> {
+    flags.retain(|flag| !flag.trim().is_empty());
+    flags.sort();
+    flags.dedup();
+    flags
 }
 
 /// SDK config loading failures.
@@ -274,12 +304,17 @@ mod tests {
         );
         env.insert("OBS_CASE_POLICY".to_string(), "insensitive".to_string());
         env.insert("OBS_TRACING_ENABLED".to_string(), "0".to_string());
+        env.insert(
+            "OBS_FEATURE_FLAGS".to_string(),
+            "bridge-batching,reconcile-auto-heal".to_string(),
+        );
 
         let config = SdkConfigLoader::load_from_map(
             SdkConfigOverrides {
                 vault_root: Some(override_vault.clone()),
                 case_policy: Some(CasePolicy::Sensitive),
                 tracing_enabled: Some(true),
+                feature_flags: Some(vec!["tui-preview".to_string()]),
                 ..SdkConfigOverrides::default()
             },
             &env,
@@ -293,6 +328,7 @@ mod tests {
         );
         assert_eq!(config.case_policy, CasePolicy::Sensitive);
         assert!(config.tracing_enabled);
+        assert_eq!(config.feature_flags, vec!["tui-preview".to_string()]);
     }
 
     #[test]
@@ -307,6 +343,10 @@ mod tests {
             env_vault.to_string_lossy().to_string(),
         );
         env.insert("OBS_CASE_POLICY".to_string(), "insensitive".to_string());
+        env.insert(
+            "OBS_FEATURE_FLAGS".to_string(),
+            "bridge-batching,reconcile-auto-heal".to_string(),
+        );
 
         let config =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
@@ -314,6 +354,13 @@ mod tests {
 
         assert_eq!(config.case_policy, CasePolicy::Insensitive);
         assert!(config.db_path.ends_with("index.sqlite"));
+        assert_eq!(
+            config.feature_flags,
+            vec![
+                "bridge-batching".to_string(),
+                "reconcile-auto-heal".to_string()
+            ]
+        );
     }
 
     #[test]

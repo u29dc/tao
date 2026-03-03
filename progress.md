@@ -472,3 +472,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [sdk config loader implemented with deterministic override/env/default precedence and validation tests for vault, case policy, and bool parsing]
 - residual_risk: config currently targets core runtime paths and tracing toggle; additional deployment-specific options may be added as SDK surface expands
+
+- timestamp: 2026-03-03T16:34:45Z
+- session: session-2026-03-03-a
+- ticket: SDK-016
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/config.rs, crates/obs-sdk-service/src/feature_flags.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [feature flag registry implemented with typed known flags, unknown-flag tracking, runtime toggles, and config loader support for OBS_FEATURE_FLAGS]
+- residual_risk: registry currently toggles behavior flags in-memory; feature gating of downstream codepaths will be expanded as module implementations land

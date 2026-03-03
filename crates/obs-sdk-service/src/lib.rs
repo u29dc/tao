@@ -7,10 +7,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod config;
+mod feature_flags;
 mod import_export;
 mod tracing_hooks;
 
 pub use config::{SdkConfig, SdkConfigError, SdkConfigLoader, SdkConfigOverrides};
+pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use import_export::{
     FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
     TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
