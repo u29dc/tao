@@ -9,13 +9,13 @@
       "before_sequence": ["note-get", "note-links"],
       "after_sequence": ["note-context"]
     },
-    "file_tree_initial_load_1024_notes": {
+    "file_tree_initial_load_1000_notes": {
       "before_calls": 4,
       "after_calls": 1,
       "reduction": 3,
       "reduction_percent": 75.0,
       "before_limit": 256,
-      "after_limit": 1024
+      "after_limit": 1000
     }
   },
   "status": "pass"

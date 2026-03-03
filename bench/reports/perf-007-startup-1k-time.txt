@@ -1,0 +1,22 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running `target/debug/obs-bench --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json`
+startup p50_ms=12.283 p95_ms=12.797 max_ms=12.922 target_p95_ms=900.0 status=pass
+startup report written to bench/reports/perf-007-startup-1k.json
+        1.24 real         0.43 user         0.49 sys
+             8421376  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                5561  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  34  voluntary context switches
+                1854  involuntary context switches
+         15244254180  instructions retired
+          3867014441  cycles elapsed
+             4751744  peak memory footprint

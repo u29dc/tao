@@ -16,6 +16,7 @@ enum Scenario {
     Resolve,
     Search,
     Bridge,
+    Startup,
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +85,7 @@ fn run() -> Result<()> {
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
         Scenario::Resolve => run_resolve_benchmark(&args),
+        Scenario::Startup => run_startup_benchmark(&args),
         Scenario::Parse | Scenario::Search => run_cpu_smoke_benchmark(&args),
     }
 }
@@ -170,6 +172,75 @@ fn run_resolve_benchmark(args: &Args) -> Result<()> {
     if let Some(path) = &args.json_out {
         write_json_report(path, &report)?;
         println!("resolve report written to {}", path.display());
+    }
+
+    Ok(())
+}
+
+fn run_startup_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("startup benchmark iterations must be greater than zero");
+    }
+
+    let notes_total = args.bridge_notes.max(1);
+    let temp = tempdir().context("create startup benchmark temp directory")?;
+    let vault_root = temp.path().join("vault");
+    let notes_dir = vault_root.join("notes");
+    let db_path = temp.path().join("obs.sqlite");
+    fs::create_dir_all(&notes_dir).context("create startup benchmark notes directory")?;
+
+    let mut seed_kernel = BridgeKernel::open(&vault_root, &db_path)
+        .context("open startup benchmark bridge kernel")?;
+    for idx in 0..notes_total {
+        let path = format!("notes/note-{idx:05}.md");
+        let content = format!("# Note {idx}\nstartup seed");
+        consume_envelope(
+            seed_kernel.note_put(&path, &content),
+            "startup_seed_note_put",
+        )?;
+    }
+
+    let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let kernel =
+            BridgeKernel::open(&vault_root, &db_path).context("open kernel for startup sample")?;
+        let _stats = consume_envelope(kernel.vault_stats(), "startup_vault_stats")?;
+        let page = consume_envelope(kernel.notes_list(None, 1000), "startup_notes_list")?;
+        if let Some(first) = page.items.first() {
+            let _context =
+                consume_envelope(kernel.note_context(&first.path), "startup_note_context")?;
+        }
+        samples.push(elapsed_ms(start));
+    }
+
+    let summary = LatencySummary::from_samples(samples)?;
+    let target_p95_ms = 900.0;
+    let status = if summary.p95_ms <= target_p95_ms {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    println!(
+        "startup p50_ms={:.3} p95_ms={:.3} max_ms={:.3} target_p95_ms={:.1} status={status}",
+        summary.p50_ms, summary.p95_ms, summary.max_ms, target_p95_ms
+    );
+
+    let report = json!({
+        "scenario": "startup",
+        "iterations": args.iterations,
+        "notes_seeded": notes_total,
+        "generated_at_unix": now_unix(),
+        "latency": summary.as_json(),
+        "budget": {
+            "target_p95_ms": target_p95_ms,
+        },
+        "status": status,
+    });
+    if let Some(path) = &args.json_out {
+        write_json_report(path, &report)?;
+        println!("startup report written to {}", path.display());
     }
 
     Ok(())

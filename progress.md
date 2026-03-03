@@ -1142,3 +1142,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-sdk-bridge, swift test --package-path apps/obs-macos, bun run util:check]
 - outcomes: [added batched bridge endpoint `note-context` (single call for note+links), switched note open flow to one boundary invocation, increased tree page size from 256 to 1024 to reduce list paging calls, and documented call-count reduction evidence for key app flows]
 - residual_risk: call-count report is deterministic path analysis and should be supplemented by runtime telemetry counters once app-level perf instrumentation ticket lands
+
+- timestamp: 2026-03-03T19:53:48Z
+- session: session-2026-03-03-a
+- ticket: PERF-007
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, crates/obs-bench/src/main.rs, bench/reports/perf-007-startup-1k.json, bench/reports/perf-007-startup-1k-time.txt, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/obs-macos, bun run util:check]
+- outcomes: [added dedicated startup benchmark scenario that measures bridge startup pipeline (`open -> vault_stats -> notes_list -> note_context`) and emits p50/p95/max report, optimized app startup tree hydration to skip eager note-list loading when restoring a selected note, and validated startup p95 at 12.797ms against 900ms hard budget target]
+- residual_risk: startup benchmark currently models bridge/service startup path rather than full macOS compositor/UI boot, so Instruments-based cold-launch traces remain a future improvement

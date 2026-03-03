@@ -25,7 +25,7 @@ final class FileTreeViewModel: ObservableObject {
         !summaries.isEmpty
     }
 
-    func bindVault(vaultRoot: String, dbPath: String) {
+    func bindVault(vaultRoot: String, dbPath: String, eagerLoad: Bool = true) {
         guard self.vaultRoot != vaultRoot || self.dbPath != dbPath else {
             return
         }
@@ -37,7 +37,9 @@ final class FileTreeViewModel: ObservableObject {
         self.roots = []
         self.canLoadMore = false
         self.errorMessage = nil
-        loadNextPage()
+        if eagerLoad {
+            loadNextPage()
+        }
     }
 
     func loadNextPage() {
@@ -63,7 +65,7 @@ final class FileTreeViewModel: ObservableObject {
                         vaultRoot: requestVaultRoot,
                         dbPath: requestDbPath,
                         afterPath: requestCursor,
-                        limit: 1024
+                        limit: 1000
                     )
                 }.value
 

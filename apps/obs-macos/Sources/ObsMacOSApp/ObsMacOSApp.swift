@@ -527,6 +527,15 @@ private struct ObsRootSplitView: View {
                     .tag(node.path)
                 }
             }
+            .onAppear {
+                if openedVaultRoot != nil
+                    && selectedTreePath == nil
+                    && !fileTreeViewModel.hasLoadedNotes
+                    && !fileTreeViewModel.isLoading
+                {
+                    fileTreeViewModel.loadNextPage()
+                }
+            }
             .frame(minHeight: 240)
 
             HStack(spacing: 12) {
@@ -807,8 +816,13 @@ private struct ObsRootSplitView: View {
                     statsSummary =
                         "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
                     openedVaultRoot = root
-                    fileTreeViewModel.bindVault(vaultRoot: root, dbPath: db)
                     let restoredNotePath = pendingRestoredNotePath
+                    let eagerLoadTree = selectedSidebarItem == .notes && restoredNotePath == nil
+                    fileTreeViewModel.bindVault(
+                        vaultRoot: root,
+                        dbPath: db,
+                        eagerLoad: eagerLoadTree
+                    )
                     pendingRestoredNotePath = nil
                     selectedTreePath = restoredNotePath
                     selectedNote = nil

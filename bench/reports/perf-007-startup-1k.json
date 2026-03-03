@@ -1,0 +1,15 @@
+{
+  "budget": {
+    "target_p95_ms": 900.0
+  },
+  "generated_at_unix": 1772567618,
+  "iterations": 50,
+  "latency": {
+    "max_ms": 12.922,
+    "p50_ms": 12.283,
+    "p95_ms": 12.797
+  },
+  "notes_seeded": 1000,
+  "scenario": "startup",
+  "status": "pass"
+}
