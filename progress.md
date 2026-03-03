@@ -252,3 +252,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [file fingerprint service implemented with canonical path mapping and tested mtime/size/blake3 hashing]
 - residual_risk: full-file hashing on every request may be expensive for very large binaries; batching/caching deferred to indexing tickets
+
+- timestamp: 2026-03-03T17:16:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-004
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-markdown/Cargo.toml, crates/obs-sdk-markdown/src/lib.rs, crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [markdown parser entrypoints and service-layer ingest pipeline shell implemented and validated]
+- residual_risk: markdown parser intentionally scopes to shell behavior (frontmatter/headings/title) and defers full ast/link extraction to later tickets

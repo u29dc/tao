@@ -330,6 +330,9 @@ version = "0.1.0"
 [[package]]
 name = "obs-sdk-markdown"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "obs-sdk-properties"
@@ -342,6 +345,12 @@ version = "0.1.0"
 [[package]]
 name = "obs-sdk-service"
 version = "0.1.0"
+dependencies = [
+ "obs-sdk-markdown",
+ "obs-sdk-vault",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "obs-sdk-storage"
