@@ -163,3 +163,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [root scripts hooks and commitlint stack aligned and quality gate passed]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:49:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-004
+- action: done
+- evidence:
+  - files: [.github/workflows/rust-ci.yml, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [github rust quality workflow added and local full gate passed]
+- residual_risk: ci runtime for cargo-audit install not benchmarked yet
+

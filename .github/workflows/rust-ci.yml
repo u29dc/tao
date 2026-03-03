@@ -1,0 +1,41 @@
+name: rust-ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  rust-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: format
+        run: cargo fmt --all -- --check
+
+      - name: lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: types
+        run: cargo check --workspace
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: build
+        run: cargo build --workspace
