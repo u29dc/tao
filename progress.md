@@ -33,3 +33,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [v1 scope contract with acceptance criteria added]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:14:00Z
+- session: session-2026-03-03-a
+- ticket: DOC-003
+- action: done
+- evidence:
+  - files: [docs/specs/obsidian-compatibility-matrix.md, tickets.csv, run-state.json]
+  - commands: [write compatibility matrix]
+  - outcomes: [feature-by-feature compatibility targets documented]
+- residual_risk: none
+
