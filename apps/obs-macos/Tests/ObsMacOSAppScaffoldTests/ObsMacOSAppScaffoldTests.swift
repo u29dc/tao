@@ -93,6 +93,53 @@ import Foundation
     #expect(secondRead.body.contains("two"))
 }
 
+@Test func bridge_client_events_poll_returns_note_write_events() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-bridge-events-test-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = ObsBridgeClient()
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/events.md",
+        content: "# Events\ncreated"
+    )
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/events.md",
+        content: "# Events\nupdated"
+    )
+
+    let firstBatch = try client.eventsPoll(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        afterId: 0,
+        limit: 10
+    )
+    #expect(firstBatch.events.count == 2)
+    #expect(firstBatch.events[0].kind == "note_changed")
+    #expect(firstBatch.events[0].action == "created")
+    #expect(firstBatch.events[1].action == "updated")
+    #expect(firstBatch.events[0].path == "notes/events.md")
+
+    let secondBatch = try client.eventsPoll(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        afterId: firstBatch.nextCursor,
+        limit: 10
+    )
+    #expect(secondBatch.events.isEmpty)
+    #expect(secondBatch.nextCursor == firstBatch.nextCursor)
+}
+
 @Test func bridge_client_accepts_compatible_minor_schema_versions() throws {
     #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1"))
     #expect(ObsBridgeClient.isCompatibleSchemaVersion("v1.8"))

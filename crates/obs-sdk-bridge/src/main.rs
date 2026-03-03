@@ -56,6 +56,21 @@ enum Commands {
         #[arg(long)]
         content: String,
     },
+    /// Poll bridge events after one cursor for Swift subscription flows.
+    EventsPoll {
+        /// Absolute vault root path.
+        #[arg(long)]
+        vault_root: String,
+        /// SQLite database file path.
+        #[arg(long)]
+        db_path: String,
+        /// Last seen event id cursor.
+        #[arg(long, default_value_t = 0)]
+        after_id: u64,
+        /// Maximum events to return.
+        #[arg(long, default_value_t = 128)]
+        limit: u64,
+    },
 }
 
 fn main() {
@@ -79,6 +94,14 @@ fn main() {
             content,
         } => with_kernel(vault_root, db_path, |kernel| {
             kernel.note_put(&path, &content)
+        }),
+        Commands::EventsPoll {
+            vault_root,
+            db_path,
+            after_id,
+            limit,
+        } => with_kernel(vault_root, db_path, |kernel| {
+            kernel.events_poll(after_id, limit)
         }),
     };
 

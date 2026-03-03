@@ -792,3 +792,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `ObsBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
 - residual_risk: typed mapping currently covers existing bridge codes and preserves unknown fallback, so new codes still require explicit app-level UX copy when surfaced in APP-010
+
+- timestamp: 2026-03-03T18:05:08Z
+- session: session-2026-03-03-a
+- ticket: FFI-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-bridge/src/lib.rs, crates/obs-sdk-bridge/src/main.rs, apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test, bun run util:check]
+  - outcomes: [bridge now persists note-change events in a sqlite-backed `bridge_events` log and exposes `events-poll` cursor API through bridge shell; Swift client adds typed event polling API and tests confirm create/update writes are delivered and cursor-based polling drains incrementally]
+- residual_risk: current subscription transport is poll-based rather than push-streaming, so real-time event fanout and backpressure policies are deferred to future transport optimization tickets

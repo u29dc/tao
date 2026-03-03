@@ -36,6 +36,20 @@ public struct BridgeWriteAck: Decodable {
     public let action: String
 }
 
+public struct BridgeEvent: Decodable {
+    public let id: UInt64
+    public let kind: String
+    public let fileId: String?
+    public let path: String?
+    public let action: String?
+    public let createdAt: String
+}
+
+public struct BridgeEventBatch: Decodable {
+    public let events: [BridgeEvent]
+    public let nextCursor: UInt64
+}
+
 public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case initFailed(BridgeErrorDTO)
     case vaultStatsFailed(BridgeErrorDTO)
@@ -46,6 +60,9 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
     case notePutUpdateFailed(BridgeErrorDTO)
+    case notePutEventLogFailed(BridgeErrorDTO)
+    case eventsPollInvalidLimit(BridgeErrorDTO)
+    case eventsPollFailed(BridgeErrorDTO)
     case serializeFailed(BridgeErrorDTO)
     case unknown(BridgeErrorDTO)
 
@@ -69,6 +86,12 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .notePutCreateFailed(error)
         case "bridge.note_put.update_failed":
             return .notePutUpdateFailed(error)
+        case "bridge.note_put.event_log_failed":
+            return .notePutEventLogFailed(error)
+        case "bridge.events_poll.invalid_limit":
+            return .eventsPollInvalidLimit(error)
+        case "bridge.events_poll.failed":
+            return .eventsPollFailed(error)
         case "bridge.serialize.failed":
             return .serializeFailed(error)
         default:
@@ -87,6 +110,9 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
             .notePutUpdateFailed(let error),
+            .notePutEventLogFailed(let error),
+            .eventsPollInvalidLimit(let error),
+            .eventsPollFailed(let error),
             .serializeFailed(let error),
             .unknown(let error):
             return error.code
@@ -113,6 +139,12 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "note put create failed: \(error.message)"
         case .notePutUpdateFailed(let error):
             return "note put update failed: \(error.message)"
+        case .notePutEventLogFailed(let error):
+            return "note put event log failed: \(error.message)"
+        case .eventsPollInvalidLimit(let error):
+            return "events poll invalid limit: \(error.message)"
+        case .eventsPollFailed(let error):
+            return "events poll failed: \(error.message)"
         case .serializeFailed(let error):
             return "bridge serialize failed: \(error.message)"
         case .unknown(let error):
@@ -198,6 +230,24 @@ public struct ObsBridgeClient {
                 "--content", content
             ],
             as: BridgeWriteAck.self
+        )
+    }
+
+    public func eventsPoll(
+        vaultRoot: String,
+        dbPath: String,
+        afterId: UInt64 = 0,
+        limit: UInt64 = 128
+    ) throws -> BridgeEventBatch {
+        try invoke(
+            subcommand: [
+                "events-poll",
+                "--vault-root", vaultRoot,
+                "--db-path", dbPath,
+                "--after-id", String(afterId),
+                "--limit", String(limit)
+            ],
+            as: BridgeEventBatch.self
         )
     }
 

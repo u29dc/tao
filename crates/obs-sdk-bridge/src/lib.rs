@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use obs_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use obs_sdk_service::{HealthSnapshotService, NoteCrudService, WatcherStatus};
 use obs_sdk_storage::{FilesRepository, run_migrations};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use thiserror::Error;
@@ -33,6 +33,12 @@ pub const BRIDGE_ERROR_NOTE_PUT_LOOKUP_FAILED: &str = "bridge.note_put.lookup_fa
 pub const BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED: &str = "bridge.note_put.create_failed";
 /// Bridge error code when note-put update fails.
 pub const BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED: &str = "bridge.note_put.update_failed";
+/// Bridge error code when note-put event persistence fails.
+pub const BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED: &str = "bridge.note_put.event_log_failed";
+/// Bridge error code when events-poll limit is invalid.
+pub const BRIDGE_ERROR_EVENTS_POLL_INVALID_LIMIT: &str = "bridge.events_poll.invalid_limit";
+/// Bridge error code when events-poll database query fails.
+pub const BRIDGE_ERROR_EVENTS_POLL_FAILED: &str = "bridge.events_poll.failed";
 /// Bridge error code when serialization fails.
 pub const BRIDGE_ERROR_SERIALIZE_FAILED: &str = "bridge.serialize.failed";
 
@@ -198,6 +204,32 @@ pub struct BridgeWriteAck {
     pub action: String,
 }
 
+/// Bridge event item exposed to Swift subscribers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeEvent {
+    /// Monotonic event identifier.
+    pub id: u64,
+    /// Stable event kind.
+    pub kind: String,
+    /// Event source file id when applicable.
+    pub file_id: Option<String>,
+    /// Event source normalized path when applicable.
+    pub path: Option<String>,
+    /// Event action label when applicable.
+    pub action: Option<String>,
+    /// Event timestamp in UTC.
+    pub created_at: String,
+}
+
+/// Bridge event batch and cursor for polling subscriptions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeEventBatch {
+    /// Ordered list of events after the requested cursor.
+    pub events: Vec<BridgeEvent>,
+    /// Next cursor value to continue polling.
+    pub next_cursor: u64,
+}
+
 /// Bridge runtime kernel with vault root and opened SQLite connection.
 #[derive(Debug)]
 pub struct BridgeKernel {
@@ -221,6 +253,8 @@ impl BridgeKernel {
             Connection::open(db_path).map_err(|source| BridgeInitError::OpenDb { source })?;
         run_migrations(&mut connection)
             .map_err(|source| BridgeInitError::RunMigrations { source })?;
+        ensure_bridge_event_log(&connection)
+            .map_err(|source| BridgeInitError::InitEventLog { source })?;
 
         Ok(Self {
             vault_root,
@@ -355,11 +389,28 @@ impl BridgeKernel {
                 relative,
                 content,
             ) {
-                Ok(result) => BridgeEnvelope::success(BridgeWriteAck {
-                    path: result.normalized_path,
-                    file_id: result.file_id,
-                    action: "updated".to_string(),
-                }),
+                Ok(result) => match append_bridge_note_changed_event(
+                    &self.connection,
+                    &result.file_id,
+                    &result.normalized_path,
+                    "updated",
+                ) {
+                    Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
+                        path: result.normalized_path,
+                        file_id: result.file_id,
+                        action: "updated".to_string(),
+                    }),
+                    Err(source) => BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("note write succeeded but event logging failed")
+                        .with_context("path", JsonValue::String(result.normalized_path))
+                        .with_context("file_id", JsonValue::String(result.file_id))
+                        .with_context("action", JsonValue::String("updated".to_string())),
+                    ),
+                },
                 Err(source) => BridgeEnvelope::failure(
                     BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED, source.to_string())
                         .with_hint("fix note payload or path and retry"),
@@ -374,11 +425,28 @@ impl BridgeKernel {
                 relative,
                 content,
             ) {
-                Ok(result) => BridgeEnvelope::success(BridgeWriteAck {
-                    path: result.normalized_path,
-                    file_id: result.file_id,
-                    action: "created".to_string(),
-                }),
+                Ok(result) => match append_bridge_note_changed_event(
+                    &self.connection,
+                    &result.file_id,
+                    &result.normalized_path,
+                    "created",
+                ) {
+                    Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
+                        path: result.normalized_path,
+                        file_id: result.file_id,
+                        action: "created".to_string(),
+                    }),
+                    Err(source) => BridgeEnvelope::failure(
+                        BridgeError::with_code(
+                            BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED,
+                            source.to_string(),
+                        )
+                        .with_hint("note write succeeded but event logging failed")
+                        .with_context("path", JsonValue::String(result.normalized_path))
+                        .with_context("file_id", JsonValue::String(result.file_id))
+                        .with_context("action", JsonValue::String("created".to_string())),
+                    ),
+                },
                 Err(source) => BridgeEnvelope::failure(
                     BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED, source.to_string())
                         .with_hint("ensure vault path exists and target note path is valid"),
@@ -386,6 +454,123 @@ impl BridgeKernel {
             }
         }
     }
+
+    /// Poll bridge events after one cursor value.
+    #[must_use]
+    pub fn events_poll(&self, after_id: u64, limit: u64) -> BridgeEnvelope<BridgeEventBatch> {
+        if limit == 0 || limit > 1_000 {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_EVENTS_POLL_INVALID_LIMIT,
+                    "limit must be between 1 and 1000",
+                )
+                .with_hint("set `limit` to one value in range [1, 1000]")
+                .with_context("limit", JsonValue::String(limit.to_string())),
+            );
+        }
+
+        match poll_bridge_events(&self.connection, after_id, limit) {
+            Ok(batch) => BridgeEnvelope::success(batch),
+            Err(source) => BridgeEnvelope::failure(
+                BridgeError::with_code(BRIDGE_ERROR_EVENTS_POLL_FAILED, source.to_string())
+                    .with_hint("ensure bridge database is readable")
+                    .with_context("after_id", JsonValue::String(after_id.to_string()))
+                    .with_context("limit", JsonValue::String(limit.to_string())),
+            ),
+        }
+    }
+}
+
+fn ensure_bridge_event_log(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bridge_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bridge_events_id ON bridge_events(id);",
+    )
+}
+
+fn append_bridge_note_changed_event(
+    connection: &Connection,
+    file_id: &str,
+    path: &str,
+    action: &str,
+) -> Result<(), rusqlite::Error> {
+    let payload = serde_json::json!({
+        "file_id": file_id,
+        "path": path,
+        "action": action
+    });
+    connection.execute(
+        "INSERT INTO bridge_events (event_type, payload_json) VALUES (?1, ?2)",
+        params!["note_changed", payload.to_string()],
+    )?;
+    Ok(())
+}
+
+fn poll_bridge_events(
+    connection: &Connection,
+    after_id: u64,
+    limit: u64,
+) -> Result<BridgeEventBatch, rusqlite::Error> {
+    let after_id_i64 = i64::try_from(after_id).unwrap_or(i64::MAX);
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+
+    let mut statement = connection.prepare(
+        "SELECT id, event_type, payload_json, created_at
+         FROM bridge_events
+         WHERE id > ?1
+         ORDER BY id ASC
+         LIMIT ?2",
+    )?;
+
+    let rows = statement.query_map(params![after_id_i64, limit_i64], |row| {
+        let id: u64 = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let payload_raw: String = row.get(2)?;
+        let created_at: String = row.get(3)?;
+
+        let payload = serde_json::from_str::<JsonValue>(&payload_raw).unwrap_or(JsonValue::Null);
+        let file_id = payload
+            .get("file_id")
+            .and_then(JsonValue::as_str)
+            .map(ToString::to_string);
+        let path = payload
+            .get("path")
+            .and_then(JsonValue::as_str)
+            .map(ToString::to_string);
+        let action = payload
+            .get("action")
+            .and_then(JsonValue::as_str)
+            .map(ToString::to_string);
+
+        Ok(BridgeEvent {
+            id,
+            kind,
+            file_id,
+            path,
+            action,
+            created_at,
+        })
+    })?;
+
+    let mut events = Vec::new();
+    let mut next_cursor = after_id;
+    for event in rows {
+        let event = event?;
+        if event.id > next_cursor {
+            next_cursor = event.id;
+        }
+        events.push(event);
+    }
+
+    Ok(BridgeEventBatch {
+        events,
+        next_cursor,
+    })
 }
 
 fn deterministic_file_id(normalized_path: &str) -> String {
@@ -415,6 +600,13 @@ pub enum BridgeInitError {
         /// Migration error.
         #[source]
         source: obs_sdk_storage::MigrationRunnerError,
+    },
+    /// Initializing bridge event log table failed.
+    #[error("failed to initialize bridge event log schema: {source}")]
+    InitEventLog {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
     },
 }
 
@@ -566,5 +758,33 @@ mod tests {
                 .body
                 .contains("second")
         );
+    }
+
+    #[test]
+    fn bridge_kernel_events_poll_returns_note_write_events() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("obs.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let created = kernel.note_put("notes/events.md", "# Event\ncreated");
+        assert!(created.ok);
+        let updated = kernel.note_put("notes/events.md", "# Event\nupdated");
+        assert!(updated.ok);
+
+        let first_batch = kernel.events_poll(0, 10);
+        assert!(first_batch.ok);
+        let first_value = first_batch.value.expect("first batch");
+        assert_eq!(first_value.events.len(), 2);
+        assert_eq!(first_value.events[0].kind, "note_changed");
+        assert_eq!(first_value.events[0].action.as_deref(), Some("created"));
+        assert_eq!(first_value.events[1].action.as_deref(), Some("updated"));
+
+        let second_batch = kernel.events_poll(first_value.next_cursor, 10);
+        assert!(second_batch.ok);
+        let second_value = second_batch.value.expect("second batch");
+        assert!(second_value.events.is_empty());
+        assert_eq!(second_value.next_cursor, first_value.next_cursor);
     }
 }
