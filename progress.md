@@ -1162,3 +1162,13 @@ Append-only execution log for autonomous runs.
   - commands: [./scripts/check-perf-budgets.sh, bun run util:check]
 - outcomes: [added CI perf budget gate script that enforces bridge latency budgets and startup p95 threshold, wired `rust-ci` to fail on budget regressions and upload both reports as artifacts, and documented the canonical CI perf gate workflow]
 - residual_risk: CI gate currently enforces bridge and startup benchmarks only; future expansion can include resolver throughput and large-vault (5k/10k/25k) perf gates for broader regression detection
+
+- timestamp: 2026-03-03T19:58:47Z
+- session: session-2026-03-03-a
+- ticket: REL-001
+- action: done
+- evidence:
+  - files: [docs/release/versioning-policy.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [added release versioning policy with SemVer rules for sdk/cli/bridge/app, bridge DTO major/minor compatibility rules, migration compatibility constraints, release tagging policy, and mandatory pre-tag validation checks]
+- residual_risk: policy is documentation-only until release automation enforces every rule directly from CI/tag workflows
