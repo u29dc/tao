@@ -6,6 +6,78 @@ import Foundation
     #expect(ObsMacOSAppScaffold.moduleName() == "ObsMacOSAppScaffold")
 }
 
+@Test func app_smoke_launch_open_navigate_edit_flow() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("obs-app-smoke-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = ObsBridgeClient()
+
+    let launchStats = try client.vaultStats(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path
+    )
+    #expect(launchStats.dbHealthy)
+
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/alpha.md",
+        content: "# Alpha\nlaunch smoke"
+    )
+    _ = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/beta.md",
+        content: "# Beta\nnavigate smoke"
+    )
+
+    let opened = try client.noteGet(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/alpha.md"
+    )
+    #expect(opened.title == "Alpha")
+    #expect(opened.body.contains("launch smoke"))
+
+    let listed = try client.notesList(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        limit: 10
+    )
+    #expect(listed.items.map(\.path) == ["notes/alpha.md", "notes/beta.md"])
+
+    let navigated = try client.noteGet(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/beta.md"
+    )
+    #expect(navigated.title == "Beta")
+    #expect(navigated.body.contains("navigate smoke"))
+
+    let edited = try client.notePut(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/beta.md",
+        content: "# Beta Updated\nedit smoke"
+    )
+    #expect(edited.action == "updated")
+
+    let editedReadback = try client.noteGet(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        path: "notes/beta.md"
+    )
+    #expect(editedReadback.title == "Beta Updated")
+    #expect(editedReadback.body.contains("edit smoke"))
+}
+
 @Test func bridge_client_calls_vault_stats_and_note_get() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory

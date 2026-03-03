@@ -1112,3 +1112,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-sdk-service reconciliation_scanner_handles_burst_changes_consistently -- --nocapture, bun run util:check]
 - outcomes: [added burst-change chaos test that seeds 40 notes, applies concurrent-style update/delete/insert wave (35 drift paths), verifies reconciliation repair batching, validates final file cardinality, checks index consistency report is empty, and asserts subsequent reconcile pass is noop]
 - residual_risk: chaos sequence is deterministic and file-system local; additional randomized burst schedules could further strengthen long-run flake detection
+
+- timestamp: 2026-03-03T19:44:18Z
+- session: session-2026-03-03-a
+- ticket: QA-007
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Tests/ObsMacOSAppScaffoldTests/ObsMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+  - commands: [swift test --package-path apps/obs-macos, bun run util:check]
+- outcomes: [added explicit Swift smoke test `app_smoke_launch_open_navigate_edit_flow` that validates launch health, note open, list/navigation across notes, edit via bridge write, and readback correctness in one end-to-end scenario]
+- residual_risk: smoke coverage currently validates bridge-backed UI workflows and not visual-level AppKit rendering assertions, so future UI automation can add screenshot/state verification
