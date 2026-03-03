@@ -77,6 +77,10 @@ impl SdkConfigLoader {
             cwd.to_path_buf(),
         );
         let vault_root = canonicalize_existing_directory(vault_root_input)?;
+        load_or_bootstrap(&vault_root).map_err(|source| SdkConfigError::VaultConfig {
+            path: vault_root.join("config.toml"),
+            source,
+        })?;
 
         let data_dir_input = choose_path(
             overrides.data_dir,
@@ -227,6 +231,15 @@ pub enum SdkConfigError {
     #[error("failed to load root config '{path}': {source}")]
     RootConfig {
         /// Root config path.
+        path: PathBuf,
+        /// Config decode/bootstrap error.
+        #[source]
+        source: tao_sdk_config::TaoConfigError,
+    },
+    /// Loading vault config.toml failed.
+    #[error("failed to load vault config '{path}': {source}")]
+    VaultConfig {
+        /// Vault config path.
         path: PathBuf,
         /// Config decode/bootstrap error.
         #[source]
@@ -440,5 +453,30 @@ mod tests {
             fs::canonicalize(vault).expect("canonical vault")
         );
         assert!(root_config.exists(), "root config should be bootstrapped");
+    }
+
+    #[test]
+    fn load_from_map_bootstraps_vault_config_when_missing() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let vault_config = vault.join("config.toml");
+        assert!(!vault_config.exists(), "test precondition");
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect("load config with vault bootstrap");
+        assert_eq!(
+            loaded.vault_root,
+            fs::canonicalize(vault).expect("canonical vault")
+        );
+        assert!(vault_config.exists(), "vault config should be bootstrapped");
     }
 }
