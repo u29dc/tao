@@ -1082,3 +1082,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario bridge --iterations 1 --bridge-notes 1 --json-out bench/reports/perf-003-startup-smoke.json, bun run util:check]
 - outcomes: [captured and committed 10k-note bridge baseline with p50/p95 latencies, plus startup-smoke and `/usr/bin/time -l` memory/process telemetry artifacts to satisfy memory and startup metric coverage]
 - residual_risk: startup-smoke currently uses bridge single-iteration proxy instead of full Swift cold-start trace, so UI-level startup budgets still need dedicated app profiling in phase5
+
+- timestamp: 2026-03-03T19:38:41Z
+- session: session-2026-03-03-a
+- ticket: PERF-004
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/Cargo.toml, crates/obs-sdk-storage/src/lib.rs, docs/db/sqlite-pragma-profile.md, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-sdk-storage, bun run util:check]
+- outcomes: [implemented default SQLite pragma profile application in migration startup (`foreign_keys`, `journal_mode=WAL`, `synchronous=NORMAL`, `temp_store=MEMORY`, `cache_size`, `wal_autocheckpoint`, `busy_timeout`), added file-db assertion test for profile values, and documented selected profile for runtime governance]
+- residual_risk: pragma profile is globally applied at connection startup and currently not environment-overridable, so future tuning by host class may require config-level profile variants

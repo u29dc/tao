@@ -42,6 +42,11 @@ Define non-negotiable latency, throughput, and memory budgets for v1.
 - Integration benchmark harness over vault fixtures.
 - Swift startup/open/search traces captured and archived.
 
+## SQLite Profile
+
+- Runtime pragma profile is documented in `docs/db/sqlite-pragma-profile.md`.
+- Any pragma change requires benchmark evidence and ticket-level regression notes in `progress.md`.
+
 ## CI Integration
 
 - `PERF-008` gates enforce budget checks on tracked benchmarks.

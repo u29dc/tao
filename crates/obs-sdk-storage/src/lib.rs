@@ -57,6 +57,16 @@ const MIGRATIONS: [Migration; 1] = [Migration {
     sql: MIGRATION_0001_SQL,
 }];
 
+const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
+    "PRAGMA foreign_keys = ON;",
+    "PRAGMA journal_mode = WAL;",
+    "PRAGMA synchronous = NORMAL;",
+    "PRAGMA temp_store = MEMORY;",
+    "PRAGMA cache_size = -20000;",
+    "PRAGMA wal_autocheckpoint = 1000;",
+    "PRAGMA busy_timeout = 5000;",
+];
+
 /// Apply initial schema migration SQL directly to an active connection.
 pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchemaError> {
     connection
@@ -86,9 +96,7 @@ pub struct MigrationReport {
 pub fn run_migrations(
     connection: &mut Connection,
 ) -> Result<MigrationReport, MigrationRunnerError> {
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|source| MigrationRunnerError::SetPragma { source })?;
+    configure_connection_pragmas(connection)?;
 
     let transaction = connection
         .transaction()
@@ -147,6 +155,16 @@ pub fn run_migrations(
     Ok(report)
 }
 
+fn configure_connection_pragmas(connection: &Connection) -> Result<(), MigrationRunnerError> {
+    for pragma in SQLITE_PRAGMA_PROFILE {
+        connection
+            .execute_batch(pragma)
+            .map_err(|source| MigrationRunnerError::SetPragma { pragma, source })?;
+    }
+
+    Ok(())
+}
+
 fn load_applied_checksums(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<HashMap<String, String>, MigrationRunnerError> {
@@ -194,8 +212,10 @@ pub enum StorageSchemaError {
 #[derive(Debug, Error)]
 pub enum MigrationRunnerError {
     /// Setting pragma values failed.
-    #[error("failed to configure sqlite pragmas: {source}")]
+    #[error("failed to configure sqlite pragma '{pragma}': {source}")]
     SetPragma {
+        /// SQL pragma statement that failed.
+        pragma: &'static str,
         /// SQLite error.
         #[source]
         source: rusqlite::Error,
@@ -265,6 +285,7 @@ mod tests {
     use std::collections::HashSet;
 
     use rusqlite::{Connection, OptionalExtension, params};
+    use tempfile::tempdir;
 
     use super::{
         MIGRATION_0001_ID, MigrationRunnerError, apply_initial_schema, migration_checksum,
@@ -329,6 +350,50 @@ mod tests {
             recorded_checksum,
             Some(migration_checksum(super::MIGRATION_0001_SQL))
         );
+    }
+
+    #[test]
+    fn run_migrations_applies_sqlite_pragma_profile_for_file_database() {
+        let temp = tempdir().expect("create temp directory");
+        let db_path = temp.path().join("obs.sqlite");
+        let mut connection = Connection::open(db_path).expect("open sqlite database");
+
+        run_migrations(&mut connection).expect("run migrations");
+
+        let foreign_keys: i64 = connection
+            .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+            .expect("read foreign_keys pragma");
+        assert_eq!(foreign_keys, 1);
+
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .expect("read journal_mode pragma");
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous;", [], |row| row.get(0))
+            .expect("read synchronous pragma");
+        assert_eq!(synchronous, 1);
+
+        let temp_store: i64 = connection
+            .query_row("PRAGMA temp_store;", [], |row| row.get(0))
+            .expect("read temp_store pragma");
+        assert_eq!(temp_store, 2);
+
+        let cache_size: i64 = connection
+            .query_row("PRAGMA cache_size;", [], |row| row.get(0))
+            .expect("read cache_size pragma");
+        assert_eq!(cache_size, -20_000);
+
+        let wal_autocheckpoint: i64 = connection
+            .query_row("PRAGMA wal_autocheckpoint;", [], |row| row.get(0))
+            .expect("read wal_autocheckpoint pragma");
+        assert_eq!(wal_autocheckpoint, 1_000);
+
+        let busy_timeout: i64 = connection
+            .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
+            .expect("read busy_timeout pragma");
+        assert_eq!(busy_timeout, 5_000);
     }
 
     #[test]
