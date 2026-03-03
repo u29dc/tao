@@ -1,0 +1,34 @@
+name: swift-release-artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package-macos-app:
+    runs-on: macos-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: swift test
+        run: swift test
+        working-directory: apps/obs-macos
+
+      - name: build signed app bundle
+        run: ./scripts/package-macos-app.sh
+
+      - name: upload signed app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-macos-signed-app
+          path: |
+            dist/ObsMacOSApp.app
+            dist/ObsMacOSApp-macos-signed.zip
