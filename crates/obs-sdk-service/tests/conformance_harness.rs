@@ -40,6 +40,36 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
     Ok(())
 }
 
+fn collect_link_resolution_snapshot(
+    connection: &Connection,
+) -> Vec<(String, String, Option<String>)> {
+    let mut statement = connection
+        .prepare(
+            r#"
+SELECT
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  tf.normalized_path AS resolved_path
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+ORDER BY sf.normalized_path ASC, l.raw_target ASC, resolved_path ASC
+"#,
+        )
+        .expect("prepare link resolution snapshot query");
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>("source_path")?,
+                row.get::<_, String>("raw_target")?,
+                row.get::<_, Option<String>>("resolved_path")?,
+            ))
+        })
+        .expect("query link resolution snapshot rows");
+    rows.map(|row| row.expect("decode link resolution snapshot row"))
+        .collect()
+}
+
 #[test]
 fn integration_harness_indexes_fixture_vault_end_to_end() {
     let fixture = copy_fixture_vault();
@@ -96,5 +126,33 @@ fn integration_harness_indexes_fixture_vault_end_to_end() {
         backlinks
             .iter()
             .any(|row| row.source_path == "notes/alpha.md")
+    );
+}
+
+#[test]
+fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
+    let fixture = copy_fixture_vault();
+    let db_path = fixture.path().join("obs.sqlite");
+
+    let mut connection = Connection::open(db_path).expect("open sqlite");
+    run_migrations(&mut connection).expect("run migrations");
+
+    FullIndexService::default()
+        .rebuild(fixture.path(), &mut connection, CasePolicy::Sensitive)
+        .expect("rebuild fixture vault first pass");
+    let first_snapshot = collect_link_resolution_snapshot(&connection);
+
+    FullIndexService::default()
+        .rebuild(fixture.path(), &mut connection, CasePolicy::Sensitive)
+        .expect("rebuild fixture vault second pass");
+    let second_snapshot = collect_link_resolution_snapshot(&connection);
+
+    assert_eq!(first_snapshot, second_snapshot);
+    assert!(
+        first_snapshot
+            .iter()
+            .any(|(source, raw, resolved)| source == "notes/alpha.md"
+                && raw == "apple"
+                && resolved.as_deref() == Some("notes/apple.md"))
     );
 }

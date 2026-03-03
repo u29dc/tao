@@ -1020,5 +1020,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [crates/obs-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
   - commands: [bun run util:check]
-  - outcomes: [added SDK integration harness test that copies the conformance fixture vault into a temp workspace, runs sqlite migrations + full indexing, validates health snapshot and link graph outputs, and asserts end-to-end fixture behavior under real service flows]
+- outcomes: [added SDK integration harness test that copies the conformance fixture vault into a temp workspace, runs sqlite migrations + full indexing, validates health snapshot and link graph outputs, and asserts end-to-end fixture behavior under real service flows]
 - residual_risk: harness currently validates core indexing/graph behavior but does not yet assert every property/base row in golden snapshots
+
+- timestamp: 2026-03-03T19:19:57Z
+- session: session-2026-03-03-a
+- ticket: QA-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [added repeated-rebuild determinism test that snapshots resolved link mappings in stable order and asserts identical resolver outputs across consecutive full-index runs, including expected ambiguous-link tie-break target for `[[apple]]` from `notes/alpha.md`]
+- residual_risk: determinism coverage currently targets fixture link rows and does not yet fuzz randomized path-order inputs
