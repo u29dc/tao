@@ -582,3 +582,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [index consistency checker added with typed issue report for orphan properties/bases/render-cache rows, broken link references, unresolved flag mismatches, outside-root paths, and missing on-disk files]
 - residual_risk: injected-corruption tests require disabling sqlite foreign key checks, so runtime checker still assumes corruption can come from external/manual writes or earlier schema enforcement gaps
+
+- timestamp: 2026-03-03T17:04:19Z
+- session: session-2026-03-03-a
+- ticket: IDX-008
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [index self-heal service added to auto-repair common inconsistencies from checker output, including orphan row cleanup, link flag repair, and stale file row deletion with post-heal verification]
+- residual_risk: self-heal currently applies deterministic row-level fixes only and does not yet trigger secondary semantic rebuild passes for higher-order graph inconsistencies beyond reported issue set

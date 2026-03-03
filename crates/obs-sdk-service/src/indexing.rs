@@ -1321,6 +1321,177 @@ impl IndexConsistencyChecker {
     }
 }
 
+/// Result payload for index self-heal workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSelfHealResult {
+    /// Number of issues detected before repair.
+    pub issues_detected: u64,
+    /// Number of rows deleted while repairing issues.
+    pub rows_deleted: u64,
+    /// Number of rows updated while repairing issues.
+    pub rows_updated: u64,
+    /// Number of issues remaining after repair.
+    pub remaining_issues: u64,
+}
+
+/// Self-heal service that repairs common consistency issues.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IndexSelfHealService {
+    checker: IndexConsistencyChecker,
+}
+
+impl IndexSelfHealService {
+    /// Detect and repair common index inconsistencies.
+    pub fn heal(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+    ) -> Result<IndexSelfHealResult, IndexSelfHealError> {
+        let before = self
+            .checker
+            .check(vault_root, connection)
+            .map_err(|source| IndexSelfHealError::CheckBefore {
+                source: Box::new(source),
+            })?;
+
+        if before.issues.is_empty() {
+            return Ok(IndexSelfHealResult {
+                issues_detected: 0,
+                rows_deleted: 0,
+                rows_updated: 0,
+                remaining_issues: 0,
+            });
+        }
+
+        let transaction =
+            connection
+                .transaction()
+                .map_err(|source| IndexSelfHealError::BeginTransaction {
+                    source: Box::new(source),
+                })?;
+
+        let mut rows_deleted = 0_u64;
+        let mut rows_updated = 0_u64;
+
+        for issue in &before.issues {
+            match issue.kind {
+                ConsistencyIssueKind::OrphanProperty => {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM properties WHERE property_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "delete_orphan_property",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_deleted += changed as u64;
+                }
+                ConsistencyIssueKind::OrphanBase => {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM bases WHERE base_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "delete_orphan_base",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_deleted += changed as u64;
+                }
+                ConsistencyIssueKind::OrphanRenderCache => {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM render_cache WHERE cache_key = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "delete_orphan_render_cache",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_deleted += changed as u64;
+                }
+                ConsistencyIssueKind::OrphanLinkSource => {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM links WHERE link_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "delete_orphan_link_source",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_deleted += changed as u64;
+                }
+                ConsistencyIssueKind::BrokenLinkTarget => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE links SET resolved_file_id = NULL, is_unresolved = 1 WHERE link_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "repair_broken_link_target",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_updated += changed as u64;
+                }
+                ConsistencyIssueKind::LinkResolutionMismatch => {
+                    let changed = transaction
+                        .execute(
+                            "UPDATE links SET is_unresolved = CASE WHEN resolved_file_id IS NULL THEN 1 ELSE 0 END WHERE link_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "repair_link_resolution_mismatch",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_updated += changed as u64;
+                }
+                ConsistencyIssueKind::OutsideVaultRoot
+                | ConsistencyIssueKind::MissingOnDiskFile => {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM files WHERE file_id = ?1",
+                            params![issue.record_id],
+                        )
+                        .map_err(|source| IndexSelfHealError::ExecuteSql {
+                            operation: "delete_inconsistent_file_row",
+                            record_id: issue.record_id.clone(),
+                            source: Box::new(source),
+                        })?;
+                    rows_deleted += changed as u64;
+                }
+            }
+        }
+
+        transaction
+            .commit()
+            .map_err(|source| IndexSelfHealError::CommitTransaction {
+                source: Box::new(source),
+            })?;
+
+        let after = self
+            .checker
+            .check(vault_root, connection)
+            .map_err(|source| IndexSelfHealError::CheckAfter {
+                source: Box::new(source),
+            })?;
+
+        Ok(IndexSelfHealResult {
+            issues_detected: before.issues.len() as u64,
+            rows_deleted,
+            rows_updated,
+            remaining_issues: after.issues.len() as u64,
+        })
+    }
+}
+
 fn query_orphan_properties(
     connection: &Connection,
 ) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
@@ -2188,6 +2359,50 @@ pub enum IndexConsistencyError {
     },
 }
 
+/// Index self-heal workflow failures.
+#[derive(Debug, Error)]
+pub enum IndexSelfHealError {
+    /// Running pre-repair consistency check failed.
+    #[error("failed to run pre-repair consistency check: {source}")]
+    CheckBefore {
+        /// Consistency checker error.
+        #[source]
+        source: Box<IndexConsistencyError>,
+    },
+    /// Starting self-heal transaction failed.
+    #[error("failed to begin index self-heal transaction: {source}")]
+    BeginTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Executing one repair SQL operation failed.
+    #[error("failed to execute self-heal sql '{operation}' for record '{record_id}': {source}")]
+    ExecuteSql {
+        /// SQL operation identifier.
+        operation: &'static str,
+        /// Record identifier targeted for repair.
+        record_id: String,
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Committing self-heal transaction failed.
+    #[error("failed to commit index self-heal transaction: {source}")]
+    CommitTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Running post-repair consistency check failed.
+    #[error("failed to run post-repair consistency check: {source}")]
+    CheckAfter {
+        /// Consistency checker error.
+        #[source]
+        source: Box<IndexConsistencyError>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2203,7 +2418,7 @@ mod tests {
 
     use super::{
         CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, ConsistencyIssueKind,
-        FullIndexService, IncrementalIndexService, IndexConsistencyChecker,
+        FullIndexService, IncrementalIndexService, IndexConsistencyChecker, IndexSelfHealService,
         ReconciliationScannerService, StaleCleanupService,
     };
 
@@ -2727,6 +2942,84 @@ mod tests {
             .check(temp.path(), &connection)
             .expect("run consistency checker");
         assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn self_heal_repairs_common_consistency_issues() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::remove_file(temp.path().join("notes/b.md")).expect("remove b from disk");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a file row")
+            .expect("a file exists");
+
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("disable foreign key checks for injected corruption");
+        connection
+            .execute(
+                "INSERT INTO properties (property_id, file_id, key, value_type, value_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["prop_orphan_2", "file_missing_x", "status", "string", "\"draft\""],
+            )
+            .expect("insert orphan property");
+        connection
+            .execute(
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
+                rusqlite::params!["link_broken_target_2", source_a.file_id, "missing-target", "file_missing_y", 0_i64],
+            )
+            .expect("insert broken target link");
+        connection
+            .execute(
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4)",
+                rusqlite::params!["link_resolution_mismatch_2", source_a.file_id, "mismatch", 0_i64],
+            )
+            .expect("insert resolution mismatch link");
+
+        let heal_result = IndexSelfHealService::default()
+            .heal(temp.path(), &mut connection)
+            .expect("run self-heal");
+
+        assert!(heal_result.issues_detected > 0);
+        assert!(heal_result.rows_deleted > 0);
+        assert!(heal_result.rows_updated > 0);
+        assert_eq!(heal_result.remaining_issues, 0);
+
+        let report_after = IndexConsistencyChecker
+            .check(temp.path(), &connection)
+            .expect("run consistency checker after heal");
+        assert!(report_after.issues.is_empty());
+    }
+
+    #[test]
+    fn self_heal_is_noop_for_consistent_index() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let heal_result = IndexSelfHealService::default()
+            .heal(temp.path(), &mut connection)
+            .expect("run self-heal");
+
+        assert_eq!(heal_result.issues_detected, 0);
+        assert_eq!(heal_result.rows_deleted, 0);
+        assert_eq!(heal_result.rows_updated, 0);
+        assert_eq!(heal_result.remaining_issues, 0);
     }
 
     #[test]

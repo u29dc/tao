@@ -24,8 +24,9 @@ pub use indexing::{
     CoalescedBatchIndexResult, CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexError,
     FullIndexResult, FullIndexService, IncrementalIndexResult, IncrementalIndexService,
     IndexConsistencyChecker, IndexConsistencyError, IndexConsistencyIssue, IndexConsistencyReport,
-    ReconciliationScanError, ReconciliationScanResult, ReconciliationScannerService,
-    StaleCleanupError, StaleCleanupResult, StaleCleanupService,
+    IndexSelfHealError, IndexSelfHealResult, IndexSelfHealService, ReconciliationScanError,
+    ReconciliationScanResult, ReconciliationScannerService, StaleCleanupError, StaleCleanupResult,
+    StaleCleanupService,
 };
 pub use tracing_hooks::ServiceTraceContext;
 
