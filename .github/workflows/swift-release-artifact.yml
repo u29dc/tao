@@ -19,7 +19,7 @@ jobs:
           xcode-version: latest-stable
 
       - name: swift test
-        run: swift test
+        run: swift test --configuration release
         working-directory: apps/tao-macos
 
       - name: build signed app bundle

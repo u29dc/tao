@@ -49,4 +49,4 @@ jobs:
             bench/reports/startup-budgets.json
 
       - name: build
-        run: cargo build --workspace
+        run: cargo build --workspace --release

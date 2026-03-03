@@ -409,9 +409,9 @@ Target scripts (pattern-aligned with your repos):
 - `build`: release build for workspace binaries + install copy targets
 - `util:format`: `cargo fmt --all`
 - `util:lint`: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `util:types`: `cargo check --workspace`
-- `util:test`: `cargo test --workspace`
-- `util:build`: `cargo build --workspace`
+- `util:types`: `cargo check --workspace --release`
+- `util:test`: `cargo test --workspace --release`
+- `util:build`: `cargo build --workspace --release && swift build --configuration release --package-path apps/tao-macos --product TaoMacOSApp`
 - `util:audit`: `cargo audit`
 - `util:check`: full chained gate
 

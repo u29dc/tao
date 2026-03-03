@@ -19,9 +19,9 @@ jobs:
           xcode-version: latest-stable
 
       - name: swift build
-        run: swift build
+        run: swift build --configuration release
         working-directory: apps/tao-macos
 
       - name: swift test
-        run: swift test
+        run: swift test --configuration release
         working-directory: apps/tao-macos

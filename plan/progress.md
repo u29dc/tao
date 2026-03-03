@@ -1382,3 +1382,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:clean, bun run util:check, swift test --package-path apps/tao-macos]
   - outcomes: [cold-cache cleanup completed, rust quality gate passed, release artifacts rebuilt, swift package tests passed]
 - residual_risk: cargo audit reports allowed advisories inherited via ratatui dependencies (paste unmaintained, lru unsound advisory); no direct workspace blocker under current allow policy
+
+- timestamp: 2026-03-03T23:44:00Z
+- session: session-2026-03-03-b
+- ticket: BUILD-001
+- action: done
+- evidence:
+  - files: [package.json, scripts/check-perf-budgets.sh, .github/workflows/rust-ci.yml, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [default rust and swift build/test scripts now run release configuration, perf budget script runs release bench binary, ci definitions aligned to release build defaults]
+- residual_risk: workflows are disabled manually at repository level; file-level workflow defaults are ready for future re-enable

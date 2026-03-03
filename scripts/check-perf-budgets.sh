@@ -8,7 +8,7 @@ STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 mkdir -p "${REPORT_DIR}"
 
 echo "Running bridge latency budget gate..."
-cargo run -p tao-bench -- \
+cargo run --release -p tao-bench -- \
   --scenario bridge \
   --iterations 200 \
   --enforce-budgets \
@@ -17,7 +17,7 @@ cargo run -p tao-bench -- \
   --json-out "${BRIDGE_REPORT}"
 
 echo "Running startup latency budget gate..."
-cargo run -p tao-bench -- \
+cargo run --release -p tao-bench -- \
   --scenario startup \
   --iterations 50 \
   --bridge-notes 1000 \

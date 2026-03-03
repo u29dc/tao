@@ -16,11 +16,11 @@
     "util:clean": "./scripts/clean.sh",
     "util:format": "cargo fmt --all",
     "util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-    "util:types": "cargo check --workspace",
-    "util:test": "cargo test --workspace",
-    "util:build": "cargo build --workspace",
+    "util:types": "cargo check --workspace --release",
+    "util:test": "cargo test --workspace --release",
+    "util:build": "cargo build --workspace --release && swift build --configuration release --package-path apps/tao-macos --product TaoMacOSApp",
     "util:audit": "cargo audit",
-    "util:bench:bridge": "cargo run -p tao-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
+    "util:bench:bridge": "cargo run --release -p tao-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
     "util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build"
   },
   "devDependencies": {
