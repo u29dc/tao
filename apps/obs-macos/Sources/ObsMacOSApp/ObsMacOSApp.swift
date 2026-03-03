@@ -32,6 +32,10 @@ private struct ObsRootSplitView: View {
     @State private var selectedNote: BridgeNoteView?
     @State private var noteError: String?
     @State private var isLoadingNote = false
+    @State private var frontMatterDraft = ""
+    @State private var propertiesStatus: String?
+    @State private var propertiesError: String?
+    @State private var isSavingProperties = false
     @StateObject private var fileTreeViewModel = FileTreeViewModel()
 
     var body: some View {
@@ -109,6 +113,54 @@ private struct ObsRootSplitView: View {
                             Text(.init(selectedNote.body))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            Divider()
+                            Text("Properties")
+                                .font(.headline)
+
+                            if parsedFrontMatter(from: frontMatterDraft).isEmpty {
+                                Text("No parsed properties")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(parsedFrontMatter(from: frontMatterDraft), id: \.key) { entry in
+                                    HStack {
+                                        Text(entry.key)
+                                            .font(.caption.weight(.semibold))
+                                        Spacer()
+                                        Text(entry.value)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+
+                            TextEditor(text: $frontMatterDraft)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(minHeight: 140)
+                                .border(.quaternary)
+
+                            HStack(spacing: 12) {
+                                Button("Save Properties") {
+                                    saveProperties()
+                                }
+                                .disabled(isSavingProperties)
+
+                                if isSavingProperties {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                            }
+
+                            if let propertiesStatus {
+                                Text(propertiesStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let propertiesError {
+                                Text(propertiesError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -236,6 +288,8 @@ private struct ObsRootSplitView: View {
                     fileTreeViewModel.bindVault(vaultRoot: root, dbPath: db)
                     selectedNote = nil
                     noteError = nil
+                    propertiesStatus = nil
+                    propertiesError = nil
                     isLoadingStats = false
                 }
             } catch {
@@ -289,13 +343,83 @@ private struct ObsRootSplitView: View {
                 }.value
                 await MainActor.run {
                     selectedNote = note
+                    frontMatterDraft = note.frontMatter ?? ""
+                    propertiesStatus = nil
+                    propertiesError = nil
                     isLoadingNote = false
                 }
             } catch {
                 await MainActor.run {
                     selectedNote = nil
                     noteError = "note read failed: \(error)"
+                    propertiesStatus = nil
+                    propertiesError = nil
                     isLoadingNote = false
+                }
+            }
+        }
+    }
+
+    private func parsedFrontMatter(from raw: String) -> [(key: String, value: String)] {
+        raw
+            .split(separator: "\n")
+            .compactMap { line in
+                let pieces = line.split(separator: ":", maxSplits: 1).map(String.init)
+                guard pieces.count == 2 else {
+                    return nil
+                }
+                return (
+                    key: pieces[0].trimmingCharacters(in: .whitespacesAndNewlines),
+                    value: pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+            .filter { !$0.key.isEmpty }
+    }
+
+    private func saveProperties() {
+        guard let selectedNote else {
+            propertiesError = "select a note before saving properties"
+            return
+        }
+
+        let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !root.isEmpty, !db.isEmpty else {
+            propertiesError = "open a vault before saving properties"
+            return
+        }
+
+        let trimmedFrontMatter = frontMatterDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let content: String
+        if trimmedFrontMatter.isEmpty {
+            content = selectedNote.body
+        } else {
+            content = "---\n\(trimmedFrontMatter)\n---\n\(selectedNote.body)"
+        }
+
+        isSavingProperties = true
+        propertiesError = nil
+        propertiesStatus = nil
+
+        Task {
+            do {
+                _ = try await Task.detached(priority: .userInitiated) {
+                    try ObsBridgeClient().notePut(
+                        vaultRoot: root,
+                        dbPath: db,
+                        path: selectedNote.path,
+                        content: content
+                    )
+                }.value
+                await MainActor.run {
+                    propertiesStatus = "properties saved"
+                    isSavingProperties = false
+                    loadSelectedNote(path: selectedNote.path)
+                }
+            } catch {
+                await MainActor.run {
+                    propertiesError = "properties save failed: \(error)"
+                    isSavingProperties = false
                 }
             }
         }

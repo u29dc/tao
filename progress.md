@@ -872,3 +872,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [note selection now triggers bridge `noteGet` reads with async loading/error handling, and inspector pane renders selected note markdown/title content directly from Rust-backed payloads]
 - residual_risk: markdown rendering currently uses native `Text(.init(...))` without advanced syntax theming or embedded resource handling, so rich renderer parity remains a future UI enhancement
+
+- timestamp: 2026-03-03T18:23:39Z
+- session: session-2026-03-03-a
+- ticket: APP-006
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [properties pane added to inspector with parsed frontmatter key/value display, editable raw frontmatter text area, and `Save Properties` flow that persists through bridge `notePut` then reloads the note]
+- residual_risk: property editing currently rewrites full frontmatter block text without schema/type guardrails, so richer typed property controls remain future UX hardening work
