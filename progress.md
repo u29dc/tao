@@ -892,3 +892,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [bridge `note-links` endpoint added with outgoing/backlink DTOs and CLI command; Swift client now exposes typed `noteLinks` API; inspector renders outgoing and backlink panels for selected notes with loading/error states]
 - residual_risk: current bridge link panel payload omits display-text extraction and advanced fragment semantics, so richer link presentation can be layered without changing panel wiring
+
+- timestamp: 2026-03-03T18:31:49Z
+- session: session-2026-03-03-a
+- ticket: APP-008
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [added app-level Navigate command with `cmd+k` shortcut, quick-open sheet UI, query filtering over loaded note summaries, and direct note selection routing so command palette opens notes by search]
+- residual_risk: quick-open currently searches the loaded in-memory note summary window, so very large vaults still require additional pagination loads before all notes become discoverable

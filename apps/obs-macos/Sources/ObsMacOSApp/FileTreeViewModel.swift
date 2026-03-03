@@ -21,6 +21,10 @@ final class FileTreeViewModel: ObservableObject {
     private var nextCursor: String?
     private var summaries: [BridgeNoteSummary] = []
 
+    var hasLoadedNotes: Bool {
+        !summaries.isEmpty
+    }
+
     func bindVault(vaultRoot: String, dbPath: String) {
         guard self.vaultRoot != vaultRoot || self.dbPath != dbPath else {
             return
@@ -77,6 +81,22 @@ final class FileTreeViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func quickOpenMatches(query: String, limit: Int = 25) -> [BridgeNoteSummary] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return Array(summaries.prefix(limit))
+        }
+
+        let needle = trimmed.lowercased()
+        return summaries
+            .filter { summary in
+                summary.path.lowercased().contains(needle)
+                    || summary.title.lowercased().contains(needle)
+            }
+            .prefix(limit)
+            .map { $0 }
     }
 }
 

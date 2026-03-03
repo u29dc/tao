@@ -4,10 +4,20 @@ import ObsMacOSAppScaffold
 
 @main
 struct ObsMacOSApp: App {
+    @State private var quickOpenCommandNonce = 0
+
     var body: some Scene {
         WindowGroup {
-            ObsRootSplitView()
+            ObsRootSplitView(quickOpenCommandNonce: $quickOpenCommandNonce)
                 .frame(minWidth: 1120, minHeight: 720)
+        }
+        .commands {
+            CommandMenu("Navigate") {
+                Button("Quick Open Note") {
+                    quickOpenCommandNonce &+= 1
+                }
+                .keyboardShortcut("k", modifiers: [.command])
+            }
         }
     }
 }
@@ -21,6 +31,7 @@ private enum SidebarItem: String, CaseIterable, Identifiable {
 }
 
 private struct ObsRootSplitView: View {
+    @Binding var quickOpenCommandNonce: Int
     @State private var selectedSidebarItem: SidebarItem? = .notes
     @State private var selectedTreePath: String?
     @State private var vaultRoot = ""
@@ -39,7 +50,14 @@ private struct ObsRootSplitView: View {
     @State private var linkPanels: BridgeLinkPanels?
     @State private var linksError: String?
     @State private var isLoadingLinks = false
+    @State private var isQuickOpenPresented = false
+    @State private var quickOpenQuery = ""
+    @FocusState private var isQuickOpenQueryFocused: Bool
     @StateObject private var fileTreeViewModel = FileTreeViewModel()
+
+    private var quickOpenResults: [BridgeNoteSummary] {
+        fileTreeViewModel.quickOpenMatches(query: quickOpenQuery, limit: 40)
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -241,6 +259,64 @@ private struct ObsRootSplitView: View {
         .onChange(of: selectedTreePath) { _, newValue in
             loadSelectedNote(path: newValue)
         }
+        .onChange(of: quickOpenCommandNonce) { _, _ in
+            presentQuickOpen()
+        }
+        .sheet(isPresented: $isQuickOpenPresented) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Quick Open")
+                    .font(.headline)
+
+                Text("Search loaded notes by title or path.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("Type to search...", text: $quickOpenQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isQuickOpenQueryFocused)
+                    .onSubmit {
+                        if let firstMatch = quickOpenResults.first {
+                            openNoteFromQuickOpen(path: firstMatch.path)
+                        }
+                    }
+
+                if !fileTreeViewModel.hasLoadedNotes {
+                    Text("No notes loaded yet. Open a vault and load notes to enable quick open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if quickOpenResults.isEmpty {
+                    Text("No matches for \"\(quickOpenQuery)\"")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    List(quickOpenResults, id: \.path) { summary in
+                        Button {
+                            openNoteFromQuickOpen(path: summary.path)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(summary.title.isEmpty ? summary.path : summary.title)
+                                    .lineLimit(1)
+                                Text(summary.path)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .listStyle(.plain)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .frame(minWidth: 680, minHeight: 420)
+            .onAppear {
+                isQuickOpenQueryFocused = true
+            }
+        }
     }
 
     private func icon(for item: SidebarItem) -> String {
@@ -288,6 +364,11 @@ private struct ObsRootSplitView: View {
                     fileTreeViewModel.loadNextPage()
                 }
                 .disabled(!fileTreeViewModel.canLoadMore || fileTreeViewModel.isLoading)
+
+                Button("Quick Open...") {
+                    presentQuickOpen()
+                }
+                .disabled(openedVaultRoot == nil)
 
                 if fileTreeViewModel.isLoading {
                     ProgressView()
@@ -513,5 +594,27 @@ private struct ObsRootSplitView: View {
                 }
             }
         }
+    }
+
+    private func presentQuickOpen() {
+        guard openedVaultRoot != nil else {
+            return
+        }
+
+        selectedSidebarItem = .notes
+        if !fileTreeViewModel.hasLoadedNotes {
+            fileTreeViewModel.loadNextPage()
+        }
+        quickOpenQuery = ""
+        isQuickOpenPresented = true
+    }
+
+    private func openNoteFromQuickOpen(path: String) {
+        if selectedTreePath == path {
+            loadSelectedNote(path: path)
+        } else {
+            selectedTreePath = path
+        }
+        isQuickOpenPresented = false
     }
 }
