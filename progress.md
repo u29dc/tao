@@ -702,3 +702,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [service-level base table executor added to run compiled plans against sqlite metadata with source scoping, filter evaluation, deterministic sort, pagination, column projection, and typed error handling for malformed property payloads]
 - residual_risk: current executor computes row sets in-memory from repository scans, so very large vaults may require future SQL-pushdown optimization for tighter latency/memory budgets
+
+- timestamp: 2026-03-03T17:36:20Z
+- session: session-2026-03-03-a
+- ticket: BASE-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [base column config persistence service added to update and persist ordered column layouts plus visibility flags in stored base config json, with tests covering successful updates, missing views, and invalid legacy payload handling]
+- residual_risk: persistence currently expects base config json to decode into the typed BaseDocument schema, so legacy non-conforming payloads need migration or normalization before edit operations

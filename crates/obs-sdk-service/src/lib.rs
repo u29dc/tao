@@ -32,8 +32,8 @@ pub use indexing::{
 pub use tracing_hooks::ServiceTraceContext;
 
 use obs_sdk_bases::{
-    BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseSortClause, BaseSortDirection,
-    TableQueryPlan,
+    BaseColumnConfig, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
+    BaseSortDirection, TableQueryPlan,
 };
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
@@ -41,8 +41,8 @@ use obs_sdk_markdown::{
 };
 use obs_sdk_properties::{FrontMatterStatus, TypedPropertyValue, extract_front_matter};
 use obs_sdk_storage::{
-    FileRecordInput, FilesRepository, LinksRepository, PropertiesRepository, PropertyRecordInput,
-    StorageTransactionError, with_transaction,
+    BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, LinksRepository,
+    PropertiesRepository, PropertyRecordInput, StorageTransactionError, with_transaction,
 };
 use obs_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
@@ -1553,6 +1553,146 @@ pub enum BaseTableExecutorError {
     },
 }
 
+/// Column persistence result for one base view update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseColumnConfigPersistResult {
+    /// Base identifier.
+    pub base_id: String,
+    /// View name that was updated.
+    pub view_name: String,
+    /// Number of persisted columns.
+    pub columns_total: u64,
+}
+
+/// Persistence service for updating base view column order/visibility config.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BaseColumnConfigPersistenceService;
+
+impl BaseColumnConfigPersistenceService {
+    /// Persist the full ordered column configuration for one base view.
+    pub fn persist_view_columns(
+        &self,
+        connection: &Connection,
+        base_id: &str,
+        view_name: &str,
+        columns: Vec<BaseColumnConfig>,
+    ) -> Result<BaseColumnConfigPersistResult, BaseColumnConfigPersistError> {
+        if base_id.trim().is_empty() {
+            return Err(BaseColumnConfigPersistError::InvalidInput {
+                field: "base_id".to_string(),
+            });
+        }
+        if view_name.trim().is_empty() {
+            return Err(BaseColumnConfigPersistError::InvalidInput {
+                field: "view_name".to_string(),
+            });
+        }
+
+        let Some(base) = BasesRepository::get_by_id(connection, base_id)
+            .map_err(|source| BaseColumnConfigPersistError::Repository { source })?
+        else {
+            return Err(BaseColumnConfigPersistError::BaseNotFound {
+                base_id: base_id.to_string(),
+            });
+        };
+
+        let mut document =
+            serde_json::from_str::<BaseDocument>(&base.config_json).map_err(|source| {
+                BaseColumnConfigPersistError::DeserializeConfig {
+                    base_id: base.base_id.clone(),
+                    source,
+                }
+            })?;
+
+        let (resolved_view_name, columns_total) = {
+            let Some(view) = document
+                .views
+                .iter_mut()
+                .find(|view| view.name.eq_ignore_ascii_case(view_name))
+            else {
+                return Err(BaseColumnConfigPersistError::ViewNotFound {
+                    base_id: base.base_id.clone(),
+                    view_name: view_name.to_string(),
+                });
+            };
+            view.columns = columns;
+            (view.name.clone(), view.columns.len() as u64)
+        };
+
+        let config_json = serde_json::to_string(&document).map_err(|source| {
+            BaseColumnConfigPersistError::SerializeConfig {
+                base_id: base.base_id.clone(),
+                source,
+            }
+        })?;
+        BasesRepository::upsert(
+            connection,
+            &BaseRecordInput {
+                base_id: base.base_id.clone(),
+                file_id: base.file_id.clone(),
+                config_json,
+            },
+        )
+        .map_err(|source| BaseColumnConfigPersistError::Repository { source })?;
+
+        Ok(BaseColumnConfigPersistResult {
+            base_id: base.base_id,
+            view_name: resolved_view_name,
+            columns_total,
+        })
+    }
+}
+
+/// Base column configuration persistence failures.
+#[derive(Debug, Error)]
+pub enum BaseColumnConfigPersistError {
+    /// Required input field was empty.
+    #[error("base column persistence input '{field}' must not be empty")]
+    InvalidInput {
+        /// Field name.
+        field: String,
+    },
+    /// Requested base row was not found.
+    #[error("base row '{base_id}' not found")]
+    BaseNotFound {
+        /// Base id.
+        base_id: String,
+    },
+    /// Stored config JSON failed to decode into a base document.
+    #[error("failed to decode base config json for '{base_id}': {source}")]
+    DeserializeConfig {
+        /// Base id.
+        base_id: String,
+        /// JSON parse error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Requested view was not present in base config.
+    #[error("view '{view_name}' not found in base '{base_id}'")]
+    ViewNotFound {
+        /// Base id.
+        base_id: String,
+        /// View name.
+        view_name: String,
+    },
+    /// Updated base config failed to serialize.
+    #[error("failed to serialize updated base config for '{base_id}': {source}")]
+    SerializeConfig {
+        /// Base id.
+        base_id: String,
+        /// JSON serialization error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Repository operation failed.
+    #[error("base repository operation failed while persisting columns: {source}")]
+    Repository {
+        /// Repository error.
+        #[source]
+        source: obs_sdk_storage::BasesRepositoryError,
+    },
+}
+
 /// Reconcile run result over files metadata and on-disk vault contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileResult {
@@ -2059,23 +2199,23 @@ mod tests {
     use std::path::Path;
 
     use obs_sdk_bases::{
-        BaseColumnConfig, BaseFilterClause, BaseFilterOp, BaseSortClause, BaseSortDirection,
-        TableQueryPlan,
+        BaseColumnConfig, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
+        BaseSortDirection, BaseViewDefinition, BaseViewKind, TableQueryPlan,
     };
     use obs_sdk_properties::TypedPropertyValue;
     use obs_sdk_storage::{
-        FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
-        PropertyRecordInput, run_migrations,
+        BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, LinkRecordInput,
+        LinksRepository, PropertiesRepository, PropertyRecordInput, run_migrations,
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
 
     use super::{
-        BacklinkGraphService, BaseTableExecutorError, BaseTableExecutorService, CasePolicy,
-        HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        PropertyQueryRequest, PropertyQueryService, PropertyQuerySort, PropertyUpdateService,
-        ReconcileService, SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService,
-        WatcherStatus,
+        BacklinkGraphService, BaseColumnConfigPersistError, BaseColumnConfigPersistenceService,
+        BaseTableExecutorError, BaseTableExecutorService, CasePolicy, HealthSnapshotService,
+        MarkdownIngestPipeline, NoteCrudError, NoteCrudService, PropertyQueryRequest,
+        PropertyQueryService, PropertyQuerySort, PropertyUpdateService, ReconcileService,
+        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -3282,6 +3422,178 @@ mod tests {
             error,
             BaseTableExecutorError::ParsePropertyValue { file_id, key, .. }
             if file_id == "f1" && key == "status"
+        ));
+    }
+
+    #[test]
+    fn base_column_persistence_updates_column_order_and_visibility() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f-base",
+                "views/projects.base",
+                "views/projects.base",
+                "/vault/views/projects.base",
+            ),
+        )
+        .expect("insert base file");
+
+        let document = BaseDocument {
+            views: vec![BaseViewDefinition {
+                name: "Projects".to_string(),
+                kind: BaseViewKind::Table,
+                source: Some("notes/projects".to_string()),
+                filters: Vec::new(),
+                sorts: Vec::new(),
+                columns: vec![
+                    BaseColumnConfig {
+                        key: "status".to_string(),
+                        label: None,
+                        width: None,
+                        hidden: false,
+                    },
+                    BaseColumnConfig {
+                        key: "due".to_string(),
+                        label: None,
+                        width: None,
+                        hidden: false,
+                    },
+                ],
+                extras: serde_json::Map::new(),
+            }],
+        };
+        let config_json = serde_json::to_string(&document).expect("serialize base config");
+        BasesRepository::upsert(
+            &connection,
+            &BaseRecordInput {
+                base_id: "b1".to_string(),
+                file_id: "f-base".to_string(),
+                config_json,
+            },
+        )
+        .expect("insert base row");
+
+        let result = BaseColumnConfigPersistenceService
+            .persist_view_columns(
+                &connection,
+                "b1",
+                "projects",
+                vec![
+                    BaseColumnConfig {
+                        key: "due".to_string(),
+                        label: None,
+                        width: None,
+                        hidden: false,
+                    },
+                    BaseColumnConfig {
+                        key: "status".to_string(),
+                        label: Some("Status".to_string()),
+                        width: Some(120),
+                        hidden: true,
+                    },
+                ],
+            )
+            .expect("persist column layout");
+        assert_eq!(result.base_id, "b1");
+        assert_eq!(result.view_name, "Projects");
+        assert_eq!(result.columns_total, 2);
+
+        let persisted = BasesRepository::get_by_id(&connection, "b1")
+            .expect("load persisted base")
+            .expect("base exists");
+        let persisted_document =
+            serde_json::from_str::<BaseDocument>(&persisted.config_json).expect("parse persisted");
+        let columns = &persisted_document.views[0].columns;
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].key, "due");
+        assert_eq!(columns[1].key, "status");
+        assert!(columns[1].hidden);
+        assert_eq!(columns[1].label.as_deref(), Some("Status"));
+    }
+
+    #[test]
+    fn base_column_persistence_reports_missing_view() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f-base",
+                "views/projects.base",
+                "views/projects.base",
+                "/vault/views/projects.base",
+            ),
+        )
+        .expect("insert base file");
+        let config_json = serde_json::to_string(&BaseDocument {
+            views: vec![BaseViewDefinition {
+                name: "Projects".to_string(),
+                kind: BaseViewKind::Table,
+                source: None,
+                filters: Vec::new(),
+                sorts: Vec::new(),
+                columns: Vec::new(),
+                extras: serde_json::Map::new(),
+            }],
+        })
+        .expect("serialize base config");
+        BasesRepository::upsert(
+            &connection,
+            &BaseRecordInput {
+                base_id: "b1".to_string(),
+                file_id: "f-base".to_string(),
+                config_json,
+            },
+        )
+        .expect("insert base row");
+
+        let error = BaseColumnConfigPersistenceService
+            .persist_view_columns(&connection, "b1", "missing", Vec::new())
+            .expect_err("missing view should fail");
+        assert!(matches!(
+            error,
+            BaseColumnConfigPersistError::ViewNotFound {
+                base_id,
+                view_name
+            } if base_id == "b1" && view_name == "missing"
+        ));
+    }
+
+    #[test]
+    fn base_column_persistence_reports_invalid_stored_config_payload() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f-base",
+                "views/projects.base",
+                "views/projects.base",
+                "/vault/views/projects.base",
+            ),
+        )
+        .expect("insert base file");
+        BasesRepository::upsert(
+            &connection,
+            &BaseRecordInput {
+                base_id: "b1".to_string(),
+                file_id: "f-base".to_string(),
+                config_json: "{\"raw\":\"legacy\"}".to_string(),
+            },
+        )
+        .expect("insert legacy base row");
+
+        let error = BaseColumnConfigPersistenceService
+            .persist_view_columns(&connection, "b1", "projects", Vec::new())
+            .expect_err("invalid config should fail");
+        assert!(matches!(
+            error,
+            BaseColumnConfigPersistError::DeserializeConfig { base_id, .. } if base_id == "b1"
         ));
     }
 }
