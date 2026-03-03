@@ -9,5 +9,8 @@ rust-version.workspace = true
 name = "obs-tui"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 obs-sdk-service = { path = "../obs-sdk-service" }

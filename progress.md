@@ -143,3 +143,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [workspace skeleton crates compile successfully]
 - residual_risk: placeholder implementations only
 
+- timestamp: 2026-03-03T15:43:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-002
+- action: done
+- evidence:
+  - files: [Cargo.toml, crates/*/Cargo.toml, tickets.csv, run-state.json]
+  - commands: [cargo check --workspace, cargo clippy --workspace --all-targets --all-features -- -D warnings]
+  - outcomes: [workspace unsafe forbid lint policy enabled and validated]
+- residual_risk: strict clippy groups beyond all are deferred to avoid placeholder churn
+
