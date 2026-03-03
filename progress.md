@@ -222,3 +222,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [release and bench profile tuning aligned to performance contract; lockfile synced]
 - residual_risk: panic=abort reduces runtime overhead but requires panic-free boundary discipline in ffi paths
+
+- timestamp: 2026-03-03T16:39:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-001
+- action: done
+- evidence:
+  - files: [Cargo.toml, Cargo.lock, crates/obs-sdk-vault/Cargo.toml, crates/obs-sdk-vault/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [path canonicalization service implemented with unicode normalization, symlink resolution, case-policy keys, and vault-boundary checks]
+- residual_risk: canonicalization currently requires on-disk path existence and does not normalize non-existent create-target paths yet

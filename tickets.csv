@@ -19,7 +19,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "INFRA-006","Add cargo audit gate","infra","phase0","INFRA-004","done","P0","codex","3","0","","security audit job integrated in CI"
 "INFRA-007","Add benchmark harness scaffold","infra","phase0","DOC-006","done","P0","codex","3","0","","bench crate + baseline datasets checked in"
 "INFRA-008","Add release profile tuning","infra","phase0","INFRA-001","done","P0","codex","3","0","","release profile matches performance policy"
-"SDK-001","Implement path canonicalization service","sdk","phase1","INFRA-001","todo","P1","unassigned","3","0","","Handles unicode, symlink, case policy tests"
+"SDK-001","Implement path canonicalization service","sdk","phase1","INFRA-001","done","P1","codex","3","0","","Handles unicode, symlink, case policy tests"
 "SDK-002","Implement vault scan service","sdk","phase1","SDK-001","todo","P1","unassigned","3","0","","Full scan returns normalized file manifest"
 "SDK-003","Implement file fingerprint service","sdk","phase1","SDK-002","todo","P1","unassigned","3","0","","mtime/size/hash fingerprint logic tested"
 "SDK-004","Implement markdown ingest pipeline shell","sdk","phase1","SDK-002","todo","P1","unassigned","3","0","","Parser entrypoints and pipeline orchestrator compile"
