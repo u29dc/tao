@@ -402,3 +402,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [typed property projection implemented with normalized bool/number/date/list value handling]
 - residual_risk: date normalization currently uses lightweight iso-pattern matching; timezone-aware coercion can be tightened if required
+
+- timestamp: 2026-03-03T20:15:00Z
+- session: session-2026-03-03-a
+- ticket: LINK-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-links/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [deterministic path resolver implemented with same-folder, distance, and lexical tie-break ordering]
+- residual_risk: resolver currently compares markdown extension variants only (`.md`); additional extension strategies can be added if v1 scope expands

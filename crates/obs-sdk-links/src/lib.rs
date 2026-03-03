@@ -71,6 +71,67 @@ pub fn extract_wikilinks(markdown: &str) -> Vec<WikiLink> {
     links
 }
 
+/// Deterministic resolution result for a wikilink target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkResolution {
+    /// Selected resolved path when resolution succeeded.
+    pub resolved_path: Option<String>,
+    /// Sorted candidate paths considered by resolver.
+    pub matched_candidates: Vec<String>,
+    /// True when multiple candidates matched and tie-breakers selected one path.
+    pub is_ambiguous: bool,
+}
+
+/// Resolve raw target against candidate normalized paths using deterministic tie-breakers.
+#[must_use]
+pub fn resolve_target(
+    raw_target: &str,
+    source_path: Option<&str>,
+    candidates: &[String],
+) -> LinkResolution {
+    let target = parse_wikilink(raw_target)
+        .map(|link| link.target)
+        .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
+    let target = normalize_path_like(&target);
+
+    let mut matched_candidates: Vec<String> = if target.contains('/') {
+        candidates
+            .iter()
+            .filter(|candidate| normalized_candidate_equals_target(candidate, &target))
+            .cloned()
+            .collect()
+    } else {
+        let target_basename = basename_without_extension(&target);
+        candidates
+            .iter()
+            .filter(|candidate| {
+                basename_without_extension(&normalize_path_like(candidate))
+                    .eq_ignore_ascii_case(&target_basename)
+            })
+            .cloned()
+            .collect()
+    };
+
+    if matched_candidates.is_empty() {
+        return LinkResolution {
+            resolved_path: None,
+            matched_candidates,
+            is_ambiguous: false,
+        };
+    }
+
+    let source_dir = source_path.map(parent_dir);
+    matched_candidates
+        .sort_by(|left, right| compare_candidates(left, right, source_dir.as_deref()));
+
+    let resolved_path = matched_candidates.first().cloned();
+    LinkResolution {
+        resolved_path,
+        is_ambiguous: matched_candidates.len() > 1,
+        matched_candidates,
+    }
+}
+
 fn strip_wikilink_wrappers(value: &str) -> &str {
     value
         .strip_prefix("[[")
@@ -108,6 +169,81 @@ fn split_fragments(value: &str) -> (&str, Option<String>, Option<String>) {
     (value.trim(), None, None)
 }
 
+fn normalize_path_like(value: &str) -> String {
+    value.replace('\\', "/").trim().to_string()
+}
+
+fn normalized_candidate_equals_target(candidate: &str, target: &str) -> bool {
+    let candidate = normalize_path_like(candidate);
+    let candidate_without_ext = strip_markdown_extension(&candidate);
+    let target_without_ext = strip_markdown_extension(target);
+    candidate_without_ext.eq_ignore_ascii_case(target_without_ext)
+}
+
+fn strip_markdown_extension(path: &str) -> &str {
+    path.strip_suffix(".md")
+        .or_else(|| path.strip_suffix(".MD"))
+        .unwrap_or(path)
+}
+
+fn basename_without_extension(path: &str) -> String {
+    let path = strip_markdown_extension(path);
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+fn parent_dir(path: &str) -> String {
+    let normalized = normalize_path_like(path);
+    let mut parts: Vec<&str> = normalized.split('/').collect();
+    if parts.len() <= 1 {
+        return String::new();
+    }
+    let _ = parts.pop();
+    parts.join("/")
+}
+
+fn compare_candidates(left: &str, right: &str, source_dir: Option<&str>) -> std::cmp::Ordering {
+    let left_dir = parent_dir(left);
+    let right_dir = parent_dir(right);
+
+    let left_same_folder = source_dir.is_some_and(|dir| left_dir.eq_ignore_ascii_case(dir));
+    let right_same_folder = source_dir.is_some_and(|dir| right_dir.eq_ignore_ascii_case(dir));
+    if left_same_folder != right_same_folder {
+        return right_same_folder.cmp(&left_same_folder);
+    }
+
+    if let Some(source_dir) = source_dir {
+        let left_distance = relative_distance(source_dir, left);
+        let right_distance = relative_distance(source_dir, right);
+        if left_distance != right_distance {
+            return left_distance.cmp(&right_distance);
+        }
+    }
+
+    normalize_path_like(left)
+        .to_lowercase()
+        .cmp(&normalize_path_like(right).to_lowercase())
+}
+
+fn relative_distance(source_dir: &str, candidate_path: &str) -> usize {
+    let from: Vec<&str> = source_dir
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let candidate_parent = parent_dir(candidate_path);
+    let to: Vec<&str> = candidate_parent
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    let common_prefix = from
+        .iter()
+        .zip(to.iter())
+        .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+        .count();
+
+    (from.len() - common_prefix) + (to.len() - common_prefix)
+}
+
 /// Wikilink parser failures.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WikiLinkParseError {
@@ -124,7 +260,7 @@ pub enum WikiLinkParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{WikiLinkParseError, extract_wikilinks, parse_wikilink};
+    use super::{WikiLinkParseError, extract_wikilinks, parse_wikilink, resolve_target};
 
     #[test]
     fn parse_supports_target_display_heading_and_block_forms() {
@@ -166,5 +302,47 @@ mod tests {
     fn parse_rejects_empty_target() {
         let error = parse_wikilink("[[]]").expect_err("empty link should fail");
         assert_eq!(error, WikiLinkParseError::Empty);
+    }
+
+    #[test]
+    fn resolve_target_prefers_same_folder_then_distance_then_lexical_order() {
+        let candidates = vec![
+            "notes/project/alpha.md".to_string(),
+            "notes/project/zeta.md".to_string(),
+            "archive/project/alpha.md".to_string(),
+        ];
+
+        let resolution = resolve_target("[[alpha]]", Some("notes/project/today.md"), &candidates);
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some("notes/project/alpha.md")
+        );
+        assert!(resolution.is_ambiguous);
+        assert_eq!(
+            resolution.matched_candidates,
+            vec!["notes/project/alpha.md", "archive/project/alpha.md"]
+        );
+    }
+
+    #[test]
+    fn resolve_target_handles_explicit_paths() {
+        let candidates = vec![
+            "notes/project/alpha.md".to_string(),
+            "notes/project/beta.md".to_string(),
+        ];
+
+        let resolution = resolve_target(
+            "[[notes/project/beta]]",
+            Some("notes/project/today.md"),
+            &candidates,
+        );
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some("notes/project/beta.md")
+        );
+        assert!(!resolution.is_ambiguous);
+        assert_eq!(resolution.matched_candidates, vec!["notes/project/beta.md"]);
     }
 }
