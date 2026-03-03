@@ -4,6 +4,14 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod import_export;
+
+pub use import_export::{
+    FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
+    TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
+    TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
+};
+
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
     MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,

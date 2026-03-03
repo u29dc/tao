@@ -422,3 +422,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [typed property update service implemented with front matter writeback, repository persistence, and re-parse validation]
 - residual_risk: property serialization currently rewrites full front matter block; preserving original key ordering/comments would need a YAML-preserving editor
+
+- timestamp: 2026-03-03T16:20:59Z
+- session: session-2026-03-03-a
+- ticket: SDK-011
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-service/src/import_export.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [import/export service boundaries implemented with typed transfer planning, dry-run/apply execution modes, and boundary contract tests]
+- residual_risk: transfer execution currently performs direct filesystem copies without conflict-resolution policies beyond overwrite toggle

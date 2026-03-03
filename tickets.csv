@@ -1,4 +1,4 @@
-id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blocked_reason,dod
+"id","title","area","phase","depends_on","status","priority","owner","max_retries","retry_count","blocked_reason","dod"
 "DOC-001","Create architecture ADR index","doc","phase0","","done","P0","codex","3","0","","`docs/adr/README.md` with numbering and template"
 "DOC-002","Write product scope contract v1","doc","phase0","DOC-001","done","P0","codex","3","0","","Scope doc lists in/out items and acceptance criteria"
 "DOC-003","Write Obsidian compatibility matrix","doc","phase0","DOC-001","done","P0","codex","3","0","","Matrix covers links, properties, bases, markdown subset"
@@ -29,7 +29,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "SDK-008","Implement note create/update/delete services","sdk","phase1","SDK-006","done","P1","codex","3","0","","CRUD flows pass integration tests"
 "SDK-009","Implement note rename/move services","sdk","phase1","SDK-008","done","P1","codex","3","0","","path + link re-resolution integration tests"
 "SDK-010","Implement health snapshot service","sdk","phase1","SDK-002","done","P1","codex","3","0","","reports index lag, db status, watcher status"
-"SDK-011","Implement import/export service boundaries","sdk","phase2","SDK-008","todo","P1","unassigned","3","0","","clear interfaces for future import jobs"
+"SDK-011","Implement import/export service boundaries","sdk","phase2","SDK-008","done","P1","codex","3","0","","clear interfaces for future import jobs"
 "SDK-012","Implement failure-safe rollback paths","sdk","phase2","SDK-006","todo","P1","unassigned","3","0","","failed writes rollback with no index corruption"
 "SDK-013","Implement idempotent reconcile service","sdk","phase2","SDK-003","todo","P1","unassigned","3","0","","repeated reconcile yields stable state"
 "SDK-014","Implement service-level tracing hooks","sdk","phase2","INFRA-004","todo","P1","unassigned","3","0","","structured traces with correlation ids"
