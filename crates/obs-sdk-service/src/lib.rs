@@ -21,7 +21,8 @@ pub use import_export::{
 };
 pub use indexing::{
     CoalescedBatchIndexResult, CoalescedBatchIndexService, FullIndexError, FullIndexResult,
-    FullIndexService, IncrementalIndexResult, IncrementalIndexService,
+    FullIndexService, IncrementalIndexResult, IncrementalIndexService, StaleCleanupError,
+    StaleCleanupResult, StaleCleanupService,
 };
 pub use tracing_hooks::ServiceTraceContext;
 

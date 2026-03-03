@@ -677,6 +677,103 @@ impl CoalescedBatchIndexService {
     }
 }
 
+/// Result payload for stale metadata cleanup workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleCleanupResult {
+    /// Number of files discovered in current vault scan.
+    pub scanned_files: u64,
+    /// Number of stale file rows removed.
+    pub stale_files_removed: u64,
+}
+
+/// Service for removing stale file metadata rows not present in the vault scan.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StaleCleanupService;
+
+impl StaleCleanupService {
+    /// Remove stale file rows and dependent records for files no longer present on disk.
+    pub fn cleanup(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+    ) -> Result<StaleCleanupResult, StaleCleanupError> {
+        let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
+            StaleCleanupError::CreateScanner {
+                source: Box::new(source),
+            }
+        })?;
+        let manifest = scanner.scan().map_err(|source| StaleCleanupError::Scan {
+            source: Box::new(source),
+        })?;
+
+        let live_paths = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.normalized.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let existing = FilesRepository::list_all(connection).map_err(|source| {
+            StaleCleanupError::ListFiles {
+                source: Box::new(source),
+            }
+        })?;
+        let stale_ids = existing
+            .into_iter()
+            .filter(|record| !live_paths.contains(&record.normalized_path))
+            .map(|record| record.file_id)
+            .collect::<Vec<_>>();
+
+        let transaction =
+            connection
+                .transaction()
+                .map_err(|source| StaleCleanupError::BeginTransaction {
+                    source: Box::new(source),
+                })?;
+
+        for file_id in &stale_ids {
+            FilesRepository::delete_by_id(&transaction, file_id).map_err(|source| {
+                StaleCleanupError::DeleteFileRow {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+
+        let summary_json = serde_json::to_string(&json!({
+            "mode": "stale_cleanup",
+            "scanned_files": manifest.entries.len(),
+            "stale_files_removed": stale_ids.len(),
+            "completed_unix_ms": current_unix_ms_raw().map_err(|source| StaleCleanupError::Clock {
+                source: Box::new(source),
+            })?,
+        }))
+        .map_err(|source| StaleCleanupError::SerializeSummary {
+            source: Box::new(source),
+        })?;
+
+        IndexStateRepository::upsert(
+            &transaction,
+            &IndexStateRecordInput {
+                key: "last_stale_cleanup_summary".to_string(),
+                value_json: summary_json,
+            },
+        )
+        .map_err(|source| StaleCleanupError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+
+        transaction
+            .commit()
+            .map_err(|source| StaleCleanupError::CommitTransaction {
+                source: Box::new(source),
+            })?;
+
+        Ok(StaleCleanupResult {
+            scanned_files: manifest.entries.len() as u64,
+            stale_files_removed: stale_ids.len() as u64,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -799,12 +896,13 @@ fn normalize_changed_path(path: &Path) -> Result<String, FullIndexError> {
 }
 
 fn current_unix_ms() -> Result<u128, FullIndexError> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|source| FullIndexError::Clock {
-            source: Box::new(source),
-        })?
-        .as_millis())
+    current_unix_ms_raw().map_err(|source| FullIndexError::Clock {
+        source: Box::new(source),
+    })
+}
+
+fn current_unix_ms_raw() -> Result<u128, std::time::SystemTimeError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
 }
 
 /// Full index rebuild failures.
@@ -986,6 +1084,74 @@ pub enum FullIndexError {
     },
 }
 
+/// Stale cleanup workflow failures.
+#[derive(Debug, Error)]
+pub enum StaleCleanupError {
+    /// Scanner initialization failed.
+    #[error("failed to initialize stale cleanup scanner: {source}")]
+    CreateScanner {
+        /// Scanner path error.
+        #[source]
+        source: Box<PathCanonicalizationError>,
+    },
+    /// Vault scan failed.
+    #[error("failed to scan vault for stale cleanup: {source}")]
+    Scan {
+        /// Scan error.
+        #[source]
+        source: Box<VaultScanError>,
+    },
+    /// Listing existing file rows failed.
+    #[error("failed to list file rows for stale cleanup: {source}")]
+    ListFiles {
+        /// Repository error.
+        #[source]
+        source: Box<obs_sdk_storage::FilesRepositoryError>,
+    },
+    /// Beginning sqlite transaction failed.
+    #[error("failed to begin stale cleanup transaction: {source}")]
+    BeginTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Deleting stale file row failed.
+    #[error("failed to delete stale file row: {source}")]
+    DeleteFileRow {
+        /// Repository error.
+        #[source]
+        source: Box<obs_sdk_storage::FilesRepositoryError>,
+    },
+    /// Serializing cleanup summary failed.
+    #[error("failed to serialize stale cleanup summary: {source}")]
+    SerializeSummary {
+        /// JSON serialization error.
+        #[source]
+        source: Box<serde_json::Error>,
+    },
+    /// Updating index state failed.
+    #[error("failed to persist stale cleanup summary state: {source}")]
+    UpsertIndexState {
+        /// Repository error.
+        #[source]
+        source: Box<obs_sdk_storage::IndexStateRepositoryError>,
+    },
+    /// Transaction commit failed.
+    #[error("failed to commit stale cleanup transaction: {source}")]
+    CommitTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Reading system clock failed.
+    #[error("failed to read current time during stale cleanup: {source}")]
+    Clock {
+        /// System time conversion error.
+        #[source]
+        source: Box<std::time::SystemTimeError>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -996,10 +1162,12 @@ mod tests {
         PropertiesRepository, run_migrations,
     };
     use rusqlite::Connection;
+    use serde_json::Value as JsonValue;
     use tempfile::tempdir;
 
     use super::{
         CasePolicy, CoalescedBatchIndexService, FullIndexService, IncrementalIndexService,
+        StaleCleanupService,
     };
 
     #[test]
@@ -1219,5 +1387,88 @@ mod tests {
             error,
             super::FullIndexError::InvalidBatchSize { .. }
         ));
+    }
+
+    #[test]
+    fn stale_cleanup_removes_rows_for_files_no_longer_in_vault() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::create_dir_all(temp.path().join("views")).expect("create views dir");
+        fs::write(temp.path().join("notes/live.md"), "# Live").expect("write live note");
+        fs::write(temp.path().join("notes/stale.md"), "# Stale").expect("write stale note");
+        fs::write(temp.path().join("views/old.base"), "views:\n  - table").expect("write base");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::remove_file(temp.path().join("notes/stale.md")).expect("remove stale note");
+        fs::remove_file(temp.path().join("views/old.base")).expect("remove stale base");
+
+        let result = StaleCleanupService
+            .cleanup(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("run stale cleanup");
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(result.stale_files_removed, 2);
+
+        let files = FilesRepository::list_all(&connection).expect("list files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].normalized_path, "notes/live.md");
+
+        let base_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM bases", [], |row| row.get(0))
+            .expect("count bases");
+        assert_eq!(base_rows, 0);
+
+        let summary_state =
+            IndexStateRepository::get_by_key(&connection, "last_stale_cleanup_summary")
+                .expect("get stale cleanup summary")
+                .expect("summary exists");
+        let summary_json: JsonValue =
+            serde_json::from_str(&summary_state.value_json).expect("parse summary json");
+        assert_eq!(
+            summary_json.get("mode").and_then(JsonValue::as_str),
+            Some("stale_cleanup")
+        );
+        assert_eq!(
+            summary_json
+                .get("scanned_files")
+                .and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            summary_json
+                .get("stale_files_removed")
+                .and_then(JsonValue::as_u64),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_is_noop_when_index_and_vault_match() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write note");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let result = StaleCleanupService
+            .cleanup(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("run stale cleanup");
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(result.stale_files_removed, 0);
+        assert!(
+            FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+                .expect("get note")
+                .is_some()
+        );
     }
 }
