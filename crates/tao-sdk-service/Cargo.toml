@@ -1,0 +1,32 @@
+[package]
+name = "tao-sdk-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tao-sdk-bases = { path = "../tao-sdk-bases" }
+tao-sdk-core = { path = "../tao-sdk-core" }
+tao-sdk-links = { path = "../tao-sdk-links" }
+tao-sdk-markdown = { path = "../tao-sdk-markdown" }
+tao-sdk-properties = { path = "../tao-sdk-properties" }
+tao-sdk-storage = { path = "../tao-sdk-storage" }
+tao-sdk-vault = { path = "../tao-sdk-vault" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9.34"
+thiserror.workspace = true
+blake3.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"

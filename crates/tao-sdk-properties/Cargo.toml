@@ -1,0 +1,17 @@
+[package]
+name = "tao-sdk-properties"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_yaml = "0.9.34"
+thiserror.workspace = true

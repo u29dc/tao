@@ -12,7 +12,7 @@ Use this runbook for `rc` and stable releases of `obs` workspace artifacts.
 4. Run `./scripts/check-perf-budgets.sh`.
 5. Run `swift test --package-path apps/obs-macos`.
 6. Validate migration preflight path:
-   - `cargo run -p obs-cli -- --json vault preflight --vault-root <vault> --db-path <db>`
+   - `cargo run -p tao-cli -- --json vault preflight --vault-root <vault> --db-path <db>`
 7. Verify release docs are present:
    - `docs/release/versioning-policy.md`
    - `docs/release/release-runbook.md`

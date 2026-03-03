@@ -347,7 +347,7 @@ public struct ObsBridgeClient {
     private let repositoryRoot: URL
 
     public init(
-        bridgeCommand: [String] = ["cargo", "run", "--quiet", "-p", "obs-sdk-bridge", "--"],
+        bridgeCommand: [String] = ["cargo", "run", "--quiet", "-p", "tao-sdk-bridge", "--"],
         repositoryRoot: URL? = nil
     ) {
         self.bridgeCommand = bridgeCommand

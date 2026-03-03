@@ -12,7 +12,7 @@ Define database migration policy and versioning rules for SDK, CLI, and Swift ap
 
 ## Database Migration Rules
 
-- Forward-only SQL migrations in `crates/obs-sdk-storage/migrations/`.
+- Forward-only SQL migrations in `crates/tao-sdk-storage/migrations/`.
 - Migration files use ordered numeric prefix: `0001_*.sql`, `0002_*.sql`.
 - Apply migrations inside transaction when possible.
 - Record migration id + checksum in `schema_migrations` table.

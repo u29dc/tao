@@ -1,0 +1,29 @@
+[package]
+name = "tao-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tao"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tao-sdk-bases = { path = "../tao-sdk-bases" }
+tao-sdk-bridge = { path = "../tao-sdk-bridge" }
+tao-sdk-properties = { path = "../tao-sdk-properties" }
+tao-sdk-storage = { path = "../tao-sdk-storage" }
+tao-sdk-service = { path = "../tao-sdk-service" }
+tao-sdk-vault = { path = "../tao-sdk-vault" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"

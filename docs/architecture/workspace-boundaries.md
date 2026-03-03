@@ -8,25 +8,25 @@
 
 ## Crate Responsibilities
 
-- `obs-sdk-core`: shared primitives, ids, error envelope, time/path utilities.
-- `obs-sdk-vault`: vault path handling, discovery, and boundary checks.
-- `obs-sdk-markdown`: markdown parse/render and section extraction utilities.
-- `obs-sdk-links`: wikilink parser and deterministic resolution.
-- `obs-sdk-properties`: front matter extraction and typed projection.
-- `obs-sdk-bases`: `.base` parsing, validation, and table planning.
-- `obs-sdk-storage`: sqlite schema, migrations, repositories, and transactions.
-- `obs-sdk-search`: lexical search adapters over indexed content.
-- `obs-sdk-watch`: filesystem watch normalization and reconcile triggering.
-- `obs-sdk-service`: use-case orchestration and public service surface.
-- `obs-sdk-bridge`: FFI-safe API boundary for Swift consumption.
-- `obs-cli`: thin command adapter over `obs-sdk-service`.
-- `obs-tui`: future terminal UI adapter over `obs-sdk-service`.
+- `tao-sdk-core`: shared primitives, ids, error envelope, time/path utilities.
+- `tao-sdk-vault`: vault path handling, discovery, and boundary checks.
+- `tao-sdk-markdown`: markdown parse/render and section extraction utilities.
+- `tao-sdk-links`: wikilink parser and deterministic resolution.
+- `tao-sdk-properties`: front matter extraction and typed projection.
+- `tao-sdk-bases`: `.base` parsing, validation, and table planning.
+- `tao-sdk-storage`: sqlite schema, migrations, repositories, and transactions.
+- `tao-sdk-search`: lexical search adapters over indexed content.
+- `tao-sdk-watch`: filesystem watch normalization and reconcile triggering.
+- `tao-sdk-service`: use-case orchestration and public service surface.
+- `tao-sdk-bridge`: FFI-safe API boundary for Swift consumption.
+- `tao-cli`: thin command adapter over `tao-sdk-service`.
+- `tao-tui`: future terminal UI adapter over `tao-sdk-service`.
 
 ## Dependency Direction
 
-- `obs-sdk-service` depends on SDK subsystem crates.
-- `obs-sdk-bridge`, `obs-cli`, and `obs-tui` depend on `obs-sdk-service`.
-- `obs-sdk-storage` must not depend on UI or CLI crates.
+- `tao-sdk-service` depends on SDK subsystem crates.
+- `tao-sdk-bridge`, `tao-cli`, and `tao-tui` depend on `tao-sdk-service`.
+- `tao-sdk-storage` must not depend on UI or CLI crates.
 
 ## Rules
 

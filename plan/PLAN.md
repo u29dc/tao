@@ -115,21 +115,21 @@ Process A: obs-app (Swift, macOS native)
   - calls Rust bridge APIs
 
 Process A embedded Rust components (linked)
-  - obs-sdk-core
-  - obs-sdk-index
-  - obs-sdk-storage
-  - obs-sdk-search
-  - obs-sdk-bases
-  - obs-sdk-service
-  - obs-sdk-bridge (Swift binding surface)
+  - tao-sdk-core
+  - tao-sdk-index
+  - tao-sdk-storage
+  - tao-sdk-search
+  - tao-sdk-bases
+  - tao-sdk-service
+  - tao-sdk-bridge (Swift binding surface)
 
-Process B: obs-cli (Rust)
+Process B: tao-cli (Rust)
   - clap command surface
   - one-envelope JSON output contract
-  - invokes same obs-sdk-service APIs
+  - invokes same tao-sdk-service APIs
 
-Process C (later): obs-tui (Rust + Ratatui)
-  - consumes obs-sdk-service read models
+Process C (later): tao-tui (Rust + Ratatui)
+  - consumes tao-sdk-service read models
 ```
 
 ### 5.3 Workspace map
@@ -141,19 +141,19 @@ obs/
   commitlint.config.js
   lint-staged.config.js
   crates/
-    obs-sdk-core/
-    obs-sdk-vault/
-    obs-sdk-markdown/
-    obs-sdk-links/
-    obs-sdk-properties/
-    obs-sdk-bases/
-    obs-sdk-storage/
-    obs-sdk-search/
-    obs-sdk-watch/
-    obs-sdk-service/
-    obs-sdk-bridge/
-    obs-cli/
-    obs-tui/                  # later phase
+    tao-sdk-core/
+    tao-sdk-vault/
+    tao-sdk-markdown/
+    tao-sdk-links/
+    tao-sdk-properties/
+    tao-sdk-bases/
+    tao-sdk-storage/
+    tao-sdk-search/
+    tao-sdk-watch/
+    tao-sdk-service/
+    tao-sdk-bridge/
+    tao-cli/
+    tao-tui/                  # later phase
   apps/
     obs-macos/                # Xcode project
 ```
@@ -161,17 +161,17 @@ obs/
 ### 5.4 Component map: SDK internals
 
 ```text
-obs-sdk-service
+tao-sdk-service
   -> orchestrates domain operations and transactions
   -> depends on:
-       obs-sdk-vault       (path canonicalization, file IO policy)
-       obs-sdk-markdown    (markdown parse/render pipeline)
-       obs-sdk-links       (wikilink parse + deterministic resolver)
-       obs-sdk-properties  (front matter parse + typed projection)
-       obs-sdk-bases       (.base parser + query planning)
-       obs-sdk-storage     (sqlite schema, migrations, query adapters)
-       obs-sdk-search      (fts indexing + search ranking)
-       obs-sdk-watch       (fs event normalization + reconciliation)
+       tao-sdk-vault       (path canonicalization, file IO policy)
+       tao-sdk-markdown    (markdown parse/render pipeline)
+       tao-sdk-links       (wikilink parse + deterministic resolver)
+       tao-sdk-properties  (front matter parse + typed projection)
+       tao-sdk-bases       (.base parser + query planning)
+       tao-sdk-storage     (sqlite schema, migrations, query adapters)
+       tao-sdk-search      (fts indexing + search ranking)
+       tao-sdk-watch       (fs event normalization + reconciliation)
 ```
 
 ### 5.5 Data model map (SQLite)
@@ -274,7 +274,7 @@ CLI JSON mode must print one compact envelope to stdout, with diagnostics on std
 
 ### 6.1 Primary mode: direct FFI bridge
 
-Implement `obs-sdk-bridge` using UniFFI to generate Swift bindings over stable Rust service interfaces. [E27][E28]
+Implement `tao-sdk-bridge` using UniFFI to generate Swift bindings over stable Rust service interfaces. [E27][E28]
 
 Design rules:
 

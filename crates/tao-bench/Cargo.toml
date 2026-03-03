@@ -1,0 +1,21 @@
+[package]
+name = "tao-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tao-bench"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tao-sdk-bridge = { path = "../tao-sdk-bridge" }
+tao-sdk-links = { path = "../tao-sdk-links" }
+serde_json.workspace = true
+tempfile = "3.17.1"

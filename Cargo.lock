@@ -583,154 +583,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "obs-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "obs-sdk-bridge",
- "obs-sdk-links",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "obs-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "obs-sdk-bases",
- "obs-sdk-bridge",
- "obs-sdk-properties",
- "obs-sdk-service",
- "obs-sdk-storage",
- "obs-sdk-vault",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "obs-sdk-bases"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-bridge"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "clap",
- "obs-sdk-bases",
- "obs-sdk-markdown",
- "obs-sdk-service",
- "obs-sdk-storage",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-core"
-version = "0.1.0"
-
-[[package]]
-name = "obs-sdk-links"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-markdown"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-properties"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_yaml",
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-search"
-version = "0.1.0"
-
-[[package]]
-name = "obs-sdk-service"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "obs-sdk-bases",
- "obs-sdk-core",
- "obs-sdk-links",
- "obs-sdk-markdown",
- "obs-sdk-properties",
- "obs-sdk-storage",
- "obs-sdk-vault",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "obs-sdk-storage"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "rusqlite",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "obs-sdk-vault"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "tempfile",
- "thiserror",
- "unicode-normalization",
- "walkdir",
-]
-
-[[package]]
-name = "obs-sdk-watch"
-version = "0.1.0"
-
-[[package]]
-name = "obs-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm 0.29.0",
- "obs-sdk-bridge",
- "ratatui",
- "tempfile",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1071,6 +923,154 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tao-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tao-sdk-bridge",
+ "tao-sdk-links",
+ "tempfile",
+]
+
+[[package]]
+name = "tao-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tao-sdk-bases",
+ "tao-sdk-bridge",
+ "tao-sdk-properties",
+ "tao-sdk-service",
+ "tao-sdk-storage",
+ "tao-sdk-vault",
+ "tempfile",
+]
+
+[[package]]
+name = "tao-sdk-bases"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-bridge"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tao-sdk-bases",
+ "tao-sdk-markdown",
+ "tao-sdk-service",
+ "tao-sdk-storage",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-core"
+version = "0.1.0"
+
+[[package]]
+name = "tao-sdk-links"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-markdown"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-properties"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-search"
+version = "0.1.0"
+
+[[package]]
+name = "tao-sdk-service"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tao-sdk-bases",
+ "tao-sdk-core",
+ "tao-sdk-links",
+ "tao-sdk-markdown",
+ "tao-sdk-properties",
+ "tao-sdk-storage",
+ "tao-sdk-vault",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "tao-sdk-storage"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "tao-sdk-vault"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "tempfile",
+ "thiserror",
+ "unicode-normalization",
+ "walkdir",
+]
+
+[[package]]
+name = "tao-sdk-watch"
+version = "0.1.0"
+
+[[package]]
+name = "tao-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm 0.29.0",
+ "ratatui",
+ "tao-sdk-bridge",
+ "tempfile",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ Define the default SQLite runtime profile for local vault workloads so every SDK
 
 ## Applied Location
 
-- `obs-sdk-storage::run_migrations` applies this profile during connection startup.
+- `tao-sdk-storage::run_migrations` applies this profile during connection startup.
 - The profile is applied before migrations and therefore affects bridge, CLI, service, and test entrypoints that call `run_migrations`.
 
 ## Selected Profile
@@ -23,5 +23,5 @@ Define the default SQLite runtime profile for local vault workloads so every SDK
 
 ## Validation
 
-- Unit test: `run_migrations_applies_sqlite_pragma_profile_for_file_database` in `crates/obs-sdk-storage/src/lib.rs`.
+- Unit test: `run_migrations_applies_sqlite_pragma_profile_for_file_database` in `crates/tao-sdk-storage/src/lib.rs`.
 - Perf alignment: profile selected for `PERF-004` after baseline captures in `PERF-001` to `PERF-003`.

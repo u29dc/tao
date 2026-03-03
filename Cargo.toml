@@ -1,20 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/obs-sdk-core",
-  "crates/obs-sdk-vault",
-  "crates/obs-sdk-markdown",
-  "crates/obs-sdk-links",
-  "crates/obs-sdk-properties",
-  "crates/obs-sdk-bases",
-  "crates/obs-sdk-storage",
-  "crates/obs-sdk-search",
-  "crates/obs-sdk-watch",
-  "crates/obs-sdk-service",
-  "crates/obs-sdk-bridge",
-  "crates/obs-cli",
-  "crates/obs-tui",
-  "crates/obs-bench",
+  "crates/tao-sdk-core",
+  "crates/tao-sdk-vault",
+  "crates/tao-sdk-markdown",
+  "crates/tao-sdk-links",
+  "crates/tao-sdk-properties",
+  "crates/tao-sdk-bases",
+  "crates/tao-sdk-storage",
+  "crates/tao-sdk-search",
+  "crates/tao-sdk-watch",
+  "crates/tao-sdk-service",
+  "crates/tao-sdk-bridge",
+  "crates/tao-cli",
+  "crates/tao-tui",
+  "crates/tao-bench",
 ]
 
 [workspace.package]

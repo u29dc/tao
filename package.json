@@ -1,16 +1,16 @@
 {
-  "name": "obs",
+  "name": "tao",
   "version": "0.0.1",
   "type": "module",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git@github.com:u29dc/obs.git"
+    "url": "git@github.com:u29dc/tao.git"
   },
   "scripts": {
     "prepare": "husky",
-    "obs:dev": "cargo run -p obs-cli --",
-    "build": "cargo build --workspace --release && OUT_DIR=\"${OBS_HOME:-${TOOLS_HOME:-$HOME/.tools}/obs}\" && mkdir -p \"$OUT_DIR\" && cp target/release/obs \"$OUT_DIR/obs\" && cp target/release/obs-tui \"$OUT_DIR/obs-tui\"",
+    "tao:dev": "cargo run -p tao-cli --",
+    "build": "cargo build --workspace --release && OUT_DIR=\"${TAO_HOME:-${TOOLS_HOME:-$HOME/.tools}/tao}\" && mkdir -p \"$OUT_DIR\" && cp target/release/tao \"$OUT_DIR/tao\" && cp target/release/tao-tui \"$OUT_DIR/tao-tui\"",
     "util:release:cli": "./scripts/release-package-cli.sh",
     "util:release:mac": "./scripts/package-macos-app.sh",
     "util:format": "cargo fmt --all",
@@ -19,14 +19,14 @@
     "util:test": "cargo test --workspace",
     "util:build": "cargo build --workspace",
     "util:audit": "cargo audit",
-    "util:bench:bridge": "cargo run -p obs-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
+    "util:bench:bridge": "cargo run -p tao-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json",
     "util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.5",
-    "@commitlint/cli": "^20.4.2",
-    "@commitlint/config-conventional": "^20.4.2",
+    "@commitlint/cli": "^20.4.3",
+    "@commitlint/config-conventional": "^20.4.3",
     "husky": "^9.1.7",
-    "lint-staged": "^16.3.1"
+    "lint-staged": "^16.3.2"
   }
 }
