@@ -1010,5 +1010,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [qa/fixtures/conformance-vault/README.md, qa/fixtures/conformance-vault/notes/*.md, qa/fixtures/conformance-vault/views/*.base, qa/fixtures/conformance-vault/assets/diagram.png, tickets.csv, run-state.json]
   - commands: [create fixture vault files, bun run util:check]
-  - outcomes: [added deterministic conformance fixture vault covering link ambiguity/unresolved/heading/block cases, typed+malformed front matter samples, valid+invalid base configs, project table-filter dataset, and non-markdown asset handling]
+- outcomes: [added deterministic conformance fixture vault covering link ambiguity/unresolved/heading/block cases, typed+malformed front matter samples, valid+invalid base configs, project table-filter dataset, and non-markdown asset handling]
 - residual_risk: fixture includes representative edge cases but does not yet include very large-file or unicode-path stress variants for parser/load tests
+
+- timestamp: 2026-03-03T19:18:17Z
+- session: session-2026-03-03-a
+- ticket: QA-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [added SDK integration harness test that copies the conformance fixture vault into a temp workspace, runs sqlite migrations + full indexing, validates health snapshot and link graph outputs, and asserts end-to-end fixture behavior under real service flows]
+- residual_risk: harness currently validates core indexing/graph behavior but does not yet assert every property/base row in golden snapshots
