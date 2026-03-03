@@ -14,9 +14,12 @@ workspace = true
 [dependencies]
 obs-sdk-core = { path = "../obs-sdk-core" }
 obs-sdk-markdown = { path = "../obs-sdk-markdown" }
+obs-sdk-properties = { path = "../obs-sdk-properties" }
 obs-sdk-storage = { path = "../obs-sdk-storage" }
 obs-sdk-vault = { path = "../obs-sdk-vault" }
 rusqlite.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9.34"
 thiserror.workspace = true
 
 [dev-dependencies]

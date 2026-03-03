@@ -8,14 +8,17 @@ use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
     MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,
 };
+use obs_sdk_properties::{FrontMatterStatus, TypedPropertyValue, extract_front_matter};
 use obs_sdk_storage::{
-    FileRecordInput, FilesRepository, StorageTransactionError, with_transaction,
+    FileRecordInput, FilesRepository, PropertiesRepository, PropertyRecordInput,
+    StorageTransactionError, with_transaction,
 };
 use obs_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
     VaultManifestEntry, VaultScanError, VaultScanService,
 };
 use rusqlite::{Connection, OptionalExtension};
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 /// Parsed markdown note produced by the ingest pipeline shell.
@@ -545,6 +548,230 @@ pub enum NoteCrudError {
     },
 }
 
+/// Result payload for typed property update operations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertyUpdateResult {
+    /// File id that was updated.
+    pub file_id: String,
+    /// Property key that was set.
+    pub key: String,
+    /// Typed value persisted.
+    pub value: TypedPropertyValue,
+    /// Parsed markdown result after update.
+    pub parsed: MarkdownParseResult,
+}
+
+/// Service that applies typed property updates into note front matter and storage.
+#[derive(Clone)]
+pub struct PropertyUpdateService {
+    note_crud: NoteCrudService,
+    parser: MarkdownParser,
+}
+
+impl Default for PropertyUpdateService {
+    fn default() -> Self {
+        Self {
+            note_crud: NoteCrudService::default(),
+            parser: MarkdownParser,
+        }
+    }
+}
+
+impl PropertyUpdateService {
+    /// Set one typed property on a note, persist metadata, and parse updated markdown.
+    pub fn set_property(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        key: &str,
+        value: TypedPropertyValue,
+    ) -> Result<PropertyUpdateResult, PropertyUpdateError> {
+        let existing = FilesRepository::get_by_id(connection, file_id)
+            .map_err(|source| PropertyUpdateError::Repository { source })?;
+        let Some(existing) = existing else {
+            return Err(PropertyUpdateError::MissingFileRecord {
+                file_id: file_id.to_string(),
+            });
+        };
+
+        let absolute = vault_root.join(&existing.normalized_path);
+        let markdown =
+            fs::read_to_string(&absolute).map_err(|source| PropertyUpdateError::ReadFile {
+                path: absolute.clone(),
+                source,
+            })?;
+
+        let extraction = extract_front_matter(&markdown);
+        let body = extraction.body;
+        let mut mapping = match extraction.status {
+            FrontMatterStatus::Parsed { value } => match value {
+                serde_yaml::Value::Mapping(mapping) => mapping,
+                _ => serde_yaml::Mapping::new(),
+            },
+            FrontMatterStatus::Malformed { .. } | FrontMatterStatus::Missing => {
+                serde_yaml::Mapping::new()
+            }
+        };
+
+        mapping.insert(
+            serde_yaml::Value::String(key.to_string()),
+            typed_value_to_yaml(&value),
+        );
+        let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))
+            .map_err(|source| PropertyUpdateError::SerializeYaml { source })?;
+
+        let mut updated_markdown = String::new();
+        updated_markdown.push_str("---\n");
+        updated_markdown.push_str(&yaml);
+        updated_markdown.push_str("---\n");
+        if !body.is_empty() {
+            updated_markdown.push_str(&body);
+        }
+
+        self.note_crud
+            .update_note(
+                vault_root,
+                connection,
+                file_id,
+                Path::new(&existing.normalized_path),
+                &updated_markdown,
+            )
+            .map_err(|source| PropertyUpdateError::NoteUpdate { source })?;
+
+        let parsed = self
+            .parser
+            .parse(MarkdownParseRequest {
+                normalized_path: existing.normalized_path.clone(),
+                raw: updated_markdown,
+            })
+            .map_err(|source| PropertyUpdateError::Parse { source })?;
+
+        let property_input = PropertyRecordInput {
+            property_id: format!("{file_id}:{key}"),
+            file_id: file_id.to_string(),
+            key: key.to_string(),
+            value_type: typed_value_kind(&value).to_string(),
+            value_json: serde_json::to_string(&typed_value_to_json(&value))
+                .map_err(|source| PropertyUpdateError::SerializeJson { source })?,
+        };
+        PropertiesRepository::upsert(connection, &property_input)
+            .map_err(|source| PropertyUpdateError::PropertyRepository { source })?;
+
+        Ok(PropertyUpdateResult {
+            file_id: file_id.to_string(),
+            key: key.to_string(),
+            value,
+            parsed,
+        })
+    }
+}
+
+fn typed_value_kind(value: &TypedPropertyValue) -> &'static str {
+    match value {
+        TypedPropertyValue::Bool(_) => "bool",
+        TypedPropertyValue::Number(_) => "number",
+        TypedPropertyValue::Date(_) => "date",
+        TypedPropertyValue::String(_) => "string",
+        TypedPropertyValue::List(_) => "list",
+        TypedPropertyValue::Null => "null",
+    }
+}
+
+fn typed_value_to_yaml(value: &TypedPropertyValue) -> serde_yaml::Value {
+    match value {
+        TypedPropertyValue::Bool(value) => serde_yaml::Value::Bool(*value),
+        TypedPropertyValue::Number(value) => {
+            serde_yaml::to_value(*value).unwrap_or(serde_yaml::Value::Null)
+        }
+        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => {
+            serde_yaml::Value::String(value.clone())
+        }
+        TypedPropertyValue::List(values) => {
+            serde_yaml::Value::Sequence(values.iter().map(typed_value_to_yaml).collect())
+        }
+        TypedPropertyValue::Null => serde_yaml::Value::Null,
+    }
+}
+
+fn typed_value_to_json(value: &TypedPropertyValue) -> JsonValue {
+    match value {
+        TypedPropertyValue::Bool(value) => JsonValue::Bool(*value),
+        TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => {
+            JsonValue::String(value.clone())
+        }
+        TypedPropertyValue::List(values) => {
+            JsonValue::Array(values.iter().map(typed_value_to_json).collect())
+        }
+        TypedPropertyValue::Null => JsonValue::Null,
+    }
+}
+
+/// Errors returned by typed property update operations.
+#[derive(Debug, Error)]
+pub enum PropertyUpdateError {
+    /// File metadata row missing for requested file id.
+    #[error("no file metadata found for file id '{file_id}'")]
+    MissingFileRecord {
+        /// Missing file id.
+        file_id: String,
+    },
+    /// Reading note file failed.
+    #[error("failed to read note file '{path}': {source}")]
+    ReadFile {
+        /// File path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Note update flow failed.
+    #[error("note update failed while setting property: {source}")]
+    NoteUpdate {
+        /// Note update error.
+        #[source]
+        source: NoteCrudError,
+    },
+    /// Parsing updated markdown failed.
+    #[error("failed to parse updated markdown after property set: {source}")]
+    Parse {
+        /// Markdown parser error.
+        #[source]
+        source: MarkdownParseError,
+    },
+    /// YAML serialization failed.
+    #[error("failed to serialize front matter yaml: {source}")]
+    SerializeYaml {
+        /// YAML serializer error.
+        #[source]
+        source: serde_yaml::Error,
+    },
+    /// JSON serialization failed.
+    #[error("failed to serialize property json payload: {source}")]
+    SerializeJson {
+        /// JSON serializer error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Files repository query failed.
+    #[error("file repository operation failed: {source}")]
+    Repository {
+        /// Files repository error.
+        #[source]
+        source: obs_sdk_storage::FilesRepositoryError,
+    },
+    /// Properties repository update failed.
+    #[error("property repository operation failed: {source}")]
+    PropertyRepository {
+        /// Properties repository error.
+        #[source]
+        source: obs_sdk_storage::PropertiesRepositoryError,
+    },
+}
+
 /// Health snapshot status for watcher subsystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatcherStatus {
@@ -718,15 +945,17 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use obs_sdk_properties::TypedPropertyValue;
     use obs_sdk_storage::{
-        FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, run_migrations,
+        FileRecordInput, FilesRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
+        run_migrations,
     };
     use rusqlite::Connection;
     use tempfile::tempdir;
 
     use super::{
         CasePolicy, HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        SdkTransactionCoordinator, StorageWriteService, WatcherStatus,
+        PropertyUpdateService, SdkTransactionCoordinator, StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -1028,5 +1257,64 @@ mod tests {
         assert_eq!(snapshot.files_total, 3);
         assert_eq!(snapshot.markdown_files, 2);
         assert!(snapshot.last_index_updated_at.is_some());
+    }
+
+    #[test]
+    fn property_update_service_persists_and_updates_markdown() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let note_service = NoteCrudService::default();
+        note_service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "f1",
+                Path::new("notes/property.md"),
+                "# Body",
+            )
+            .expect("create note");
+
+        let before = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get file before property set")
+            .expect("file exists before property set");
+
+        let update_service = PropertyUpdateService::default();
+        let result = update_service
+            .set_property(
+                &vault_root,
+                &mut connection,
+                "f1",
+                "status",
+                TypedPropertyValue::String("draft".to_string()),
+            )
+            .expect("set typed property");
+
+        assert_eq!(result.file_id, "f1");
+        assert_eq!(result.key, "status");
+        assert_eq!(
+            result.value,
+            TypedPropertyValue::String("draft".to_string())
+        );
+
+        let markdown = fs::read_to_string(vault_root.join("notes/property.md"))
+            .expect("read updated markdown");
+        assert!(markdown.contains("---"));
+        assert!(markdown.contains("status: draft"));
+
+        let property = PropertiesRepository::get_by_file_and_key(&connection, "f1", "status")
+            .expect("get stored property")
+            .expect("property should exist");
+        assert_eq!(property.value_type, "string");
+        assert_eq!(property.value_json, "\"draft\"");
+
+        let after = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get file after property set")
+            .expect("file exists after property set");
+        assert_ne!(before.hash_blake3, after.hash_blake3);
     }
 }

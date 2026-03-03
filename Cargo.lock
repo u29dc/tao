@@ -389,9 +389,12 @@ version = "0.1.0"
 dependencies = [
  "obs-sdk-core",
  "obs-sdk-markdown",
+ "obs-sdk-properties",
  "obs-sdk-storage",
  "obs-sdk-vault",
  "rusqlite",
+ "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror",
 ]

@@ -412,3 +412,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [deterministic path resolver implemented with same-folder, distance, and lexical tie-break ordering]
 - residual_risk: resolver currently compares markdown extension variants only (`.md`); additional extension strategies can be added if v1 scope expands
+
+- timestamp: 2026-03-03T20:30:00Z
+- session: session-2026-03-03-a
+- ticket: PROP-003
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [typed property update service implemented with front matter writeback, repository persistence, and re-parse validation]
+- residual_risk: property serialization currently rewrites full front matter block; preserving original key ordering/comments would need a YAML-preserving editor

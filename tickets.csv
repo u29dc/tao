@@ -59,7 +59,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "LINK-006","Implement backlink graph service","link","phase2","LINK-002","todo","P1","unassigned","3","0","","outgoing/backlink queries return stable order"
 "PROP-001","Implement front matter extraction","prop","phase1","SDK-004","done","P1","codex","3","0","","YAML block extraction with parse errors captured"
 "PROP-002","Implement typed property projection","prop","phase1","PROP-001","done","P1","codex","3","0","","bool/number/date/list types normalized"
-"PROP-003","Implement property update service","prop","phase1","SDK-008|PROP-002","todo","P1","unassigned","3","0","","typed set operations persist and re-render"
+"PROP-003","Implement property update service","prop","phase1","SDK-008|PROP-002","done","P1","codex","3","0","","typed set operations persist and re-render"
 "PROP-004","Implement default property mappings","prop","phase2","PROP-002","todo","P1","unassigned","3","0","","tags/aliases/css classes mapped consistently"
 "PROP-005","Implement malformed YAML tolerance","prop","phase2","PROP-001","todo","P1","unassigned","3","0","","malformed docs do not crash indexing"
 "PROP-006","Implement property query API","prop","phase2","PROP-002","todo","P1","unassigned","3","0","","filter/sort APIs for bases and cli"
