@@ -102,7 +102,7 @@
 "TUI-003","Implement note list and viewer route","tui","phase6","TUI-002|SDK-010","todo","P3","unassigned","3","0","","view notes and note content"
 "TUI-004","Implement search route","tui","phase6","TUI-002|BASE-008","todo","P3","unassigned","3","0","","search list and open note flow work"
 "TUI-005","Implement bases table route","tui","phase6","TUI-002|BASE-004","todo","P3","unassigned","3","0","","table route paginates and sorts"
-"QA-001","Build conformance fixture vault","qa","phase4","DOC-003","todo","P2","unassigned","3","0","","fixture set covers links/properties/bases edge cases"
+"QA-001","Build conformance fixture vault","qa","phase4","DOC-003","done","P2","codex","3","0","","fixture set covers links/properties/bases edge cases"
 "QA-002","Add SDK integration test harness","qa","phase4","INFRA-004","todo","P2","unassigned","3","0","","integration tests run fixture vault end-to-end"
 "QA-003","Add resolver determinism tests","qa","phase4","LINK-002|QA-001","todo","P2","unassigned","3","0","","repeated runs yield identical resolutions"
 "QA-004","Add malformed front matter tests","qa","phase4","PROP-005|QA-001","todo","P2","unassigned","3","0","","malformed docs handled without crash"

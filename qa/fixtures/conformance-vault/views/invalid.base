@@ -1,0 +1,3 @@
+views:
+  - name: BrokenView
+    type: timeline
