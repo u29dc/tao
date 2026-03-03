@@ -13,6 +13,7 @@
     "build": "cargo build --workspace --release && OUT_DIR=\"${TAO_HOME:-${TOOLS_HOME:-$HOME/.tools}/tao}\" && mkdir -p \"$OUT_DIR\" && cp target/release/tao \"$OUT_DIR/tao\" && cp target/release/tao-tui \"$OUT_DIR/tao-tui\"",
     "util:release:cli": "./scripts/release-package-cli.sh",
     "util:release:mac": "./scripts/package-macos-app.sh",
+    "util:clean": "./scripts/clean.sh",
     "util:format": "cargo fmt --all",
     "util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
     "util:types": "cargo check --workspace",

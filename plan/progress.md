@@ -1362,3 +1362,13 @@ Append-only execution log for autonomous runs.
   - commands: [rg -n "\\bobs\\b|obs-" with allowlist exclusions, update remaining active references to tao naming]
   - outcomes: [non-allowlisted obs identity references removed from active code/docs/workflow paths]
 - residual_risk: allowed residual mentions remain in plan/rename-manifest.md and historical plan/progress.md entries by design
+
+- timestamp: 2026-03-04T00:50:00Z
+- session: session-2026-03-03-b
+- ticket: CLEAN-001
+- action: done
+- evidence:
+  - files: [scripts/clean.sh, package.json, plan/tickets.csv, plan/run-state.json]
+  - commands: [add one-word cleanup script and wire util:clean task]
+  - outcomes: [deterministic cleanup script added for cargo/swift artifacts, dist output, and legacy install dirs]
+- residual_risk: none
