@@ -372,3 +372,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [health snapshot service implemented reporting index lag, db status, watcher status, and scan counts]
 - residual_risk: watcher status currently supplied by caller state; deeper watcher diagnostics will be provided once watch module is fully implemented
+
+- timestamp: 2026-03-03T19:38:00Z
+- session: session-2026-03-03-a
+- ticket: LINK-001
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-links/Cargo.toml, crates/obs-sdk-links/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [wikilink parser implemented for target/display/heading/block forms with markdown extraction tests]
+- residual_risk: parser currently handles bracket-form wikilinks only; embedded edge-case tokenization in complex markdown contexts will be expanded in resolver tickets
