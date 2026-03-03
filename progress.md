@@ -452,3 +452,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [idempotent reconcile service implemented to upsert changed files, remove stale rows, and produce stable repeated-run results]
 - residual_risk: reconcile currently covers files table drift only; link/property/bases cross-table reconcile will be extended in index tickets
+
+- timestamp: 2026-03-03T16:30:40Z
+- session: session-2026-03-03-a
+- ticket: SDK-014
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, crates/obs-sdk-service/src/tracing_hooks.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [service-level tracing hooks added with structured operation/correlation context and traced wrappers for note/property/reconcile services]
+- residual_risk: hooks currently wrap service entrypoints but do not yet enforce context propagation across all nested internal calls

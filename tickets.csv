@@ -32,7 +32,7 @@
 "SDK-011","Implement import/export service boundaries","sdk","phase2","SDK-008","done","P1","codex","3","0","","clear interfaces for future import jobs"
 "SDK-012","Implement failure-safe rollback paths","sdk","phase2","SDK-006","done","P1","codex","3","0","","failed writes rollback with no index corruption"
 "SDK-013","Implement idempotent reconcile service","sdk","phase2","SDK-003","done","P1","codex","3","0","","repeated reconcile yields stable state"
-"SDK-014","Implement service-level tracing hooks","sdk","phase2","INFRA-004","todo","P1","unassigned","3","0","","structured traces with correlation ids"
+"SDK-014","Implement service-level tracing hooks","sdk","phase2","INFRA-004","done","P1","codex","3","0","","structured traces with correlation ids"
 "SDK-015","Implement SDK config loader","sdk","phase2","INFRA-001","todo","P1","unassigned","3","0","","config precedence and validation tests"
 "SDK-016","Implement SDK feature flag registry","sdk","phase2","SDK-015","todo","P1","unassigned","3","0","","toggles for experimental modules"
 "DB-001","Create initial sqlite schema","db","phase1","ARC-006","done","P1","codex","3","0","","schema migration `0001_init.sql` applied cleanly"

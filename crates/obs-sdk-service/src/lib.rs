@@ -7,12 +7,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod import_export;
+mod tracing_hooks;
 
 pub use import_export::{
     FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
     TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
+pub use tracing_hooks::ServiceTraceContext;
 
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
@@ -511,6 +513,91 @@ impl NoteCrudService {
     ) -> Result<NoteCrudResult, NoteCrudError> {
         self.rename_note(vault_root, connection, file_id, destination_relative_path)
     }
+
+    /// Tracing hook wrapper for `create_note` with explicit correlation context.
+    pub fn create_note_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        relative_path: &Path,
+        content: &str,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.create_note(vault_root, connection, file_id, relative_path, content);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
+    }
+
+    /// Tracing hook wrapper for `update_note` with explicit correlation context.
+    pub fn update_note_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        relative_path: &Path,
+        content: &str,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.update_note(vault_root, connection, file_id, relative_path, content);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
+    }
+
+    /// Tracing hook wrapper for `delete_note` with explicit correlation context.
+    pub fn delete_note_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+    ) -> Result<bool, NoteCrudError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.delete_note(vault_root, connection, file_id);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
+    }
+
+    /// Tracing hook wrapper for `rename_note` with explicit correlation context.
+    pub fn rename_note_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        new_relative_path: &Path,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.rename_note(vault_root, connection, file_id, new_relative_path);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
+    }
 }
 
 fn validate_relative_note_path(relative_path: &Path) -> Result<(), NoteCrudError> {
@@ -812,6 +899,28 @@ impl PropertyUpdateService {
             parsed,
         })
     }
+
+    /// Tracing hook wrapper for `set_property` with explicit correlation context.
+    pub fn set_property_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        key: &str,
+        value: TypedPropertyValue,
+    ) -> Result<PropertyUpdateResult, PropertyUpdateError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.set_property(vault_root, connection, file_id, key, value);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
+    }
 }
 
 fn typed_value_kind(value: &TypedPropertyValue) -> &'static str {
@@ -1050,6 +1159,26 @@ impl ReconcileService {
             removed_files,
             unchanged_files,
         })
+    }
+
+    /// Tracing hook wrapper for `reconcile_vault` with explicit correlation context.
+    pub fn reconcile_vault_with_trace_context(
+        &self,
+        trace_context: &ServiceTraceContext,
+        vault_root: &Path,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+    ) -> Result<ReconcileResult, ReconcileError> {
+        let span = trace_context.span();
+        let _entered = span.enter();
+        trace_context.emit_start();
+
+        let result = self.reconcile_vault(vault_root, connection, case_policy);
+        match &result {
+            Ok(_) => trace_context.emit_success(),
+            Err(error) => trace_context.emit_failure(error),
+        }
+        result
     }
 }
 
@@ -1306,8 +1435,8 @@ mod tests {
 
     use super::{
         CasePolicy, HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        PropertyUpdateService, ReconcileService, SdkTransactionCoordinator, StorageWriteService,
-        WatcherStatus,
+        PropertyUpdateService, ReconcileService, SdkTransactionCoordinator, ServiceTraceContext,
+        StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -1490,6 +1619,32 @@ mod tests {
                 .expect("get deleted")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn note_crud_service_trace_context_wrapper_executes_operation() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        let trace_context = ServiceTraceContext::with_correlation("note_create", "cid-note-1");
+        let created = service
+            .create_note_with_trace_context(
+                &trace_context,
+                &vault_root,
+                &mut connection,
+                "f1",
+                Path::new("notes/traced.md"),
+                "# traced",
+            )
+            .expect("create traced note");
+
+        assert_eq!(created.normalized_path, "notes/traced.md");
+        assert_eq!(trace_context.correlation_id(), "cid-note-1");
     }
 
     #[test]
@@ -1744,6 +1899,30 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_service_trace_context_wrapper_executes_operation() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = ReconcileService;
+        let trace_context = ServiceTraceContext::with_correlation("reconcile", "cid-reconcile-1");
+        let result = service
+            .reconcile_vault_with_trace_context(
+                &trace_context,
+                temp.path(),
+                &mut connection,
+                CasePolicy::Sensitive,
+            )
+            .expect("traced reconcile");
+
+        assert_eq!(result.scanned_files, 1);
+        assert_eq!(trace_context.correlation_id(), "cid-reconcile-1");
+    }
+
+    #[test]
     fn health_snapshot_reports_vault_db_and_watcher_status() {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
@@ -1831,5 +2010,42 @@ mod tests {
             .expect("get file after property set")
             .expect("file exists after property set");
         assert_ne!(before.hash_blake3, after.hash_blake3);
+    }
+
+    #[test]
+    fn property_update_service_trace_context_wrapper_executes_operation() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let note_service = NoteCrudService::default();
+        note_service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "f1",
+                Path::new("notes/property-traced.md"),
+                "# Body",
+            )
+            .expect("create note");
+
+        let update_service = PropertyUpdateService::default();
+        let trace_context = ServiceTraceContext::with_correlation("property_set", "cid-property-1");
+        let result = update_service
+            .set_property_with_trace_context(
+                &trace_context,
+                &vault_root,
+                &mut connection,
+                "f1",
+                "status",
+                TypedPropertyValue::String("published".to_string()),
+            )
+            .expect("set typed property with trace");
+
+        assert_eq!(result.key, "status");
+        assert_eq!(trace_context.correlation_id(), "cid-property-1");
     }
 }
