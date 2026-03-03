@@ -912,3 +912,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p obs-sdk-bridge, swift build, swift test, bun run util:check]
   - outcomes: [added bridge `bases-list`/`bases-view` endpoints with planner+executor wiring and typed errors; Swift bridge client now exposes base list/table APIs; app Bases pane now loads indexed bases, selects views, renders paged table rows, and supports previous/next pagination controls]
 - residual_risk: base row rendering currently flattens selected column values into one summary cell in the macOS table, so follow-up UI refinement can split into true per-column table cells once dynamic column composition is introduced
+
+- timestamp: 2026-03-03T18:48:33Z
+- session: session-2026-03-03-a
+- ticket: APP-010
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSAppScaffold/ObsBridgeClient.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [app now surfaces typed bridge errors in a unified banner with error code/hint/context fields and operation-specific recovery buttons; recovery actions route to retry handlers for vault stats, note load/save, links, and bases table operations]
+- residual_risk: error actions currently retry the last in-memory operation context only, so future hardening can persist richer failure context for retries across app restart boundaries

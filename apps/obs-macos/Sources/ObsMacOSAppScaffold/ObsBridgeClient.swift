@@ -203,37 +203,15 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
     }
 
     public var bridgeCode: String {
-        switch self {
-        case .initFailed(let error),
-            .vaultStatsFailed(let error),
-            .noteGetInvalidPath(let error),
-            .noteGetReadFailed(let error),
-            .noteGetParseFailed(let error),
-            .notesListInvalidLimit(let error),
-            .notesListQueryFailed(let error),
-            .noteLinksInvalidPath(let error),
-            .noteLinksLookupFailed(let error),
-            .noteLinksNotFound(let error),
-            .noteLinksQueryFailed(let error),
-            .basesListQueryFailed(let error),
-            .basesListConfigFailed(let error),
-            .basesViewInvalidInput(let error),
-            .basesViewLookupFailed(let error),
-            .basesViewNotFound(let error),
-            .basesViewConfigFailed(let error),
-            .basesViewPlanFailed(let error),
-            .basesViewExecuteFailed(let error),
-            .notePutInvalidPath(let error),
-            .notePutLookupFailed(let error),
-            .notePutCreateFailed(let error),
-            .notePutUpdateFailed(let error),
-            .notePutEventLogFailed(let error),
-            .eventsPollInvalidLimit(let error),
-            .eventsPollFailed(let error),
-            .serializeFailed(let error),
-            .unknown(let error):
-            return error.code
-        }
+        errorPayload.code
+    }
+
+    public var bridgeHint: String? {
+        errorPayload.hint
+    }
+
+    public var bridgeContext: [String: String] {
+        errorPayload.context
     }
 
     public var description: String {
@@ -294,6 +272,40 @@ public enum ObsBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "bridge serialize failed: \(error.message)"
         case .unknown(let error):
             return "bridge unknown error \(error.code): \(error.message)"
+        }
+    }
+
+    private var errorPayload: BridgeErrorDTO {
+        switch self {
+        case .initFailed(let error),
+            .vaultStatsFailed(let error),
+            .noteGetInvalidPath(let error),
+            .noteGetReadFailed(let error),
+            .noteGetParseFailed(let error),
+            .notesListInvalidLimit(let error),
+            .notesListQueryFailed(let error),
+            .noteLinksInvalidPath(let error),
+            .noteLinksLookupFailed(let error),
+            .noteLinksNotFound(let error),
+            .noteLinksQueryFailed(let error),
+            .basesListQueryFailed(let error),
+            .basesListConfigFailed(let error),
+            .basesViewInvalidInput(let error),
+            .basesViewLookupFailed(let error),
+            .basesViewNotFound(let error),
+            .basesViewConfigFailed(let error),
+            .basesViewPlanFailed(let error),
+            .basesViewExecuteFailed(let error),
+            .notePutInvalidPath(let error),
+            .notePutLookupFailed(let error),
+            .notePutCreateFailed(let error),
+            .notePutUpdateFailed(let error),
+            .notePutEventLogFailed(let error),
+            .eventsPollInvalidLimit(let error),
+            .eventsPollFailed(let error),
+            .serializeFailed(let error),
+            .unknown(let error):
+            return error
         }
     }
 }

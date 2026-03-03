@@ -30,6 +30,42 @@ private enum SidebarItem: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum AppRecoveryAction {
+    case retryLoadVaultStats
+    case retryLoadSelectedNote(path: String)
+    case retrySaveProperties
+    case retryLoadLinks(path: String)
+    case retryLoadBasesList
+    case retryLoadBasePage
+
+    var label: String {
+        switch self {
+        case .retryLoadVaultStats:
+            return "Retry Vault Stats"
+        case .retryLoadSelectedNote:
+            return "Retry Note Load"
+        case .retrySaveProperties:
+            return "Retry Save"
+        case .retryLoadLinks:
+            return "Retry Links"
+        case .retryLoadBasesList:
+            return "Retry Bases Load"
+        case .retryLoadBasePage:
+            return "Retry Page Load"
+        }
+    }
+}
+
+private struct AppErrorState: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let bridgeCode: String?
+    let hint: String?
+    let context: [String: String]
+    let recoveryAction: AppRecoveryAction?
+}
+
 private struct ObsRootSplitView: View {
     @Binding var quickOpenCommandNonce: Int
     @State private var selectedSidebarItem: SidebarItem? = .notes
@@ -39,6 +75,7 @@ private struct ObsRootSplitView: View {
     @State private var openedVaultRoot: String?
     @State private var statsSummary = "Bridge read APIs not called yet."
     @State private var bridgeError: String?
+    @State private var appErrorState: AppErrorState?
     @State private var isLoadingStats = false
     @State private var selectedNote: BridgeNoteView?
     @State private var noteError: String?
@@ -95,6 +132,9 @@ private struct ObsRootSplitView: View {
                     .font(.headline)
                 Text(contentLabel(for: selectedSidebarItem))
                     .foregroundStyle(.secondary)
+                if let appErrorState {
+                    appErrorBanner(appErrorState)
+                }
                 workspacePane
                 Divider()
                 Text("Bridge Integration")
@@ -397,6 +437,61 @@ private struct ObsRootSplitView: View {
     }
 
     @ViewBuilder
+    private func appErrorBanner(_ error: AppErrorState) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(error.title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+            Text(error.message)
+                .font(.caption)
+                .foregroundStyle(.primary)
+
+            if let bridgeCode = error.bridgeCode {
+                Text("code: \(bridgeCode)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            if let hint = error.hint, !hint.isEmpty {
+                Text("hint: \(hint)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if !error.context.isEmpty {
+                Text(
+                    error.context
+                        .sorted(by: { $0.key < $1.key })
+                        .map { "\($0.key)=\($0.value)" }
+                        .joined(separator: ", ")
+                )
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                if let recoveryAction = error.recoveryAction {
+                    Button(recoveryAction.label) {
+                        performRecoveryAction(recoveryAction)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                Button("Dismiss") {
+                    appErrorState = nil
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.red.opacity(0.08))
+        )
+    }
+
+    @ViewBuilder
     private var workspacePane: some View {
         switch selectedSidebarItem {
         case .notes:
@@ -545,6 +640,63 @@ private struct ObsRootSplitView: View {
         }
     }
 
+    private func performRecoveryAction(_ action: AppRecoveryAction) {
+        appErrorState = nil
+        switch action {
+        case .retryLoadVaultStats:
+            loadVaultStats()
+        case .retryLoadSelectedNote(let path):
+            loadSelectedNote(path: path)
+        case .retrySaveProperties:
+            saveProperties()
+        case .retryLoadLinks(let path):
+            loadLinkPanels(path: path)
+        case .retryLoadBasesList:
+            loadBasesList()
+        case .retryLoadBasePage:
+            loadSelectedBasePage()
+        }
+    }
+
+    private func presentAppError(
+        _ error: Error,
+        operation: String,
+        recoveryAction: AppRecoveryAction?
+    ) {
+        if let clientError = error as? ObsBridgeClientError {
+            switch clientError {
+            case .bridgeError(let typedError):
+                appErrorState = AppErrorState(
+                    title: "\(operation) failed",
+                    message: typedError.description,
+                    bridgeCode: typedError.bridgeCode,
+                    hint: typedError.bridgeHint,
+                    context: typedError.bridgeContext,
+                    recoveryAction: recoveryAction
+                )
+            default:
+                appErrorState = AppErrorState(
+                    title: "\(operation) failed",
+                    message: clientError.description,
+                    bridgeCode: nil,
+                    hint: nil,
+                    context: [:],
+                    recoveryAction: recoveryAction
+                )
+            }
+            return
+        }
+
+        appErrorState = AppErrorState(
+            title: "\(operation) failed",
+            message: String(describing: error),
+            bridgeCode: nil,
+            hint: nil,
+            context: [:],
+            recoveryAction: recoveryAction
+        )
+    }
+
     private func loadVaultStats() {
         let root = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
         let db = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -581,6 +733,7 @@ private struct ObsRootSplitView: View {
                     basesError = nil
                     isLoadingBases = false
                     isLoadingBasePage = false
+                    appErrorState = nil
                     isLoadingStats = false
                     if selectedSidebarItem == .bases {
                         loadBasesList()
@@ -589,6 +742,11 @@ private struct ObsRootSplitView: View {
             } catch {
                 await MainActor.run {
                     bridgeError = "bridge read failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Load vault stats",
+                        recoveryAction: .retryLoadVaultStats
+                    )
                     isLoadingStats = false
                 }
             }
@@ -644,6 +802,7 @@ private struct ObsRootSplitView: View {
                     propertiesError = nil
                     linkPanels = nil
                     linksError = nil
+                    appErrorState = nil
                     isLoadingNote = false
                     loadLinkPanels(path: note.path)
                 }
@@ -651,6 +810,11 @@ private struct ObsRootSplitView: View {
                 await MainActor.run {
                     selectedNote = nil
                     noteError = "note read failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Load note",
+                        recoveryAction: .retryLoadSelectedNote(path: path)
+                    )
                     propertiesStatus = nil
                     propertiesError = nil
                     linkPanels = nil
@@ -714,12 +878,18 @@ private struct ObsRootSplitView: View {
                 }.value
                 await MainActor.run {
                     propertiesStatus = "properties saved"
+                    appErrorState = nil
                     isSavingProperties = false
                     loadSelectedNote(path: selectedNote.path)
                 }
             } catch {
                 await MainActor.run {
                     propertiesError = "properties save failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Save properties",
+                        recoveryAction: .retrySaveProperties
+                    )
                     isSavingProperties = false
                 }
             }
@@ -744,12 +914,18 @@ private struct ObsRootSplitView: View {
                 }.value
                 await MainActor.run {
                     linkPanels = panels
+                    appErrorState = nil
                     isLoadingLinks = false
                 }
             } catch {
                 await MainActor.run {
                     linkPanels = nil
                     linksError = "links load failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Load links",
+                        recoveryAction: .retryLoadLinks(path: path)
+                    )
                     isLoadingLinks = false
                 }
             }
@@ -774,6 +950,7 @@ private struct ObsRootSplitView: View {
                 }.value
                 await MainActor.run {
                     baseRefs = refs
+                    appErrorState = nil
                     isLoadingBases = false
                     basePageNumber = 1
 
@@ -811,6 +988,11 @@ private struct ObsRootSplitView: View {
             } catch {
                 await MainActor.run {
                     basesError = "bases load failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Load bases",
+                        recoveryAction: .retryLoadBasesList
+                    )
                     isLoadingBases = false
                 }
             }
@@ -856,12 +1038,18 @@ private struct ObsRootSplitView: View {
                         && basePageNumber == requestPage
                     {
                         baseTablePage = page
+                        appErrorState = nil
                     }
                     isLoadingBasePage = false
                 }
             } catch {
                 await MainActor.run {
                     basesError = "bases table load failed: \(error)"
+                    presentAppError(
+                        error,
+                        operation: "Load base page",
+                        recoveryAction: .retryLoadBasePage
+                    )
                     baseTablePage = nil
                     isLoadingBasePage = false
                 }
