@@ -822,3 +822,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:bench:bridge, swift test, bun run util:check]
   - outcomes: [obs-bench now includes a bridge scenario measuring `note_get`, `notes_list`, `note_put`, and `events_poll` p50/p95/max with JSON report output and optional budget enforcement; rust-ci now generates and uploads `bench/reports/bridge-call-budgets.json` as an artifact; local benchmark/report run and full gates pass]
 - residual_risk: benchmark currently exercises in-process bridge kernel calls rather than subprocess transport overhead, so end-to-end Swift subprocess boundary latency characterization should be added if transport remains process-based
+
+- timestamp: 2026-03-03T18:15:19Z
+- session: session-2026-03-03-a
+- ticket: APP-001
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Package.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [macOS executable target `ObsMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
+- residual_risk: app shell currently contains placeholder pane content and no persisted state, so feature tickets APP-002 onward fill bridge integration and workflow behavior
