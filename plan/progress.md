@@ -1422,3 +1422,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-sdk-config, cargo check --workspace --release]
   - outcomes: [new tao-sdk-config crate added with typed TOML schema, defaults, merge precedence trait, normalization/validation, and bootstrap template helpers]
 - residual_risk: crate is not yet wired into sdk runtime loader; CFG-002..CFG-004 will integrate bootstrap/read/precedence flows
+
+- timestamp: 2026-03-03T23:53:00Z
+- session: session-2026-03-03-b
+- ticket: CFG-002
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-config/src/lib.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-sdk-config, cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+  - outcomes: [root config bootstrap/read helpers added to tao-sdk-config and invoked by SdkConfigLoader so repository root config.toml is auto-created and parsed when missing]
+- residual_risk: root config values are loaded but not yet merged into effective runtime precedence (implemented in CFG-004)

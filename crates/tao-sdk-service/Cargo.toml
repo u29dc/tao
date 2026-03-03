@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 tao-sdk-bases = { path = "../tao-sdk-bases" }
+tao-sdk-config = { path = "../tao-sdk-config" }
 tao-sdk-core = { path = "../tao-sdk-core" }
 tao-sdk-links = { path = "../tao-sdk-links" }
 tao-sdk-markdown = { path = "../tao-sdk-markdown" }

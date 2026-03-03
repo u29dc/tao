@@ -1043,6 +1043,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tao-sdk-bases",
+ "tao-sdk-config",
  "tao-sdk-core",
  "tao-sdk-links",
  "tao-sdk-markdown",

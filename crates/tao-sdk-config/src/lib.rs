@@ -144,6 +144,18 @@ pub fn load_from_path(path: &Path) -> Result<TaoConfig, TaoConfigError> {
     parse_toml(&body)
 }
 
+/// Resolve `config.toml` path for a repository or vault root.
+pub fn config_path(root: &Path) -> PathBuf {
+    root.join(CONFIG_FILE_NAME)
+}
+
+/// Bootstrap and load `config.toml` from a root directory.
+pub fn load_or_bootstrap(root: &Path) -> Result<TaoConfig, TaoConfigError> {
+    let path = config_path(root);
+    bootstrap_default_file(&path)?;
+    load_from_path(&path)
+}
+
 /// Persist default config template at `path` if file does not already exist.
 pub fn bootstrap_default_file(path: &Path) -> Result<(), TaoConfigError> {
     if path.exists() {
@@ -226,7 +238,8 @@ mod tests {
 
     use super::{
         CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, StorageConfig, TaoConfig,
-        TaoConfigError, bootstrap_default_file, default_template, load_from_path, parse_toml,
+        TaoConfigError, bootstrap_default_file, config_path, default_template, load_from_path,
+        load_or_bootstrap, parse_toml,
     };
 
     #[test]
@@ -344,5 +357,18 @@ mod tests {
         assert_eq!(defaults.runtime.tracing_enabled, Some(true));
         assert_eq!(defaults.runtime.feature_flags, Some(Vec::new()));
         assert_eq!(defaults.storage, StorageConfig::default());
+    }
+
+    #[test]
+    fn load_or_bootstrap_creates_and_loads_root_config_file() {
+        let temp = tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let loaded = load_or_bootstrap(&root).expect("load or bootstrap config");
+        assert_eq!(loaded, TaoConfig::default());
+
+        let file_path = config_path(&root);
+        assert!(file_path.exists(), "config file should be created");
     }
 }

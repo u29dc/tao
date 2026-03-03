@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tao_sdk_config::load_or_bootstrap;
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
@@ -65,6 +66,11 @@ impl SdkConfigLoader {
         env: &HashMap<String, String>,
         cwd: &Path,
     ) -> Result<SdkConfig, SdkConfigError> {
+        load_or_bootstrap(cwd).map_err(|source| SdkConfigError::RootConfig {
+            path: cwd.join("config.toml"),
+            source,
+        })?;
+
         let vault_root_input = choose_path(
             overrides.vault_root,
             env.get(ENV_VAULT_ROOT).map(PathBuf::from),
@@ -216,6 +222,15 @@ pub enum SdkConfigError {
         /// Filesystem error.
         #[source]
         source: std::io::Error,
+    },
+    /// Loading root config.toml failed.
+    #[error("failed to load root config '{path}': {source}")]
+    RootConfig {
+        /// Root config path.
+        path: PathBuf,
+        /// Config decode/bootstrap error.
+        #[source]
+        source: tao_sdk_config::TaoConfigError,
     },
     /// Vault root path does not exist.
     #[error("vault root path does not exist: '{path}'")]
@@ -400,5 +415,30 @@ mod tests {
                 .expect_err("invalid case policy should fail");
 
         assert!(matches!(error, SdkConfigError::InvalidCasePolicy { .. }));
+    }
+
+    #[test]
+    fn load_from_map_bootstraps_root_config_when_missing() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let root_config = temp.path().join("config.toml");
+        assert!(!root_config.exists(), "test precondition");
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect("load config with bootstrap");
+        assert_eq!(
+            loaded.vault_root,
+            fs::canonicalize(vault).expect("canonical vault")
+        );
+        assert!(root_config.exists(), "root config should be bootstrapped");
     }
 }
