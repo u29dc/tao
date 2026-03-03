@@ -1102,3 +1102,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p obs-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-baseline.json, cargo run -p obs-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-optimized.json, bun run util:check]
 - outcomes: [replaced resolve benchmark placeholder with real resolver workload harness, optimized resolver hot path to reduce per-candidate normalization/allocation in basename and path-match flows, and validated throughput improvement from 196.497 ops/s to 463.695 ops/s (2.36x) with lower p50/p95 latency]
 - residual_risk: benchmark uses synthetic candidate sets and may not fully represent deeply nested or unicode-heavy production vault path distributions
+
+- timestamp: 2026-03-03T19:41:53Z
+- session: session-2026-03-03-a
+- ticket: QA-006
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-sdk-service reconciliation_scanner_handles_burst_changes_consistently -- --nocapture, bun run util:check]
+- outcomes: [added burst-change chaos test that seeds 40 notes, applies concurrent-style update/delete/insert wave (35 drift paths), verifies reconciliation repair batching, validates final file cardinality, checks index consistency report is empty, and asserts subsequent reconcile pass is noop]
+- residual_risk: chaos sequence is deterministic and file-system local; additional randomized burst schedules could further strengthen long-run flake detection

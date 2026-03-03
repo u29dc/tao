@@ -3118,6 +3118,64 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_scanner_handles_burst_changes_consistently() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+
+        for index in 0..40_u64 {
+            let path = temp.path().join(format!("notes/n{index:02}.md"));
+            let next = (index + 1) % 40;
+            fs::write(path, format!("# Note {index}\n[[n{next:02}]]")).expect("write seed note");
+        }
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        for index in 0..10_u64 {
+            let path = temp.path().join(format!("notes/n{index:02}.md"));
+            fs::write(path, format!("# Note {index} updated\n[[n{index:02}]]"))
+                .expect("update existing note");
+        }
+        for index in 10..20_u64 {
+            let path = temp.path().join(format!("notes/n{index:02}.md"));
+            fs::remove_file(path).expect("remove existing note");
+        }
+        for index in 40..55_u64 {
+            let path = temp.path().join(format!("notes/n{index:02}.md"));
+            fs::write(path, format!("# New Note {index}\n[[n00]]")).expect("write inserted note");
+        }
+
+        let result = ReconciliationScannerService::default()
+            .scan_and_repair(temp.path(), &mut connection, CasePolicy::Sensitive, 4)
+            .expect("run reconciliation repair for burst changes");
+
+        assert_eq!(result.inserted_paths, 15);
+        assert_eq!(result.updated_paths, 10);
+        assert_eq!(result.removed_paths, 10);
+        assert_eq!(result.drift_paths, 35);
+        assert_eq!(result.batches_applied, 9);
+
+        let files = FilesRepository::list_all(&connection).expect("list reconciled files");
+        assert_eq!(files.len(), 45);
+
+        let report = IndexConsistencyChecker
+            .check(temp.path(), &connection)
+            .expect("run consistency checker");
+        assert!(report.issues.is_empty());
+
+        let second = ReconciliationScannerService::default()
+            .scan_and_repair(temp.path(), &mut connection, CasePolicy::Sensitive, 4)
+            .expect("run reconciliation after stabilization");
+        assert_eq!(second.drift_paths, 0);
+        assert_eq!(second.inserted_paths, 0);
+        assert_eq!(second.updated_paths, 0);
+        assert_eq!(second.removed_paths, 0);
+    }
+
+    #[test]
     fn consistency_checker_reports_orphans_and_broken_references() {
         let temp = tempdir().expect("tempdir");
         fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
