@@ -980,5 +980,15 @@ Append-only execution log for autonomous runs.
 - evidence:
   - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
   - commands: [cargo run -p obs-cli -- --json note put/get/list ..., bun run util:check]
-  - outcomes: [replaced note command placeholders with SDK-backed bridge wrappers (`note.get`, `note.put`, `note.list`), added bridge envelope-to-cli error mapping, and implemented paged list aggregation for stable JSON note list output]
+- outcomes: [replaced note command placeholders with SDK-backed bridge wrappers (`note.get`, `note.put`, `note.list`), added bridge envelope-to-cli error mapping, and implemented paged list aggregation for stable JSON note list output]
 - residual_risk: note list currently uses fixed page size 1000 per bridge call and does not expose cursor/limit flags yet, so very large vault windows are aggregated in-process
+
+- timestamp: 2026-03-03T19:11:59Z
+- session: session-2026-03-03-a
+- ticket: CLI-005
+- action: done
+- evidence:
+  - files: [crates/obs-cli/Cargo.toml, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo run -p obs-cli -- --json links outgoing/backlinks ..., cargo run -p obs-cli -- --json properties set/get ..., bun run util:check]
+  - outcomes: [implemented `links.outgoing`/`links.backlinks` wrappers using bridge link panels with stable item payloads; implemented `properties.get` using indexed property rows and `properties.set` using typed property update service with CLI value parsing for primitives/json arrays]
+- residual_risk: property set currently stringifies JSON object payloads because SDK typed property model supports scalar/list/null only, so nested object edits require future schema support

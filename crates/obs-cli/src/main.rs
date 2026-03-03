@@ -4,8 +4,11 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel};
-use obs_sdk_service::{FullIndexService, HealthSnapshotService, ReconcileService, WatcherStatus};
-use obs_sdk_storage::run_migrations;
+use obs_sdk_properties::TypedPropertyValue;
+use obs_sdk_service::{
+    FullIndexService, HealthSnapshotService, PropertyUpdateService, ReconcileService, WatcherStatus,
+};
+use obs_sdk_storage::{FilesRepository, PropertiesRepository, run_migrations};
 use obs_sdk_vault::CasePolicy;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -422,31 +425,157 @@ fn handle_note(command: NoteCommands) -> Result<CommandResult> {
 
 fn handle_links(command: LinksCommands) -> Result<CommandResult> {
     match command {
-        LinksCommands::Outgoing(args) => placeholder_result(
-            "links.outgoing",
-            "links outgoing is not implemented yet",
-            args,
-        ),
-        LinksCommands::Backlinks(args) => placeholder_result(
-            "links.backlinks",
-            "links backlinks is not implemented yet",
-            args,
-        ),
+        LinksCommands::Outgoing(args) => {
+            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let panels = expect_bridge_value(kernel.note_links(&args.path), "links.outgoing")?;
+            let items = panels
+                .outgoing
+                .into_iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "links.outgoing".to_string(),
+                summary: "links outgoing completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
+        LinksCommands::Backlinks(args) => {
+            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let panels = expect_bridge_value(kernel.note_links(&args.path), "links.backlinks")?;
+            let items = panels
+                .backlinks
+                .into_iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "links.backlinks".to_string(),
+                summary: "links backlinks completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
     }
 }
 
 fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
     match command {
-        PropertiesCommands::Get(args) => placeholder_result(
-            "properties.get",
-            "properties get is not implemented yet",
-            args,
-        ),
-        PropertiesCommands::Set(args) => placeholder_result(
-            "properties.set",
-            "properties set is not implemented yet",
-            args,
-        ),
+        PropertiesCommands::Get(args) => {
+            let vault_args = VaultPathArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+            };
+            let connection = open_initialized_connection(&vault_args)?;
+            let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
+                .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
+            let Some(file) = file else {
+                return Ok(CommandResult {
+                    command: "properties.get".to_string(),
+                    summary: "properties get completed".to_string(),
+                    args: serde_json::json!({
+                        "path": args.path,
+                        "total": 0,
+                        "items": [],
+                    }),
+                });
+            };
+
+            let rows = PropertiesRepository::list_for_file_with_path(&connection, &file.file_id)
+                .map_err(|source| anyhow!("query properties failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let parsed_value = serde_json::from_str::<JsonValue>(&row.value_json)
+                        .unwrap_or_else(|_| JsonValue::String(row.value_json.clone()));
+                    serde_json::json!({
+                        "property_id": row.property_id,
+                        "file_id": row.file_id,
+                        "file_path": row.file_path,
+                        "key": row.key,
+                        "value_type": row.value_type,
+                        "value": parsed_value,
+                        "value_json": row.value_json,
+                        "updated_at": row.updated_at,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            Ok(CommandResult {
+                command: "properties.get".to_string(),
+                summary: "properties get completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "file_id": file.file_id,
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
+        PropertiesCommands::Set(args) => {
+            let vault_args = VaultPathArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+            };
+            let mut connection = open_initialized_connection(&vault_args)?;
+            let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
+                .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
+            let Some(file) = file else {
+                return Err(anyhow!(
+                    "note path is not indexed; run vault reindex first: {}",
+                    args.path
+                ));
+            };
+
+            let typed_value = parse_cli_property_value(&args.value)?;
+            let result = PropertyUpdateService::default()
+                .set_property(
+                    Path::new(&args.vault_root),
+                    &mut connection,
+                    &file.file_id,
+                    &args.key,
+                    typed_value,
+                )
+                .map_err(|source| anyhow!("property set failed: {source}"))?;
+
+            Ok(CommandResult {
+                command: "properties.set".to_string(),
+                summary: "properties set completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "file_id": result.file_id,
+                    "key": result.key,
+                    "value": typed_property_value_to_json(&result.value),
+                    "title": result.parsed.title,
+                    "headings_total": result.parsed.headings.len(),
+                }),
+            })
+        }
     }
 }
 
@@ -502,6 +631,65 @@ fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str) -> Result<
             Err(anyhow!(message))
         }
         None => Err(anyhow!("{command} failed without an error payload")),
+    }
+}
+
+fn parse_cli_property_value(raw: &str) -> Result<TypedPropertyValue> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(TypedPropertyValue::String(String::new()));
+    }
+    if trimmed.eq_ignore_ascii_case("null") {
+        return Ok(TypedPropertyValue::Null);
+    }
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Ok(TypedPropertyValue::Bool(true));
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Ok(TypedPropertyValue::Bool(false));
+    }
+    if let Ok(value) = trimmed.parse::<f64>() {
+        return Ok(TypedPropertyValue::Number(value));
+    }
+    if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed) {
+        return json_to_typed_property_value(&value);
+    }
+    Ok(TypedPropertyValue::String(raw.to_string()))
+}
+
+fn json_to_typed_property_value(value: &JsonValue) -> Result<TypedPropertyValue> {
+    match value {
+        JsonValue::Null => Ok(TypedPropertyValue::Null),
+        JsonValue::Bool(value) => Ok(TypedPropertyValue::Bool(*value)),
+        JsonValue::Number(value) => value
+            .as_f64()
+            .map(TypedPropertyValue::Number)
+            .ok_or_else(|| anyhow!("property numeric value is out of supported range")),
+        JsonValue::String(value) => Ok(TypedPropertyValue::String(value.clone())),
+        JsonValue::Array(values) => {
+            let typed_values = values
+                .iter()
+                .map(json_to_typed_property_value)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(TypedPropertyValue::List(typed_values))
+        }
+        JsonValue::Object(_) => Ok(TypedPropertyValue::String(value.to_string())),
+    }
+}
+
+fn typed_property_value_to_json(value: &TypedPropertyValue) -> JsonValue {
+    match value {
+        TypedPropertyValue::Bool(value) => JsonValue::Bool(*value),
+        TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => {
+            JsonValue::String(value.clone())
+        }
+        TypedPropertyValue::List(values) => {
+            JsonValue::Array(values.iter().map(typed_property_value_to_json).collect())
+        }
+        TypedPropertyValue::Null => JsonValue::Null,
     }
 }
 

@@ -361,6 +361,7 @@ dependencies = [
  "anyhow",
  "clap",
  "obs-sdk-bridge",
+ "obs-sdk-properties",
  "obs-sdk-service",
  "obs-sdk-storage",
  "obs-sdk-vault",
