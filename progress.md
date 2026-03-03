@@ -1262,3 +1262,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [implemented searchable route with slash-triggered query input mode, SDK-backed query filtering over indexed notes, keyboard result navigation, and Enter-based open-note transition into Notes route; added integration test validating query->result->open flow]
 - residual_risk: search currently performs client-side filtering over note windows and does not yet use dedicated indexed ranking/scoring
+
+- timestamp: 2026-03-03T20:28:59Z
+- session: session-2026-03-03-a
+- ticket: TUI-005
+- action: done
+- evidence:
+  - files: [crates/obs-tui/src/main.rs, crates/obs-tui/README.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [implemented bases route with bridge-backed base registry loading, base/view cycling, page navigation (`n`/`p`) and table row sort toggle (`s`); added table rendering with dynamic columns and stable row projection; added tests for sort-mode ordering and pagination gating]
+- residual_risk: bases row sort currently uses client-side path sorting within the returned page and does not recompile query planner order for arbitrary column sorts

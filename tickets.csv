@@ -101,7 +101,7 @@
 "TUI-002","Implement route shell and keymap","tui","phase6","TUI-001","done","P3","codex","3","0","","route switching and command palette work"
 "TUI-003","Implement note list and viewer route","tui","phase6","TUI-002|SDK-010","done","P3","codex","3","0","","view notes and note content"
 "TUI-004","Implement search route","tui","phase6","TUI-002|BASE-008","done","P3","codex","3","0","","search list and open note flow work"
-"TUI-005","Implement bases table route","tui","phase6","TUI-002|BASE-004","todo","P3","unassigned","3","0","","table route paginates and sorts"
+"TUI-005","Implement bases table route","tui","phase6","TUI-002|BASE-004","done","P3","codex","3","0","","table route paginates and sorts"
 "QA-001","Build conformance fixture vault","qa","phase4","DOC-003","done","P2","codex","3","0","","fixture set covers links/properties/bases edge cases"
 "QA-002","Add SDK integration test harness","qa","phase4","INFRA-004","done","P2","codex","3","0","","integration tests run fixture vault end-to-end"
 "QA-003","Add resolver determinism tests","qa","phase4","LINK-002|QA-001","done","P2","codex","3","0","","repeated runs yield identical resolutions"

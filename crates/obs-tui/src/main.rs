@@ -9,13 +9,18 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use obs_sdk_bridge::{BridgeEnvelope, BridgeKernel, BridgeNoteSummary, BridgeNoteView};
+use obs_sdk_bridge::{
+    BridgeBaseRef, BridgeBaseTablePage, BridgeEnvelope, BridgeKernel, BridgeNoteSummary,
+    BridgeNoteView,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "obs-tui", version, about = "obs terminal ui")]
@@ -151,6 +156,31 @@ impl AppContext {
         matches.sort_unstable_by(|left, right| left.path.cmp(&right.path));
         Ok(matches)
     }
+
+    fn list_bases(&self) -> std::result::Result<Vec<BridgeBaseRef>, String> {
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            "bases route unavailable without --vault-root and --db-path".to_string()
+        })?;
+        let mut bases = expect_bridge_value(bridge.bases_list(), "bases.list")?;
+        bases.sort_unstable_by(|left, right| left.file_path.cmp(&right.file_path));
+        Ok(bases)
+    }
+
+    fn load_base_view(
+        &self,
+        path_or_id: &str,
+        view_name: &str,
+        page: u32,
+        page_size: u32,
+    ) -> std::result::Result<BridgeBaseTablePage, String> {
+        let bridge = self.bridge.as_ref().ok_or_else(|| {
+            "bases route unavailable without --vault-root and --db-path".to_string()
+        })?;
+        expect_bridge_value(
+            bridge.bases_view(path_or_id, view_name, page, page_size),
+            "bases.view",
+        )
+    }
 }
 
 fn expect_bridge_value<T>(
@@ -189,6 +219,13 @@ struct AppState {
     search_input_mode: bool,
     search_results: Vec<BridgeNoteSummary>,
     selected_search_index: usize,
+    bases: Vec<BridgeBaseRef>,
+    selected_base_index: usize,
+    selected_view_index: usize,
+    base_page_number: u32,
+    base_page_size: u32,
+    base_table_page: Option<BridgeBaseTablePage>,
+    base_sort_mode: BaseSortMode,
 }
 
 impl Default for AppState {
@@ -206,6 +243,13 @@ impl Default for AppState {
             search_input_mode: false,
             search_results: Vec::new(),
             selected_search_index: 0,
+            bases: Vec::new(),
+            selected_base_index: 0,
+            selected_view_index: 0,
+            base_page_number: 1,
+            base_page_size: 25,
+            base_table_page: None,
+            base_sort_mode: BaseSortMode::PathAsc,
         }
     }
 }
@@ -214,6 +258,28 @@ impl Default for AppState {
 enum PaletteCommand {
     SwitchRoute(Route),
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseSortMode {
+    PathAsc,
+    PathDesc,
+}
+
+impl BaseSortMode {
+    fn toggle(self) -> Self {
+        match self {
+            Self::PathAsc => Self::PathDesc,
+            Self::PathDesc => Self::PathAsc,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PathAsc => "path asc",
+            Self::PathDesc => "path desc",
+        }
+    }
 }
 
 impl AppState {
@@ -230,7 +296,8 @@ impl AppState {
         match route {
             Route::Notes => self.refresh_notes(context),
             Route::Search => self.refresh_search_results(context),
-            Route::Placeholder | Route::Bases => {}
+            Route::Bases => self.refresh_bases(context),
+            Route::Placeholder => {}
         }
     }
 
@@ -279,7 +346,8 @@ impl AppState {
                 _ => {}
             },
             Route::Search => self.handle_search_key(key, context),
-            Route::Placeholder | Route::Bases => {}
+            Route::Bases => self.handle_bases_key(key, context),
+            Route::Placeholder => {}
         }
     }
 
@@ -480,6 +548,154 @@ impl AppState {
         self.reload_selected_note_view(context);
         true
     }
+
+    fn handle_bases_key(&mut self, key: KeyEvent, context: &AppContext) {
+        match key.code {
+            KeyCode::Char('r') => self.refresh_bases(context),
+            KeyCode::Char('n') => self.next_base_page(context),
+            KeyCode::Char('p') => self.previous_base_page(context),
+            KeyCode::Char('s') => self.toggle_base_sort(),
+            KeyCode::Char('[') => self.previous_base(context),
+            KeyCode::Char(']') => self.next_base(context),
+            KeyCode::Char('v') => self.next_base_view(context),
+            _ => {}
+        }
+    }
+
+    fn refresh_bases(&mut self, context: &AppContext) {
+        match context.list_bases() {
+            Ok(bases) => {
+                self.bases = bases;
+                self.selected_base_index = 0;
+                self.selected_view_index = 0;
+                self.base_page_number = 1;
+                self.base_table_page = None;
+                if self.bases.is_empty() {
+                    self.status = "bases route active: no indexed bases found".to_string();
+                    return;
+                }
+                self.load_selected_base_table(context);
+            }
+            Err(message) => {
+                self.bases.clear();
+                self.base_table_page = None;
+                self.status = format!("bases load error: {message}");
+            }
+        }
+    }
+
+    fn current_base(&self) -> Option<&BridgeBaseRef> {
+        self.bases.get(self.selected_base_index)
+    }
+
+    fn current_view_name(&self) -> Option<&str> {
+        let base = self.current_base()?;
+        base.views
+            .get(self.selected_view_index)
+            .map(std::string::String::as_str)
+    }
+
+    fn load_selected_base_table(&mut self, context: &AppContext) {
+        let (base_id, view_name) = match (self.current_base(), self.current_view_name()) {
+            (Some(base), Some(view_name)) => (base.base_id.clone(), view_name.to_string()),
+            (Some(_), None) => {
+                self.base_table_page = None;
+                self.status = "selected base has no views".to_string();
+                return;
+            }
+            (None, _) => {
+                self.base_table_page = None;
+                self.status = "no base selected".to_string();
+                return;
+            }
+        };
+
+        match context.load_base_view(
+            &base_id,
+            &view_name,
+            self.base_page_number,
+            self.base_page_size,
+        ) {
+            Ok(mut page) => {
+                apply_base_sort_mode(&mut page, self.base_sort_mode);
+                self.base_table_page = Some(page);
+                self.status = format!(
+                    "bases view loaded: base={} view={} page={}",
+                    base_id, view_name, self.base_page_number
+                );
+            }
+            Err(message) => {
+                self.base_table_page = None;
+                self.status = format!("bases view error: {message}");
+            }
+        }
+    }
+
+    fn next_base_page(&mut self, context: &AppContext) {
+        if let Some(page) = &self.base_table_page
+            && !page.has_more
+        {
+            return;
+        }
+        self.base_page_number = self.base_page_number.saturating_add(1);
+        self.load_selected_base_table(context);
+    }
+
+    fn previous_base_page(&mut self, context: &AppContext) {
+        if self.base_page_number <= 1 {
+            return;
+        }
+        self.base_page_number = self.base_page_number.saturating_sub(1);
+        self.load_selected_base_table(context);
+    }
+
+    fn previous_base(&mut self, context: &AppContext) {
+        if self.bases.is_empty() || self.selected_base_index == 0 {
+            return;
+        }
+        self.selected_base_index = self.selected_base_index.saturating_sub(1);
+        self.selected_view_index = 0;
+        self.base_page_number = 1;
+        self.load_selected_base_table(context);
+    }
+
+    fn next_base(&mut self, context: &AppContext) {
+        if self.bases.is_empty() || self.selected_base_index + 1 >= self.bases.len() {
+            return;
+        }
+        self.selected_base_index += 1;
+        self.selected_view_index = 0;
+        self.base_page_number = 1;
+        self.load_selected_base_table(context);
+    }
+
+    fn next_base_view(&mut self, context: &AppContext) {
+        let Some(base) = self.current_base() else {
+            return;
+        };
+        if base.views.is_empty() {
+            return;
+        }
+        self.selected_view_index = (self.selected_view_index + 1) % base.views.len();
+        self.base_page_number = 1;
+        self.load_selected_base_table(context);
+    }
+
+    fn toggle_base_sort(&mut self) {
+        self.base_sort_mode = self.base_sort_mode.toggle();
+        if let Some(page) = &mut self.base_table_page {
+            apply_base_sort_mode(page, self.base_sort_mode);
+        }
+        self.status = format!("bases sort mode: {}", self.base_sort_mode.as_str());
+    }
+}
+
+fn apply_base_sort_mode(page: &mut BridgeBaseTablePage, mode: BaseSortMode) {
+    page.rows
+        .sort_unstable_by(|left, right| left.file_path.cmp(&right.file_path));
+    if mode == BaseSortMode::PathDesc {
+        page.rows.reverse();
+    }
 }
 
 fn parse_palette_command(input: &str) -> std::result::Result<PaletteCommand, String> {
@@ -547,6 +763,7 @@ fn render_route_body(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState)
     match app.route {
         Route::Notes => render_notes_route(frame, area, app),
         Route::Search => render_search_route(frame, area, app),
+        Route::Bases => render_bases_route(frame, area, app),
         _ => {
             let body = Paragraph::new(app.route.help_text())
                 .block(Block::default().borders(Borders::ALL).title("Route"))
@@ -661,6 +878,91 @@ fn render_search_route(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppStat
     frame.render_widget(details, columns[1]);
 }
 
+fn render_bases_route(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(area);
+
+    let selected_base = app.current_base();
+    let selected_view = app.current_view_name().unwrap_or("n/a");
+    let header = Paragraph::new(format!(
+        "base={} | view={} | page={} | sort={} | keys: [ ] base, v view, n/p page, s sort, r refresh",
+        selected_base
+            .map(|base| base.file_path.as_str())
+            .unwrap_or("n/a"),
+        selected_view,
+        app.base_page_number,
+        app.base_sort_mode.as_str()
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Bases"));
+    frame.render_widget(header, rows[0]);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+        .split(rows[1]);
+
+    let base_items = app
+        .bases
+        .iter()
+        .map(|base| ListItem::new(Line::from(base.file_path.clone())))
+        .collect::<Vec<_>>();
+    let base_list = List::new(base_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Base Files ({})", app.bases.len())),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let mut base_state = ListState::default();
+    if !app.bases.is_empty() {
+        base_state.select(Some(app.selected_base_index));
+    }
+    frame.render_stateful_widget(base_list, columns[0], &mut base_state);
+
+    if let Some(page) = &app.base_table_page {
+        let table_rows = page
+            .rows
+            .iter()
+            .map(|row| {
+                let mut cells = Vec::new();
+                cells.push(Cell::from(row.file_path.clone()));
+                for column in &page.columns {
+                    let value = row.values.get(&column.key).cloned().unwrap_or_default();
+                    cells.push(Cell::from(value));
+                }
+                Row::new(cells)
+            })
+            .collect::<Vec<_>>();
+
+        let mut header_cells = Vec::new();
+        header_cells.push(Cell::from("file"));
+        for column in &page.columns {
+            header_cells.push(Cell::from(
+                column.label.clone().unwrap_or_else(|| column.key.clone()),
+            ));
+        }
+        let widths = vec![Constraint::Min(18); header_cells.len().max(1)];
+        let table = Table::new(table_rows, widths)
+            .header(Row::new(header_cells).style(Style::default().add_modifier(Modifier::BOLD)))
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "Rows total={} has_more={}",
+                page.total, page.has_more
+            )))
+            .column_spacing(1);
+        frame.render_widget(table, columns[1]);
+    } else {
+        let empty = Paragraph::new(
+            "No base table page loaded. Ensure at least one .base file is indexed and has table views.",
+        )
+        .block(Block::default().borders(Borders::ALL).title("Rows"))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(empty, columns[1]);
+    }
+}
+
 fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -735,9 +1037,12 @@ fn main() -> Result<()> {
 mod tests {
     use std::fs;
 
+    use obs_sdk_bridge::{BridgeBaseColumn, BridgeBaseTableRow};
+
     use super::{
-        AppContext, AppState, BridgeEnvelope, BridgeKernel, KeyCode, KeyEvent, KeyModifiers,
-        PaletteCommand, Route, parse_palette_command,
+        AppContext, AppState, BaseSortMode, BridgeBaseTablePage, BridgeEnvelope, BridgeKernel,
+        KeyCode, KeyEvent, KeyModifiers, PaletteCommand, Route, apply_base_sort_mode,
+        parse_palette_command,
     };
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -883,5 +1188,72 @@ mod tests {
             .expect("selected note should open from search");
         assert_eq!(selected.path, "notes/beta.md");
         assert!(selected.body.contains("Body B"));
+    }
+
+    fn sample_base_page(has_more: bool) -> BridgeBaseTablePage {
+        BridgeBaseTablePage {
+            base_id: "b_projects".to_string(),
+            file_path: "views/projects.base".to_string(),
+            view_name: "Projects".to_string(),
+            page: 1,
+            page_size: 25,
+            total: 2,
+            has_more,
+            columns: vec![BridgeBaseColumn {
+                key: "status".to_string(),
+                label: Some("status".to_string()),
+                hidden: false,
+                width: None,
+            }],
+            rows: vec![
+                BridgeBaseTableRow {
+                    file_id: "f_b".to_string(),
+                    file_path: "notes/beta.md".to_string(),
+                    values: [("status".to_string(), "paused".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                BridgeBaseTableRow {
+                    file_id: "f_a".to_string(),
+                    file_path: "notes/alpha.md".to_string(),
+                    values: [("status".to_string(), "active".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn base_sort_mode_reorders_rows_by_file_path() {
+        let mut page = sample_base_page(false);
+        apply_base_sort_mode(&mut page, BaseSortMode::PathAsc);
+        assert_eq!(page.rows[0].file_path, "notes/alpha.md");
+        assert_eq!(page.rows[1].file_path, "notes/beta.md");
+
+        apply_base_sort_mode(&mut page, BaseSortMode::PathDesc);
+        assert_eq!(page.rows[0].file_path, "notes/beta.md");
+        assert_eq!(page.rows[1].file_path, "notes/alpha.md");
+    }
+
+    #[test]
+    fn bases_pagination_respects_has_more_gate() {
+        let context = AppContext::from_args(&super::CliArgs {
+            vault_root: None,
+            db_path: None,
+        });
+        let mut app = AppState {
+            base_page_number: 1,
+            base_table_page: Some(sample_base_page(false)),
+            ..AppState::default()
+        };
+        app.next_base_page(&context);
+        assert_eq!(app.base_page_number, 1);
+
+        app.base_table_page = Some(sample_base_page(true));
+        app.next_base_page(&context);
+        assert_eq!(app.base_page_number, 2);
+        app.previous_base_page(&context);
+        assert_eq!(app.base_page_number, 1);
     }
 }
