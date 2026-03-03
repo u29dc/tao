@@ -22,12 +22,14 @@ private enum SidebarItem: String, CaseIterable, Identifiable {
 
 private struct ObsRootSplitView: View {
     @State private var selectedSidebarItem: SidebarItem? = .notes
+    @State private var selectedTreePath: String?
     @State private var vaultRoot = ""
     @State private var dbPath = ""
     @State private var openedVaultRoot: String?
     @State private var statsSummary = "Bridge read APIs not called yet."
     @State private var bridgeError: String?
     @State private var isLoadingStats = false
+    @StateObject private var fileTreeViewModel = FileTreeViewModel()
 
     var body: some View {
         NavigationSplitView {
@@ -42,6 +44,7 @@ private struct ObsRootSplitView: View {
                     .font(.headline)
                 Text(contentLabel(for: selectedSidebarItem))
                     .foregroundStyle(.secondary)
+                workspacePane
                 Divider()
                 Text("Bridge Integration")
                     .font(.headline)
@@ -93,8 +96,13 @@ private struct ObsRootSplitView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Inspector")
                     .font(.headline)
-                Text("Split-layout scaffolding for upcoming vault/navigation/note panes.")
-                    .foregroundStyle(.secondary)
+                if let selectedTreePath {
+                    Text("Selected: \(selectedTreePath)")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Select a file from the tree to inspect its path.")
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -116,13 +124,61 @@ private struct ObsRootSplitView: View {
     private func contentLabel(for item: SidebarItem?) -> String {
         switch item {
         case .vault:
-            return "Vault overview pane placeholder"
+            return "Vault overview"
         case .notes:
-            return "Note list and reader pane placeholder"
+            return "Lazy-loaded file tree"
         case .bases:
             return "Bases table pane placeholder"
         case .none:
             return "Select a section"
+        }
+    }
+
+    @ViewBuilder
+    private var workspacePane: some View {
+        switch selectedSidebarItem {
+        case .notes:
+            List(selection: $selectedTreePath) {
+                OutlineGroup(fileTreeViewModel.roots, children: \.children) { node in
+                    HStack(spacing: 8) {
+                        Image(systemName: node.isFile ? "doc.text" : "folder")
+                            .foregroundStyle(node.isFile ? .secondary : .primary)
+                        Text(node.name)
+                    }
+                    .tag(node.path)
+                }
+            }
+            .frame(minHeight: 240)
+
+            HStack(spacing: 12) {
+                Button("Load More Notes") {
+                    fileTreeViewModel.loadNextPage()
+                }
+                .disabled(!fileTreeViewModel.canLoadMore || fileTreeViewModel.isLoading)
+
+                if fileTreeViewModel.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let errorMessage = fileTreeViewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        case .vault:
+            Text(openedVaultRoot ?? "No vault open")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .bases:
+            Text("Bases screen scaffold")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .none:
+            EmptyView()
         }
     }
 
@@ -147,6 +203,7 @@ private struct ObsRootSplitView: View {
                     statsSummary =
                         "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
                     openedVaultRoot = root
+                    fileTreeViewModel.bindVault(vaultRoot: root, dbPath: db)
                     isLoadingStats = false
                 }
             } catch {

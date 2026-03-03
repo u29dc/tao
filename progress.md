@@ -852,3 +852,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [native macOS vault picker flow added via `NSOpenPanel`; selecting a folder sets vault/database paths, triggers bridge stats load, and surfaces opened-vault root state in the UI header]
 - residual_risk: opened vault and database path state is currently in-memory only, so startup restoration for last session remains a dedicated follow-up in APP-012
+
+- timestamp: 2026-03-03T18:20:35Z
+- session: session-2026-03-03-a
+- ticket: APP-004
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/FileTreeViewModel.swift, apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [lazy-loaded file tree view model added with paged `notesList` ingestion, hierarchical path-to-tree conversion, load-more cursor behavior, and selection wiring in Notes pane; app now navigates large note sets incrementally]
+- residual_risk: current tree hydration requests fixed-size pages and rebuilds the tree in-memory each append, so future perf passes may switch to incremental node insertion for very large vaults
