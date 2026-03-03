@@ -6,8 +6,10 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod files;
+mod transaction;
 
 pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
+pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
 /// Initial schema migration identifier.
 pub const MIGRATION_0001_ID: &str = "0001_init";

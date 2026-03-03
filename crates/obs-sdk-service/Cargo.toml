@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 obs-sdk-markdown = { path = "../obs-sdk-markdown" }
+obs-sdk-storage = { path = "../obs-sdk-storage" }
 obs-sdk-vault = { path = "../obs-sdk-vault" }
+rusqlite.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

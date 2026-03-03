@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 use obs_sdk_markdown::{
     MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,
 };
+use obs_sdk_storage::{FileRecordInput, StorageTransactionError, with_transaction};
 use obs_sdk_vault::{
     CasePolicy, PathCanonicalizationError, VaultManifestEntry, VaultScanError, VaultScanService,
 };
+use rusqlite::Connection;
 use thiserror::Error;
 
 /// Parsed markdown note produced by the ingest pipeline shell.
@@ -108,6 +110,37 @@ fn is_markdown_file(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
+/// Service wrapper for storage writes executed inside typed transactions.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StorageWriteService;
+
+impl StorageWriteService {
+    /// Insert one file record using the typed storage transaction API.
+    pub fn create_file_record(
+        &self,
+        connection: &mut Connection,
+        record: &FileRecordInput,
+    ) -> Result<(), StorageWriteError> {
+        with_transaction(connection, |transaction| {
+            transaction.files_insert(record)?;
+            Ok(())
+        })
+        .map_err(|source| StorageWriteError::Transaction { source })
+    }
+}
+
+/// Errors returned by service-layer storage writes.
+#[derive(Debug, Error)]
+pub enum StorageWriteError {
+    /// Typed storage transaction failed.
+    #[error("storage write transaction failed: {source}")]
+    Transaction {
+        /// Transaction error details.
+        #[source]
+        source: StorageTransactionError,
+    },
+}
+
 /// Errors returned by markdown ingest pipeline shell operations.
 #[derive(Debug, Error)]
 pub enum MarkdownIngestError {
@@ -158,9 +191,11 @@ pub enum MarkdownIngestError {
 mod tests {
     use std::fs;
 
+    use obs_sdk_storage::{FileRecordInput, FilesRepository, run_migrations};
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{CasePolicy, MarkdownIngestPipeline};
+    use super::{CasePolicy, MarkdownIngestPipeline, StorageWriteService};
 
     #[test]
     fn ingest_vault_parses_markdown_and_skips_non_markdown() {
@@ -193,5 +228,32 @@ mod tests {
         assert_eq!(notes.len(), 2);
         assert_eq!(notes[0].parsed.title, "A");
         assert_eq!(notes[1].parsed.title, "B");
+    }
+
+    #[test]
+    fn storage_write_service_uses_typed_transaction_wrapper() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = StorageWriteService;
+        let record = FileRecordInput {
+            file_id: "f1".to_string(),
+            normalized_path: "notes/typed.md".to_string(),
+            match_key: "notes/typed.md".to_string(),
+            absolute_path: "/vault/notes/typed.md".to_string(),
+            size_bytes: 10,
+            modified_unix_ms: 1_700_000_000_000,
+            hash_blake3: "hash-typed".to_string(),
+            is_markdown: true,
+        };
+
+        service
+            .create_file_record(&mut connection, &record)
+            .expect("create file record through transaction wrapper");
+
+        let persisted = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get persisted record")
+            .expect("record should exist");
+        assert_eq!(persisted.normalized_path, "notes/typed.md");
     }
 }

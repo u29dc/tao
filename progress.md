@@ -302,3 +302,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [files repository CRUD and transactional bulk upsert implemented with integration tests]
 - residual_risk: repository currently uses string ids directly; typed id wrappers can be introduced in sdk-core primitives later
+
+- timestamp: 2026-03-03T18:16:00Z
+- session: session-2026-03-03-a
+- ticket: DB-004
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-storage/src/lib.rs, crates/obs-sdk-storage/src/transaction.rs, crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [typed storage transaction wrapper implemented and consumed by service-layer write service]
+- residual_risk: wrapper currently targets files repository operations; additional typed repo surfaces will expand in later db tickets

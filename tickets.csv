@@ -38,7 +38,7 @@ id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blo
 "DB-001","Create initial sqlite schema","db","phase1","ARC-006","done","P1","codex","3","0","","schema migration `0001_init.sql` applied cleanly"
 "DB-002","Create migration runner","db","phase1","DB-001","done","P1","codex","3","0","","forward-only migration runner with checksum guard"
 "DB-003","Implement files table repository","db","phase1","DB-001","done","P1","codex","3","0","","CRUD + bulk upsert tested"
-"DB-004","Implement transaction wrapper","db","phase1","DB-001","todo","P1","unassigned","3","0","","typed transaction API used by services"
+"DB-004","Implement transaction wrapper","db","phase1","DB-001","done","P1","codex","3","0","","typed transaction API used by services"
 "DB-005","Implement links/properties repositories","db","phase1","DB-003","todo","P1","unassigned","3","0","","join queries validated by tests"
 "DB-006","Implement bases repositories","db","phase2","DB-003","todo","P1","unassigned","3","0","","`.base` metadata read/write queries tested"
 "DB-007","Implement render cache repositories","db","phase2","DB-003","todo","P1","unassigned","3","0","","rendered html persistence tested"

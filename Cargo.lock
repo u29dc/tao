@@ -380,7 +380,9 @@ name = "obs-sdk-service"
 version = "0.1.0"
 dependencies = [
  "obs-sdk-markdown",
+ "obs-sdk-storage",
  "obs-sdk-vault",
+ "rusqlite",
  "tempfile",
  "thiserror",
 ]
