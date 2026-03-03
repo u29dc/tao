@@ -37,14 +37,16 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-      - name: bridge benchmark report
-        run: cargo run -p obs-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json
+      - name: perf budget gate
+        run: ./scripts/check-perf-budgets.sh
 
-      - name: upload bridge benchmark report
+      - name: upload perf reports
         uses: actions/upload-artifact@v4
         with:
-          name: bridge-bench-report
-          path: bench/reports/bridge-call-budgets.json
+          name: perf-reports
+          path: |
+            bench/reports/bridge-call-budgets.json
+            bench/reports/startup-budgets.json
 
       - name: build
         run: cargo build --workspace

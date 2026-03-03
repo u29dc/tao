@@ -1152,3 +1152,13 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p obs-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p obs-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/obs-macos, bun run util:check]
 - outcomes: [added dedicated startup benchmark scenario that measures bridge startup pipeline (`open -> vault_stats -> notes_list -> note_context`) and emits p50/p95/max report, optimized app startup tree hydration to skip eager note-list loading when restoring a selected note, and validated startup p95 at 12.797ms against 900ms hard budget target]
 - residual_risk: startup benchmark currently models bridge/service startup path rather than full macOS compositor/UI boot, so Instruments-based cold-launch traces remain a future improvement
+
+- timestamp: 2026-03-03T19:56:31Z
+- session: session-2026-03-03-a
+- ticket: PERF-008
+- action: done
+- evidence:
+  - files: [.github/workflows/rust-ci.yml, scripts/check-perf-budgets.sh, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+  - commands: [./scripts/check-perf-budgets.sh, bun run util:check]
+- outcomes: [added CI perf budget gate script that enforces bridge latency budgets and startup p95 threshold, wired `rust-ci` to fail on budget regressions and upload both reports as artifacts, and documented the canonical CI perf gate workflow]
+- residual_risk: CI gate currently enforces bridge and startup benchmarks only; future expansion can include resolver throughput and large-vault (5k/10k/25k) perf gates for broader regression detection
