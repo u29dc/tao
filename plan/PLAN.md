@@ -86,7 +86,7 @@ Given your "extremely efficient connection" requirement, primary mode is direct 
 
 ### 4.3 Non-negotiable architecture invariants
 
-- Single source of truth for domain logic is `obs-sdk` Rust crates.
+- Single source of truth for domain logic is `tao-sdk` Rust crates.
 - UI layers cannot implement independent parsing or resolution logic.
 - Every mutating operation is SDK-mediated and auditable.
 - CLI and future TUI share the same SDK calls used by Swift app.
@@ -110,7 +110,7 @@ Swift macOS App    CLI Wrapper    TUI (future)
 ### 5.2 Container/process map
 
 ```text
-Process A: obs-app (Swift, macOS native)
+Process A: tao-app (Swift, macOS native)
   - AppKit/SwiftUI shell
   - calls Rust bridge APIs
 
@@ -135,7 +135,7 @@ Process C (later): tao-tui (Rust + Ratatui)
 ### 5.3 Workspace map
 
 ```text
-obs/
+tao/
   Cargo.toml
   package.json
   commitlint.config.js
@@ -155,7 +155,7 @@ obs/
     tao-cli/
     tao-tui/                  # later phase
   apps/
-    obs-macos/                # Xcode project
+    tao-macos/                # Xcode project
 ```
 
 ### 5.4 Component map: SDK internals
@@ -338,14 +338,14 @@ CLI is not a second application logic stack. It is a thin command adapter over S
 
 Core command groups:
 
-- `obs health --json`
-- `obs tools --json`
-- `obs vault {open|stats|reindex|reconcile} --json`
-- `obs note {get|render|create|update|rename|delete} --json`
-- `obs links {outgoing|backlinks|resolve} --json`
-- `obs props {get|set|list} --json`
-- `obs bases {list|view|validate} --json`
-- `obs search query --json`
+- `tao health --json`
+- `tao tools --json`
+- `tao vault {open|stats|reindex|reconcile} --json`
+- `tao note {get|render|create|update|rename|delete} --json`
+- `tao links {outgoing|backlinks|resolve} --json`
+- `tao props {get|set|list} --json`
+- `tao bases {list|view|validate} --json`
+- `tao search query --json`
 
 ### 8.3 CLI envelope rules
 
@@ -659,7 +659,7 @@ Format:
 
 | ID | Title | Depends | DoD |
 | --- | --- | --- | --- |
-| CLI-001 | Scaffold CLI crate and command tree | INFRA-001 | `obs --help` with grouped commands |
+| CLI-001 | Scaffold CLI crate and command tree | INFRA-001 | `tao --help` with grouped commands |
 | CLI-002 | Implement one-envelope JSON output | CLI-001, DOC-005 | `--json` prints one object to stdout |
 | CLI-003 | Add vault command group wrappers | CLI-001, SDK-010 | open/stats/reindex/reconcile commands work |
 | CLI-004 | Add note command group wrappers | CLI-001, SDK-009 | read/write commands map to sdk calls |

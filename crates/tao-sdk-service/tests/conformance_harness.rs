@@ -78,7 +78,7 @@ ORDER BY sf.normalized_path ASC, l.raw_target ASC, resolved_path ASC
 #[test]
 fn integration_harness_indexes_fixture_vault_end_to_end() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("obs.sqlite");
+    let db_path = fixture.path().join("tao.sqlite");
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -137,7 +137,7 @@ fn integration_harness_indexes_fixture_vault_end_to_end() {
 #[test]
 fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("obs.sqlite");
+    let db_path = fixture.path().join("tao.sqlite");
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -165,7 +165,7 @@ fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
 #[test]
 fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("obs.sqlite");
+    let db_path = fixture.path().join("tao.sqlite");
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -187,7 +187,7 @@ fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
 #[test]
 fn bases_parser_and_table_snapshot_match_fixture_expectations() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("obs.sqlite");
+    let db_path = fixture.path().join("tao.sqlite");
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");

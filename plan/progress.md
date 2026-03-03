@@ -1342,3 +1342,23 @@ Append-only execution log for autonomous runs.
   - commands: [rename apps/obs-macos to apps/tao-macos, rename swift package/product/module symbols, swift package --package-path apps/tao-macos clean, swift test --package-path apps/tao-macos]
   - outcomes: [Swift package path/modules moved to tao naming with passing build/tests]
 - residual_risk: runtime defaults still include obs-specific env and db path names pending REN-005
+
+- timestamp: 2026-03-04T00:33:00Z
+- session: session-2026-03-03-b
+- ticket: REN-005
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-cli/src/main.rs, crates/tao-bench/src/main.rs, crates/tao-sdk-bridge/src/lib.rs, crates/tao-tui/src/main.rs, crates/tao-sdk-service/tests/conformance_harness.rs, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
+  - commands: [replace OBS_* -> TAO_ and .obs/.obs.sqlite defaults -> .tao/.tao.sqlite across runtime and tests]
+  - outcomes: [runtime env vars and sqlite defaults now use tao naming]
+- residual_risk: broad identity strings still require allowlisted stale-reference sweep in REN-006
+
+- timestamp: 2026-03-04T00:43:00Z
+- session: session-2026-03-03-b
+- ticket: REN-006
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, docs/release/release-runbook.md, docs/release/versioning-policy.md, docs/adr/README.md, bun.lock]
+  - commands: [rg -n "\\bobs\\b|obs-" with allowlist exclusions, update remaining active references to tao naming]
+  - outcomes: [non-allowlisted obs identity references removed from active code/docs/workflow paths]
+- residual_risk: allowed residual mentions remain in plan/rename-manifest.md and historical plan/progress.md entries by design

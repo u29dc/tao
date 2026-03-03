@@ -1123,7 +1123,7 @@ mod tests {
     fn notes_route_loads_note_list_and_view_content() {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().join("vault");
-        let db_path = tempdir.path().join("obs.sqlite");
+        let db_path = tempdir.path().join("tao.sqlite");
         fs::create_dir_all(&vault_root).expect("create vault root");
 
         let mut setup_kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
@@ -1158,7 +1158,7 @@ mod tests {
     fn search_route_filters_results_and_opens_selected_note() {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().join("vault");
-        let db_path = tempdir.path().join("obs.sqlite");
+        let db_path = tempdir.path().join("tao.sqlite");
         fs::create_dir_all(&vault_root).expect("create vault root");
 
         let mut setup_kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");

@@ -9,12 +9,12 @@ import Foundation
 @Test func app_smoke_launch_open_navigate_edit_flow() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-app-smoke-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-app-smoke-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -81,12 +81,12 @@ import Foundation
 @Test func bridge_client_calls_vault_stats_and_note_get() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
     try """
     ---
@@ -123,12 +123,12 @@ import Foundation
 @Test func bridge_client_note_context_returns_note_and_links_in_single_call() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-note-context-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-note-context-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -163,12 +163,12 @@ import Foundation
 @Test func bridge_client_note_put_creates_and_updates_notes() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-write-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-write-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -208,12 +208,12 @@ import Foundation
 @Test func bridge_client_notes_list_pages_results() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-list-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-list-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -260,12 +260,12 @@ import Foundation
 @Test func bridge_client_note_links_returns_panels() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-links-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-links-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -288,12 +288,12 @@ import Foundation
 @Test func bridge_client_bases_list_and_missing_view_errors_are_typed() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-bases-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-bases-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
     try """
     # Alpha
@@ -332,12 +332,12 @@ import Foundation
 @Test func bridge_client_events_poll_returns_note_write_events() throws {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-events-test-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-events-test-\(UUID().uuidString)")
     defer { try? fileManager.removeItem(at: tempRoot) }
 
     let vaultRoot = tempRoot.appendingPathComponent("vault")
     let notesDir = vaultRoot.appendingPathComponent("notes")
-    let dbPath = tempRoot.appendingPathComponent("obs.sqlite")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
     try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
 
     let client = TaoBridgeClient()
@@ -399,7 +399,7 @@ import Foundation
     do {
         _ = try client.noteGet(
             vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path,
+            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path,
             path: "notes/mock.md"
         )
         Issue.record("expected schema compatibility failure")
@@ -430,7 +430,7 @@ import Foundation
     do {
         _ = try client.notePut(
             vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path,
+            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path,
             path: "notes/mock.md",
             content: "x"
         )
@@ -467,7 +467,7 @@ import Foundation
     do {
         _ = try client.vaultStats(
             vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("obs.sqlite").path
+            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path
         )
         Issue.record("expected unknown bridge error mapping")
     } catch let error as TaoBridgeClientError {
@@ -494,7 +494,7 @@ private struct MockBridgeScriptFixture {
 private func makeMockBridgeScript(payload: String) throws -> MockBridgeScriptFixture {
     let fileManager = FileManager.default
     let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("obs-bridge-mock-\(UUID().uuidString)")
+        .appendingPathComponent(.tao-bridge-mock-\(UUID().uuidString)")
     try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
 
     let script = tempRoot.appendingPathComponent("mock-bridge.sh")

@@ -5,7 +5,7 @@
 This policy defines versioning and compatibility for:
 
 - Rust SDK crates (`crates/tao-sdk-*`)
-- CLI binary (`obs`)
+- CLI binary (`tao`)
 - Bridge binary and DTO contract (`tao-sdk-bridge`)
 - macOS app scaffold (`apps/tao-macos`)
 
@@ -21,7 +21,7 @@ This policy defines versioning and compatibility for:
 | Component | Version Source | Compatibility Contract |
 | --- | --- | --- |
 | SDK crates | Cargo package version | Public Rust API + documented service behavior |
-| CLI (`obs`) | Cargo package version | Command names, flags, JSON envelope fields |
+| CLI (`tao`) | Cargo package version | Command names, flags, JSON envelope fields |
 | Bridge (`tao-sdk-bridge`) | Cargo package version + `BRIDGE_SCHEMA_VERSION` | DTO schema major compatibility (`v<major>`) |
 | macOS app | Swift package version | Compatible with bridge schema major and CLI behavior it invokes |
 

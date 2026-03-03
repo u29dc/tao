@@ -2,7 +2,7 @@
 
 ## Scope
 
-Use this runbook for `rc` and stable releases of `obs` workspace artifacts.
+Use this runbook for `rc` and stable releases of `tao` workspace artifacts.
 
 ## Preflight Checklist
 
@@ -47,8 +47,8 @@ Use this runbook for `rc` and stable releases of `obs` workspace artifacts.
    - CLI/TUI release bundle
    - macOS signed app bundle
 3. Smoke-check CLI install:
-   - `obs --help`
-   - `obs --json vault open --vault-root <vault> --db-path <db>`
+   - `tao --help`
+   - `tao --json vault open --vault-root <vault> --db-path <db>`
 
 ## Rollback Plan
 

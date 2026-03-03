@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
-const ENV_VAULT_ROOT: &str = "OBS_VAULT_ROOT";
-const ENV_DATA_DIR: &str = "OBS_DATA_DIR";
-const ENV_DB_PATH: &str = "OBS_DB_PATH";
-const ENV_CASE_POLICY: &str = "OBS_CASE_POLICY";
-const ENV_TRACING_ENABLED: &str = "OBS_TRACING_ENABLED";
-const ENV_FEATURE_FLAGS: &str = "OBS_FEATURE_FLAGS";
+const ENV_VAULT_ROOT: &str = "TAO_VAULT_ROOT";
+const ENV_DATA_DIR: &str = "TAO_DATA_DIR";
+const ENV_DB_PATH: &str = "TAO_DB_PATH";
+const ENV_CASE_POLICY: &str = "TAO_CASE_POLICY";
+const ENV_TRACING_ENABLED: &str = "TAO_TRACING_ENABLED";
+const ENV_FEATURE_FLAGS: &str = "TAO_FEATURE_FLAGS";
 
 /// Runtime SDK configuration loaded from defaults, environment, and explicit overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +75,7 @@ impl SdkConfigLoader {
         let data_dir_input = choose_path(
             overrides.data_dir,
             env.get(ENV_DATA_DIR).map(PathBuf::from),
-            vault_root.join(".obs"),
+            vault_root.join(".tao"),
         );
         let data_dir = absolutize_from(&vault_root, data_dir_input);
         fs::create_dir_all(&data_dir).map_err(|source| SdkConfigError::CreateDataDir {
@@ -264,7 +264,7 @@ pub enum SdkConfigError {
         /// Validation failure reason.
         reason: String,
     },
-    /// Invalid `OBS_CASE_POLICY` value.
+    /// Invalid `TAO_CASE_POLICY` value.
     #[error("invalid case policy value '{value}'; expected 'sensitive' or 'insensitive'")]
     InvalidCasePolicy {
         /// Raw env value.
@@ -299,13 +299,13 @@ mod tests {
 
         let mut env = HashMap::new();
         env.insert(
-            "OBS_VAULT_ROOT".to_string(),
+            "TAO_VAULT_ROOT".to_string(),
             env_vault.to_string_lossy().to_string(),
         );
-        env.insert("OBS_CASE_POLICY".to_string(), "insensitive".to_string());
-        env.insert("OBS_TRACING_ENABLED".to_string(), "0".to_string());
+        env.insert("TAO_CASE_POLICY".to_string(), "insensitive".to_string());
+        env.insert("TAO_TRACING_ENABLED".to_string(), "0".to_string());
         env.insert(
-            "OBS_FEATURE_FLAGS".to_string(),
+            "TAO_FEATURE_FLAGS".to_string(),
             "bridge-batching,reconcile-auto-heal".to_string(),
         );
 
@@ -339,12 +339,12 @@ mod tests {
 
         let mut env = HashMap::new();
         env.insert(
-            "OBS_VAULT_ROOT".to_string(),
+            "TAO_VAULT_ROOT".to_string(),
             env_vault.to_string_lossy().to_string(),
         );
-        env.insert("OBS_CASE_POLICY".to_string(), "insensitive".to_string());
+        env.insert("TAO_CASE_POLICY".to_string(), "insensitive".to_string());
         env.insert(
-            "OBS_FEATURE_FLAGS".to_string(),
+            "TAO_FEATURE_FLAGS".to_string(),
             "bridge-batching,reconcile-auto-heal".to_string(),
         );
 
@@ -368,7 +368,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let mut env = HashMap::new();
         env.insert(
-            "OBS_VAULT_ROOT".to_string(),
+            "TAO_VAULT_ROOT".to_string(),
             temp.path()
                 .join("missing-vault")
                 .to_string_lossy()
@@ -390,10 +390,10 @@ mod tests {
 
         let mut env = HashMap::new();
         env.insert(
-            "OBS_VAULT_ROOT".to_string(),
+            "TAO_VAULT_ROOT".to_string(),
             vault.to_string_lossy().to_string(),
         );
-        env.insert("OBS_CASE_POLICY".to_string(), "mixed".to_string());
+        env.insert("TAO_CASE_POLICY".to_string(), "mixed".to_string());
 
         let error =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())

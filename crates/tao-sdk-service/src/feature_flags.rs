@@ -140,8 +140,8 @@ mod tests {
     fn sample_config(feature_flags: Vec<String>) -> SdkConfig {
         SdkConfig {
             vault_root: PathBuf::from("/tmp/vault"),
-            data_dir: PathBuf::from("/tmp/vault/.obs"),
-            db_path: PathBuf::from("/tmp/vault/.obs/index.sqlite"),
+            data_dir: PathBuf::from("/tmp/vault/.tao"),
+            db_path: PathBuf::from("/tmp/vault/.tao/index.sqlite"),
             case_policy: CasePolicy::Sensitive,
             tracing_enabled: true,
             feature_flags,

@@ -918,9 +918,9 @@ mod tests {
     fn json_output_is_one_envelope_object() {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().to_path_buf();
-        let db_path = vault_root.join("obs.sqlite");
+        let db_path = vault_root.join("tao.sqlite");
         let cli = Cli::parse_from([
-            "obs".to_string(),
+            "tao".to_string(),
             "--json".to_string(),
             "vault".to_string(),
             "open".to_string(),
@@ -954,7 +954,7 @@ mod tests {
         let notes_dir = vault_root.join("notes");
         let projects_dir = notes_dir.join("projects");
         let views_dir = vault_root.join("views");
-        let db_path = tempdir.path().join("obs.sqlite");
+        let db_path = tempdir.path().join("tao.sqlite");
 
         fs::create_dir_all(&projects_dir).expect("create projects dir");
         fs::create_dir_all(&views_dir).expect("create views dir");
@@ -983,7 +983,7 @@ mod tests {
             (
                 "vault.open",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "vault",
                     "open",
@@ -996,7 +996,7 @@ mod tests {
             (
                 "vault.stats",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "vault",
                     "stats",
@@ -1009,7 +1009,7 @@ mod tests {
             (
                 "vault.preflight",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "vault",
                     "preflight",
@@ -1022,7 +1022,7 @@ mod tests {
             (
                 "vault.reindex",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "vault",
                     "reindex",
@@ -1035,7 +1035,7 @@ mod tests {
             (
                 "note.get",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "note",
                     "get",
@@ -1050,7 +1050,7 @@ mod tests {
             (
                 "note.list",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "note",
                     "list",
@@ -1063,7 +1063,7 @@ mod tests {
             (
                 "note.put",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "note",
                     "put",
@@ -1080,7 +1080,7 @@ mod tests {
             (
                 "links.outgoing",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "links",
                     "outgoing",
@@ -1095,7 +1095,7 @@ mod tests {
             (
                 "links.backlinks",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "links",
                     "backlinks",
@@ -1110,7 +1110,7 @@ mod tests {
             (
                 "properties.get",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "properties",
                     "get",
@@ -1125,7 +1125,7 @@ mod tests {
             (
                 "properties.set",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "properties",
                     "set",
@@ -1144,7 +1144,7 @@ mod tests {
             (
                 "bases.list",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "bases",
                     "list",
@@ -1157,7 +1157,7 @@ mod tests {
             (
                 "bases.view",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "bases",
                     "view",
@@ -1178,7 +1178,7 @@ mod tests {
             (
                 "search.query",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "search",
                     "query",
@@ -1197,7 +1197,7 @@ mod tests {
             (
                 "vault.reconcile",
                 vec![
-                    "obs",
+                    "tao",
                     "--json",
                     "vault",
                     "reconcile",

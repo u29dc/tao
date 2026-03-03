@@ -1,6 +1,6 @@
 # ADR Index
 
-This folder stores architecture decision records for `obs`.
+This folder stores architecture decision records for `tao`.
 
 ## Numbering
 

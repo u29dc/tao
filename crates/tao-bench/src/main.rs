@@ -186,7 +186,7 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
     let temp = tempdir().context("create startup benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let notes_dir = vault_root.join("notes");
-    let db_path = temp.path().join("obs.sqlite");
+    let db_path = temp.path().join("tao.sqlite");
     fs::create_dir_all(&notes_dir).context("create startup benchmark notes directory")?;
 
     let mut seed_kernel = BridgeKernel::open(&vault_root, &db_path)
@@ -255,7 +255,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     let temp = tempdir().context("create benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let notes_dir = vault_root.join("notes");
-    let db_path = temp.path().join("obs.sqlite");
+    let db_path = temp.path().join("tao.sqlite");
     fs::create_dir_all(&notes_dir).context("create benchmark notes directory")?;
 
     let mut kernel = BridgeKernel::open(&vault_root, &db_path).context("open bridge kernel")?;

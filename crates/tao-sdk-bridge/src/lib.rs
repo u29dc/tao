@@ -1308,7 +1308,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(&vault_root).expect("create vault");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         assert_eq!(kernel.schema_version(), BRIDGE_SCHEMA_VERSION);
@@ -1324,7 +1324,7 @@ mod tests {
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
         fs::write(vault_root.join("notes/a.md"), "# A").expect("write markdown");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let stats = kernel.vault_stats();
@@ -1346,7 +1346,7 @@ mod tests {
             "---\nstatus: draft\n---\n# Alpha\ncontent",
         )
         .expect("write markdown");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let note = kernel.note_get("notes/a.md");
@@ -1364,7 +1364,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         assert!(kernel.note_put("notes/c.md", "# C").ok);
@@ -1392,7 +1392,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let created = kernel.note_put("notes/a.md", "# A\nfirst");
@@ -1429,7 +1429,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let source = kernel.note_put("notes/source.md", "# Source");
@@ -1484,7 +1484,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let source = kernel.note_put("notes/source.md", "# Source");
@@ -1524,7 +1524,7 @@ mod tests {
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
         fs::create_dir_all(vault_root.join("views")).expect("create views");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         assert!(kernel.note_put("notes/a.md", "# A").ok);
@@ -1611,7 +1611,7 @@ views:
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let db_path = temp.path().join("obs.db");
+        let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
         let created = kernel.note_put("notes/events.md", "# Event\ncreated");

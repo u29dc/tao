@@ -67,9 +67,9 @@ private struct AppErrorState: Identifiable {
 }
 
 private enum StartupPersistenceKeys {
-    static let vaultRoot = "obs.startup.vault_root"
-    static let dbPath = "obs.startup.db_path"
-    static let notePath = "obs.startup.note_path"
+    static let vaultRoot = .tao.startup.vault_root"
+    static let dbPath = .tao.startup.db_path"
+    static let notePath = .tao.startup.note_path"
 }
 
 private struct TaoRootSplitView: View {
@@ -135,7 +135,7 @@ private struct TaoRootSplitView: View {
                 Label(item.rawValue, systemImage: icon(for: item))
                     .tag(Optional(item))
             }
-            .navigationTitle("obs")
+            .navigationTitle(.tao")
         } content: {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Workspace")
@@ -163,7 +163,7 @@ private struct TaoRootSplitView: View {
                 }
                 TextField("/absolute/path/to/vault", text: $vaultRoot)
                     .textFieldStyle(.roundedBorder)
-                TextField("/absolute/path/to/obs.sqlite", text: $dbPath)
+                TextField("/absolute/path/to/tao.sqlite", text: $dbPath)
                     .textFieldStyle(.roundedBorder)
                 HStack(spacing: 12) {
                     Button("Load Vault Stats") {
@@ -880,7 +880,7 @@ private struct TaoRootSplitView: View {
         }
 
         vaultRoot = url.path
-        dbPath = url.appendingPathComponent(".obs.sqlite").path
+        dbPath = url.appendingPathComponent(".tao.sqlite").path
         loadVaultStats()
     }
 

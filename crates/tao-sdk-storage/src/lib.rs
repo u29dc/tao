@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn run_migrations_applies_sqlite_pragma_profile_for_file_database() {
         let temp = tempdir().expect("create temp directory");
-        let db_path = temp.path().join("obs.sqlite");
+        let db_path = temp.path().join("tao.sqlite");
         let mut connection = Connection::open(db_path).expect("open sqlite database");
 
         run_migrations(&mut connection).expect("run migrations");
