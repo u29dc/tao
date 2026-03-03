@@ -392,3 +392,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [front matter extraction implemented with captured YAML parse errors and non-crashing malformed handling]
 - residual_risk: extraction currently expects top-level `---` fences; alternative delimiter styles are out of scope for v1 parser
+
+- timestamp: 2026-03-03T20:02:00Z
+- session: session-2026-03-03-a
+- ticket: PROP-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [typed property projection implemented with normalized bool/number/date/list value handling]
+- residual_risk: date normalization currently uses lightweight iso-pattern matching; timezone-aware coercion can be tightened if required
