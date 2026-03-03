@@ -13,7 +13,9 @@ use obs_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, PropertyUpdateService,
     ReconcileService, WatcherStatus,
 };
-use obs_sdk_storage::{BasesRepository, FilesRepository, PropertiesRepository, run_migrations};
+use obs_sdk_storage::{
+    BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
+};
 use obs_sdk_vault::CasePolicy;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -69,6 +71,8 @@ enum VaultCommands {
     Open(VaultPathArgs),
     /// Return vault health snapshot.
     Stats(VaultPathArgs),
+    /// Validate migration state/checksums before startup migration apply.
+    Preflight(VaultPathArgs),
     /// Rebuild full index.
     Reindex(VaultPathArgs),
     /// Apply incremental reconcile pass.
@@ -315,6 +319,33 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
                     "index_lag": snapshot.index_lag,
                     "watcher_status": snapshot.watcher_status,
                     "last_index_updated_at": snapshot.last_index_updated_at,
+                }),
+            })
+        }
+        VaultCommands::Preflight(args) => {
+            let vault_root = Path::new(&args.vault_root);
+            if !vault_root.exists() {
+                return Err(anyhow!("vault root does not exist: {}", args.vault_root));
+            }
+            if !vault_root.is_dir() {
+                return Err(anyhow!(
+                    "vault root is not a directory: {}",
+                    args.vault_root
+                ));
+            }
+
+            let connection = Connection::open(&args.db_path)
+                .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
+            let report = preflight_migrations(&connection)
+                .map_err(|source| anyhow!("migration preflight failed: {source}"))?;
+            Ok(CommandResult {
+                command: "vault.preflight".to_string(),
+                summary: "vault preflight completed".to_string(),
+                args: serde_json::json!({
+                    "migrations_table_exists": report.migrations_table_exists,
+                    "known_migrations": report.known_migrations,
+                    "applied_migrations": report.applied_migrations,
+                    "pending_migrations": report.pending_migrations,
                 }),
             })
         }
@@ -969,6 +1000,19 @@ mod tests {
                     "--json",
                     "vault",
                     "stats",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--db-path",
+                    &db_path_string,
+                ],
+            ),
+            (
+                "vault.preflight",
+                vec![
+                    "obs",
+                    "--json",
+                    "vault",
+                    "preflight",
                     "--vault-root",
                     &vault_root_string,
                     "--db-path",

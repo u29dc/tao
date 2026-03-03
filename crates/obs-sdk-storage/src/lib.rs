@@ -92,11 +92,71 @@ pub struct MigrationReport {
     pub skipped: Vec<String>,
 }
 
+/// Report for migration preflight validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationPreflightReport {
+    /// Whether `schema_migrations` table exists.
+    pub migrations_table_exists: bool,
+    /// Number of known migrations in binary.
+    pub known_migrations: u64,
+    /// Number of applied migrations recorded in database.
+    pub applied_migrations: u64,
+    /// Number of pending migrations.
+    pub pending_migrations: u64,
+}
+
+/// Validate migration metadata/checksums before attempting startup migration apply.
+pub fn preflight_migrations(
+    connection: &Connection,
+) -> Result<MigrationPreflightReport, MigrationRunnerError> {
+    let known_total = known_migrations().len() as u64;
+    let migrations_table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| MigrationRunnerError::PreflightTableCheck { source })?;
+
+    if !migrations_table_exists {
+        return Ok(MigrationPreflightReport {
+            migrations_table_exists: false,
+            known_migrations: known_total,
+            applied_migrations: 0,
+            pending_migrations: known_total,
+        });
+    }
+
+    let applied_checksums = load_applied_checksums_connection(connection)?;
+    for migration in known_migrations() {
+        let expected_checksum = migration_checksum(migration.sql);
+        if let Some(recorded_checksum) = applied_checksums.get(migration.id)
+            && recorded_checksum != &expected_checksum
+        {
+            return Err(MigrationRunnerError::ChecksumMismatch {
+                migration_id: migration.id.to_string(),
+                expected_checksum,
+                recorded_checksum: recorded_checksum.clone(),
+            });
+        }
+    }
+
+    let applied_total = applied_checksums.len() as u64;
+    let pending_total = known_total.saturating_sub(applied_total.min(known_total));
+    Ok(MigrationPreflightReport {
+        migrations_table_exists: true,
+        known_migrations: known_total,
+        applied_migrations: applied_total,
+        pending_migrations: pending_total,
+    })
+}
+
 /// Apply forward-only migrations and enforce checksum guards.
 pub fn run_migrations(
     connection: &mut Connection,
 ) -> Result<MigrationReport, MigrationRunnerError> {
     configure_connection_pragmas(connection)?;
+    preflight_migrations(connection)?;
 
     let transaction = connection
         .transaction()
@@ -190,6 +250,31 @@ fn load_applied_checksums(
     Ok(checksums)
 }
 
+fn load_applied_checksums_connection(
+    connection: &Connection,
+) -> Result<HashMap<String, String>, MigrationRunnerError> {
+    let mut statement = connection
+        .prepare("SELECT id, checksum FROM schema_migrations")
+        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let checksum: String = row.get(1)?;
+            Ok((id, checksum))
+        })
+        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
+
+    let mut checksums = HashMap::new();
+    for row in rows {
+        let (id, checksum) =
+            row.map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
+        checksums.insert(id, checksum);
+    }
+
+    Ok(checksums)
+}
+
 fn migration_checksum(sql: &str) -> String {
     blake3::hash(sql.as_bytes()).to_hex().to_string()
 }
@@ -216,6 +301,13 @@ pub enum MigrationRunnerError {
     SetPragma {
         /// SQL pragma statement that failed.
         pragma: &'static str,
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Checking migration table metadata during preflight failed.
+    #[error("failed to preflight schema_migrations table state: {source}")]
+    PreflightTableCheck {
         /// SQLite error.
         #[source]
         source: rusqlite::Error,
@@ -289,7 +381,7 @@ mod tests {
 
     use super::{
         MIGRATION_0001_ID, MigrationRunnerError, apply_initial_schema, migration_checksum,
-        run_migrations,
+        preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -350,6 +442,17 @@ mod tests {
             recorded_checksum,
             Some(migration_checksum(super::MIGRATION_0001_SQL))
         );
+    }
+
+    #[test]
+    fn preflight_reports_pending_migrations_before_first_apply() {
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+        let report = preflight_migrations(&connection).expect("preflight migrations");
+
+        assert!(!report.migrations_table_exists);
+        assert_eq!(report.known_migrations, 1);
+        assert_eq!(report.applied_migrations, 0);
+        assert_eq!(report.pending_migrations, 1);
     }
 
     #[test]

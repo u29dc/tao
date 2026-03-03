@@ -1202,3 +1202,13 @@ Append-only execution log for autonomous runs.
   - commands: [./scripts/package-macos-app.sh, bun run util:check]
 - outcomes: [added deterministic macOS app packaging script that builds release executable, assembles `.app` bundle, applies ad-hoc code signature, and exports zip artifact; added CI workflow `swift-release-artifact` to produce and upload signed app artifacts on tags/workflow dispatch]
 - residual_risk: CI signing is ad-hoc and suitable for internal distribution/testing; developer ID signing and notarization remain future release-hardening work
+
+- timestamp: 2026-03-03T20:07:43Z
+- session: session-2026-03-03-a
+- ticket: REL-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/lib.rs, crates/obs-cli/src/main.rs, tickets.csv, run-state.json]
+  - commands: [cargo test -p obs-sdk-storage, cargo test -p obs-cli, bun run util:check]
+- outcomes: [added SDK migration preflight API that validates migration table presence and checksum integrity before apply; wired CLI `vault preflight` JSON wrapper to surface migration health and pending count; extended CLI JSON contract matrix to include `vault.preflight`]
+- residual_risk: preflight validates known migration checksums but does not currently fail on unknown migration IDs present in `schema_migrations`
