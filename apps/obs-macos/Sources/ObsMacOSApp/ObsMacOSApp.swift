@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ObsMacOSAppScaffold
 
 @main
@@ -23,6 +24,7 @@ private struct ObsRootSplitView: View {
     @State private var selectedSidebarItem: SidebarItem? = .notes
     @State private var vaultRoot = ""
     @State private var dbPath = ""
+    @State private var openedVaultRoot: String?
     @State private var statsSummary = "Bridge read APIs not called yet."
     @State private var bridgeError: String?
     @State private var isLoadingStats = false
@@ -43,6 +45,18 @@ private struct ObsRootSplitView: View {
                 Divider()
                 Text("Bridge Integration")
                     .font(.headline)
+                HStack(spacing: 12) {
+                    Button("Choose Vault...") {
+                        openVaultFromPicker()
+                    }
+
+                    if let openedVaultRoot {
+                        Text("Opened: \(openedVaultRoot)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
                 TextField("/absolute/path/to/vault", text: $vaultRoot)
                     .textFieldStyle(.roundedBorder)
                 TextField("/absolute/path/to/obs.sqlite", text: $dbPath)
@@ -132,6 +146,7 @@ private struct ObsRootSplitView: View {
                 await MainActor.run {
                     statsSummary =
                         "files=\(stats.filesTotal) markdown=\(stats.markdownFiles) dbHealthy=\(stats.dbHealthy)"
+                    openedVaultRoot = root
                     isLoadingStats = false
                 }
             } catch {
@@ -141,5 +156,23 @@ private struct ObsRootSplitView: View {
                 }
             }
         }
+    }
+
+    private func openVaultFromPicker() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Vault"
+        panel.prompt = "Open"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        vaultRoot = url.path
+        dbPath = url.appendingPathComponent(".obs.sqlite").path
+        loadVaultStats()
     }
 }

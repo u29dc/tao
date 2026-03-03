@@ -842,3 +842,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift build, swift test, bun run util:check]
   - outcomes: [app shell now directly invokes `ObsBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
 - residual_risk: bridge read invocation currently depends on manual vault/sqlite path entry, so APP-003 introduces guided vault-open UX and persisted session context
+
+- timestamp: 2026-03-03T18:18:24Z
+- session: session-2026-03-03-a
+- ticket: APP-003
+- action: done
+- evidence:
+  - files: [apps/obs-macos/Sources/ObsMacOSApp/ObsMacOSApp.swift, tickets.csv, run-state.json]
+  - commands: [swift build, swift test, bun run util:check]
+  - outcomes: [native macOS vault picker flow added via `NSOpenPanel`; selecting a folder sets vault/database paths, triggers bridge stats load, and surfaces opened-vault root state in the UI header]
+- residual_risk: opened vault and database path state is currently in-memory only, so startup restoration for last session remains a dedicated follow-up in APP-012
