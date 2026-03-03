@@ -382,3 +382,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [wikilink parser implemented for target/display/heading/block forms with markdown extraction tests]
 - residual_risk: parser currently handles bracket-form wikilinks only; embedded edge-case tokenization in complex markdown contexts will be expanded in resolver tickets
+
+- timestamp: 2026-03-03T19:50:00Z
+- session: session-2026-03-03-a
+- ticket: PROP-001
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-properties/Cargo.toml, crates/obs-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [front matter extraction implemented with captured YAML parse errors and non-crashing malformed handling]
+- residual_risk: extraction currently expects top-level `---` fences; alternative delimiter styles are out of scope for v1 parser
