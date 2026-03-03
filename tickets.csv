@@ -42,7 +42,7 @@
 "DB-005","Implement links/properties repositories","db","phase1","DB-003","done","P1","codex","3","0","","join queries validated by tests"
 "DB-006","Implement bases repositories","db","phase2","DB-003","done","P1","codex","3","0","","`.base` metadata read/write queries tested"
 "DB-007","Implement render cache repositories","db","phase2","DB-003","done","P1","codex","3","0","","rendered html persistence tested"
-"DB-008","Implement index state repositories","db","phase2","DB-003","todo","P1","unassigned","3","0","","state keys for checkpoint/reconcile persisted"
+"DB-008","Implement index state repositories","db","phase2","DB-003","done","P1","codex","3","0","","state keys for checkpoint/reconcile persisted"
 "IDX-001","Implement initial full indexing workflow","idx","phase1","SDK-004|DB-005","todo","P1","unassigned","3","0","","full vault index populates all core tables"
 "IDX-002","Implement incremental indexing workflow","idx","phase1","IDX-001|SDK-003","todo","P1","unassigned","3","0","","single-file updates touch only impacted rows"
 "IDX-003","Implement coalesced batch apply","idx","phase1","IDX-002","todo","P1","unassigned","3","0","","burst edits processed in bounded batches"

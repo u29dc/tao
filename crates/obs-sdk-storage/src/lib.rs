@@ -7,6 +7,7 @@ use thiserror::Error;
 
 mod bases;
 mod files;
+mod index_state;
 mod links;
 mod properties;
 mod render_cache;
@@ -14,6 +15,9 @@ mod transaction;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
 pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
+pub use index_state::{
+    IndexStateRecord, IndexStateRecordInput, IndexStateRepository, IndexStateRepositoryError,
+};
 pub use links::{
     LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository, LinksRepositoryError,
 };

@@ -502,3 +502,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [render cache repository implemented with upsert/get/list/delete operations and persistence tests]
 - residual_risk: current render cache storage focuses on row persistence; cross-service invalidation orchestration remains in indexing tickets
+
+- timestamp: 2026-03-03T16:39:43Z
+- session: session-2026-03-03-a
+- ticket: DB-008
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/index_state.rs, crates/obs-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [index state repository implemented with checkpoint/reconcile key persistence and deterministic listing tests]
+- residual_risk: repository currently stores opaque JSON payloads; schema-level key/value contracts are enforced in higher-level index services
