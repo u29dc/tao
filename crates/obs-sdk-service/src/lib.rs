@@ -1,14 +1,19 @@
 //! Service-layer orchestration entrypoints over SDK subsystem crates.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
 use obs_sdk_markdown::{
     MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,
 };
-use obs_sdk_storage::{FileRecordInput, StorageTransactionError, with_transaction};
+use obs_sdk_storage::{
+    FileRecordInput, FilesRepository, StorageTransactionError, with_transaction,
+};
 use obs_sdk_vault::{
-    CasePolicy, PathCanonicalizationError, VaultManifestEntry, VaultScanError, VaultScanService,
+    CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
+    VaultManifestEntry, VaultScanError, VaultScanService,
 };
 use rusqlite::Connection;
 use thiserror::Error;
@@ -197,6 +202,272 @@ pub enum StorageWriteError {
     },
 }
 
+/// Result model for note write operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteCrudResult {
+    /// Stable file id.
+    pub file_id: String,
+    /// Canonical normalized path.
+    pub normalized_path: String,
+}
+
+/// Service for note create/update/delete flows backed by SDK storage metadata writes.
+#[derive(Clone)]
+pub struct NoteCrudService {
+    coordinator: SdkTransactionCoordinator,
+    events: DomainEventBus,
+}
+
+impl Default for NoteCrudService {
+    fn default() -> Self {
+        Self {
+            coordinator: SdkTransactionCoordinator,
+            events: DomainEventBus::new(),
+        }
+    }
+}
+
+impl NoteCrudService {
+    /// Create a note file and persist corresponding file metadata.
+    pub fn create_note(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        relative_path: &Path,
+        content: &str,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        validate_relative_note_path(relative_path)?;
+        let absolute = vault_root.join(relative_path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).map_err(|source| NoteCrudError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&absolute)
+            .map_err(|source| NoteCrudError::WriteFile {
+                path: absolute.clone(),
+                source,
+            })?;
+        file.write_all(content.as_bytes())
+            .map_err(|source| NoteCrudError::WriteFile {
+                path: absolute.clone(),
+                source,
+            })?;
+
+        let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
+        self.coordinator
+            .insert_file_metadata(connection, &record)
+            .map_err(|source| NoteCrudError::Coordinator { source })?;
+
+        self.events.publish(DomainEvent::NoteChanged {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path.clone(),
+            kind: NoteChangeKind::Created,
+        });
+
+        Ok(NoteCrudResult {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path,
+        })
+    }
+
+    /// Update note content and replace corresponding file metadata atomically.
+    pub fn update_note(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+        relative_path: &Path,
+        content: &str,
+    ) -> Result<NoteCrudResult, NoteCrudError> {
+        validate_relative_note_path(relative_path)?;
+        let absolute = vault_root.join(relative_path);
+        fs::write(&absolute, content).map_err(|source| NoteCrudError::WriteFile {
+            path: absolute.clone(),
+            source,
+        })?;
+
+        let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
+        self.coordinator
+            .replace_file_metadata(connection, file_id, &record)
+            .map_err(|source| NoteCrudError::Coordinator { source })?;
+
+        self.events.publish(DomainEvent::NoteChanged {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path.clone(),
+            kind: NoteChangeKind::Updated,
+        });
+
+        Ok(NoteCrudResult {
+            file_id: file_id.to_string(),
+            normalized_path: record.normalized_path,
+        })
+    }
+
+    /// Delete note file and remove corresponding metadata.
+    pub fn delete_note(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        file_id: &str,
+    ) -> Result<bool, NoteCrudError> {
+        let existing = FilesRepository::get_by_id(connection, file_id)
+            .map_err(|source| NoteCrudError::Repository { source })?;
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+
+        let absolute = vault_root.join(&existing.normalized_path);
+        if absolute.exists() {
+            fs::remove_file(&absolute).map_err(|source| NoteCrudError::DeleteFile {
+                path: absolute.clone(),
+                source,
+            })?;
+        }
+
+        let removed = self
+            .coordinator
+            .delete_file_metadata(connection, file_id)
+            .map_err(|source| NoteCrudError::Coordinator { source })?;
+
+        if removed {
+            self.events.publish(DomainEvent::NoteChanged {
+                file_id: file_id.to_string(),
+                normalized_path: existing.normalized_path,
+                kind: NoteChangeKind::Deleted,
+            });
+        }
+
+        Ok(removed)
+    }
+}
+
+fn validate_relative_note_path(relative_path: &Path) -> Result<(), NoteCrudError> {
+    if relative_path.is_absolute() {
+        return Err(NoteCrudError::InvalidPath {
+            path: relative_path.to_path_buf(),
+        });
+    }
+
+    if relative_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(NoteCrudError::InvalidPath {
+            path: relative_path.to_path_buf(),
+        });
+    }
+
+    Ok(())
+}
+
+fn fingerprint_to_file_record(
+    file_id: &str,
+    vault_root: &Path,
+    relative_path: &Path,
+) -> Result<FileRecordInput, NoteCrudError> {
+    let fingerprint_service = FileFingerprintService::from_root(vault_root, CasePolicy::Sensitive)
+        .map_err(|source| NoteCrudError::FingerprintPath { source })?;
+    let fingerprint = fingerprint_service
+        .fingerprint(relative_path)
+        .map_err(|source| NoteCrudError::Fingerprint { source })?;
+
+    let modified_unix_ms = i64::try_from(fingerprint.modified_unix_ms).map_err(|_| {
+        NoteCrudError::TimestampOverflow {
+            value: fingerprint.modified_unix_ms,
+        }
+    })?;
+
+    Ok(FileRecordInput {
+        file_id: file_id.to_string(),
+        normalized_path: fingerprint.normalized,
+        match_key: fingerprint.match_key,
+        absolute_path: fingerprint.absolute.to_string_lossy().to_string(),
+        size_bytes: fingerprint.size_bytes,
+        modified_unix_ms,
+        hash_blake3: fingerprint.hash_blake3,
+        is_markdown: true,
+    })
+}
+
+/// Errors returned by note create/update/delete operations.
+#[derive(Debug, Error)]
+pub enum NoteCrudError {
+    /// Provided relative note path is invalid.
+    #[error("invalid note path '{path}'")]
+    InvalidPath {
+        /// Invalid path.
+        path: PathBuf,
+    },
+    /// Creating parent directories failed.
+    #[error("failed to create directory '{path}': {source}")]
+    CreateDir {
+        /// Directory path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Writing note file content failed.
+    #[error("failed to write note file '{path}': {source}")]
+    WriteFile {
+        /// File path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Deleting note file failed.
+    #[error("failed to delete note file '{path}': {source}")]
+    DeleteFile {
+        /// File path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Building fingerprint service path context failed.
+    #[error("failed to initialize fingerprint path service: {source}")]
+    FingerprintPath {
+        /// Path canonicalization error.
+        #[source]
+        source: PathCanonicalizationError,
+    },
+    /// File fingerprint operation failed.
+    #[error("failed to fingerprint note file: {source}")]
+    Fingerprint {
+        /// Fingerprint error.
+        #[source]
+        source: FileFingerprintError,
+    },
+    /// Fingerprint modified timestamp overflows storage integer type.
+    #[error("fingerprint modified timestamp overflows i64: {value}")]
+    TimestampOverflow {
+        /// Raw timestamp value.
+        value: u128,
+    },
+    /// Coordinator transaction failed.
+    #[error("note coordinator failed: {source}")]
+    Coordinator {
+        /// Coordinator error.
+        #[source]
+        source: SdkTransactionError,
+    },
+    /// Repository query failed.
+    #[error("note repository query failed: {source}")]
+    Repository {
+        /// Files repository error.
+        #[source]
+        source: obs_sdk_storage::FilesRepositoryError,
+    },
+}
+
 /// Errors returned by markdown ingest pipeline shell operations.
 #[derive(Debug, Error)]
 pub enum MarkdownIngestError {
@@ -246,13 +517,15 @@ pub enum MarkdownIngestError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use obs_sdk_storage::{FileRecordInput, FilesRepository, run_migrations};
     use rusqlite::Connection;
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, MarkdownIngestPipeline, SdkTransactionCoordinator, StorageWriteService,
+        CasePolicy, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
+        SdkTransactionCoordinator, StorageWriteService,
     };
 
     fn file_record(
@@ -384,5 +657,79 @@ mod tests {
             .expect("get first after failed replace")
             .expect("first should remain after rollback");
         assert_eq!(first_after.normalized_path, "notes/a.md");
+    }
+
+    #[test]
+    fn note_crud_service_create_update_delete_flow() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        let relative = Path::new("notes/today.md");
+
+        let created = service
+            .create_note(&vault_root, &mut connection, "f1", relative, "# first")
+            .expect("create note");
+        assert_eq!(created.normalized_path, "notes/today.md");
+        assert_eq!(
+            fs::read_to_string(vault_root.join(relative)).expect("read created note"),
+            "# first"
+        );
+
+        let before_update = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get before update")
+            .expect("row before update");
+
+        let updated = service
+            .update_note(&vault_root, &mut connection, "f1", relative, "# second")
+            .expect("update note");
+        assert_eq!(updated.normalized_path, "notes/today.md");
+        assert_eq!(
+            fs::read_to_string(vault_root.join(relative)).expect("read updated note"),
+            "# second"
+        );
+
+        let after_update = FilesRepository::get_by_id(&connection, "f1")
+            .expect("get after update")
+            .expect("row after update");
+        assert_ne!(before_update.hash_blake3, after_update.hash_blake3);
+
+        let deleted = service
+            .delete_note(&vault_root, &mut connection, "f1")
+            .expect("delete note");
+        assert!(deleted);
+        assert!(!vault_root.join(relative).exists());
+        assert!(
+            FilesRepository::get_by_id(&connection, "f1")
+                .expect("get deleted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn note_crud_service_rejects_escape_paths() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        let error = service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "f1",
+                Path::new("../escape.md"),
+                "nope",
+            )
+            .expect_err("path escaping should fail");
+
+        assert!(matches!(error, NoteCrudError::InvalidPath { .. }));
     }
 }

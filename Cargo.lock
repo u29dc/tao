@@ -379,6 +379,7 @@ version = "0.1.0"
 name = "obs-sdk-service"
 version = "0.1.0"
 dependencies = [
+ "obs-sdk-core",
  "obs-sdk-markdown",
  "obs-sdk-storage",
  "obs-sdk-vault",

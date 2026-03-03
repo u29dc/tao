@@ -342,3 +342,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [in-process domain event bus implemented with subscribe/unsubscribe and publish fan-out tests]
 - residual_risk: bus currently delivers events synchronously in-process; async/backpressure semantics can be layered later if required
+
+- timestamp: 2026-03-03T19:00:00Z
+- session: session-2026-03-03-a
+- ticket: SDK-008
+- action: done
+- evidence:
+  - files: [Cargo.lock, crates/obs-sdk-service/Cargo.toml, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [note create/update/delete service implemented with filesystem + metadata coordination and integration tests]
+- residual_risk: create currently fails on existing file (create_new); dedicated rename/move conflict policies remain in SDK-009
