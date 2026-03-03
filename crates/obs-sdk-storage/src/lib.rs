@@ -6,9 +6,18 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod files;
+mod links;
+mod properties;
 mod transaction;
 
 pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
+pub use links::{
+    LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository, LinksRepositoryError,
+};
+pub use properties::{
+    PropertiesRepository, PropertiesRepositoryError, PropertyRecord, PropertyRecordInput,
+    PropertyWithPath,
+};
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
 /// Initial schema migration identifier.

@@ -312,3 +312,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [typed storage transaction wrapper implemented and consumed by service-layer write service]
 - residual_risk: wrapper currently targets files repository operations; additional typed repo surfaces will expand in later db tickets
+
+- timestamp: 2026-03-03T18:29:00Z
+- session: session-2026-03-03-a
+- ticket: DB-005
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-storage/src/lib.rs, crates/obs-sdk-storage/src/links.rs, crates/obs-sdk-storage/src/properties.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [links and properties repositories implemented with source/target join query coverage in integration tests]
+- residual_risk: properties upsert keeps existing `property_id` on `(file_id,key)` conflict; identity mutation policy can be revisited if needed
