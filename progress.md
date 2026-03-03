@@ -193,3 +193,13 @@ Append-only execution log for autonomous runs.
   - outcomes: [remove generated swift artifacts accidentally committed in prior commit]
 - residual_risk: none
 
+- timestamp: 2026-03-03T15:58:00Z
+- session: session-2026-03-03-a
+- ticket: INFRA-006
+- action: done
+- evidence:
+  - files: [.github/workflows/audit.yml, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [dedicated cargo-audit ci workflow integrated and validated locally]
+- residual_risk: audit db network dependency in ci remains external
+
