@@ -132,6 +132,25 @@ impl AppContext {
         })?;
         expect_bridge_value(bridge.note_get(normalized_path), "note.get")
     }
+
+    fn search_notes(&self, query: &str) -> std::result::Result<Vec<BridgeNoteSummary>, String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query_lc = query.to_ascii_lowercase();
+        let mut matches = self
+            .load_notes()?
+            .into_iter()
+            .filter(|note| {
+                note.path.to_ascii_lowercase().contains(&query_lc)
+                    || note.title.to_ascii_lowercase().contains(&query_lc)
+            })
+            .collect::<Vec<_>>();
+        matches.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        Ok(matches)
+    }
 }
 
 fn expect_bridge_value<T>(
@@ -166,6 +185,10 @@ struct AppState {
     notes: Vec<BridgeNoteSummary>,
     selected_note_index: usize,
     selected_note_view: Option<BridgeNoteView>,
+    search_query: String,
+    search_input_mode: bool,
+    search_results: Vec<BridgeNoteSummary>,
+    selected_search_index: usize,
 }
 
 impl Default for AppState {
@@ -179,6 +202,10 @@ impl Default for AppState {
             notes: Vec::new(),
             selected_note_index: 0,
             selected_note_view: None,
+            search_query: String::new(),
+            search_input_mode: false,
+            search_results: Vec::new(),
+            selected_search_index: 0,
         }
     }
 }
@@ -198,9 +225,12 @@ impl AppState {
 
     fn switch_route(&mut self, route: Route, context: &AppContext) {
         self.route = route;
+        self.search_input_mode = false;
         self.status = format!("route switched to {}", route.as_str());
-        if route == Route::Notes {
-            self.refresh_notes(context);
+        match route {
+            Route::Notes => self.refresh_notes(context),
+            Route::Search => self.refresh_search_results(context),
+            Route::Placeholder | Route::Bases => {}
         }
     }
 
@@ -240,16 +270,16 @@ impl AppState {
     }
 
     fn handle_route_key(&mut self, key: KeyEvent, context: &AppContext) {
-        if self.route != Route::Notes {
-            return;
-        }
-
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.move_note_selection(-1, context),
-            KeyCode::Down | KeyCode::Char('j') => self.move_note_selection(1, context),
-            KeyCode::Enter => self.reload_selected_note_view(context),
-            KeyCode::Char('r') => self.refresh_notes(context),
-            _ => {}
+        match self.route {
+            Route::Notes => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.move_note_selection(-1, context),
+                KeyCode::Down | KeyCode::Char('j') => self.move_note_selection(1, context),
+                KeyCode::Enter => self.reload_selected_note_view(context),
+                KeyCode::Char('r') => self.refresh_notes(context),
+                _ => {}
+            },
+            Route::Search => self.handle_search_key(key, context),
+            Route::Placeholder | Route::Bases => {}
         }
     }
 
@@ -347,6 +377,109 @@ impl AppState {
             self.reload_selected_note_view(context);
         }
     }
+
+    fn handle_search_key(&mut self, key: KeyEvent, context: &AppContext) {
+        if self.search_input_mode {
+            self.handle_search_input_key(key, context);
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('/') => {
+                self.search_input_mode = true;
+                self.status = "search input mode".to_string();
+            }
+            KeyCode::Char('r') => self.refresh_search_results(context),
+            KeyCode::Up | KeyCode::Char('k') => self.move_search_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_search_selection(1),
+            KeyCode::Enter => self.open_selected_search_result(context),
+            _ => {}
+        }
+    }
+
+    fn handle_search_input_key(&mut self, key: KeyEvent, context: &AppContext) {
+        match key.code {
+            KeyCode::Esc => {
+                self.search_input_mode = false;
+                self.status = "search input cancelled".to_string();
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+            }
+            KeyCode::Enter => {
+                self.search_input_mode = false;
+                self.refresh_search_results(context);
+            }
+            KeyCode::Char(ch) => {
+                self.search_query.push(ch);
+            }
+            _ => {}
+        }
+    }
+
+    fn refresh_search_results(&mut self, context: &AppContext) {
+        if self.search_query.trim().is_empty() {
+            self.search_results.clear();
+            self.selected_search_index = 0;
+            self.status = "search query empty: press / to type query".to_string();
+            return;
+        }
+
+        match context.search_notes(&self.search_query) {
+            Ok(results) => {
+                self.search_results = results;
+                self.selected_search_index = 0;
+                self.status = format!(
+                    "search results: {} for '{}'",
+                    self.search_results.len(),
+                    self.search_query
+                );
+            }
+            Err(message) => {
+                self.search_results.clear();
+                self.selected_search_index = 0;
+                self.status = format!("search error: {message}");
+            }
+        }
+    }
+
+    fn move_search_selection(&mut self, delta: i32) {
+        if self.search_results.is_empty() {
+            return;
+        }
+        let max_index =
+            i32::try_from(self.search_results.len().saturating_sub(1)).unwrap_or(i32::MAX);
+        let current = i32::try_from(self.selected_search_index).unwrap_or(0);
+        let next = (current + delta).clamp(0, max_index);
+        self.selected_search_index = usize::try_from(next).unwrap_or(0);
+    }
+
+    fn open_selected_search_result(&mut self, context: &AppContext) {
+        let Some(target) = self
+            .search_results
+            .get(self.selected_search_index)
+            .map(|item| item.path.clone())
+        else {
+            self.status = "no search result selected".to_string();
+            return;
+        };
+
+        self.switch_route(Route::Notes, context);
+        if self.select_note_path(&target, context) {
+            self.status = format!("opened note from search: {target}");
+        } else {
+            self.status = format!("search result not found in notes route: {target}");
+        }
+    }
+
+    fn select_note_path(&mut self, path: &str, context: &AppContext) -> bool {
+        let Some(index) = self.notes.iter().position(|item| item.path == path) else {
+            return false;
+        };
+        self.selected_note_index = index;
+        self.reload_selected_note_view(context);
+        true
+    }
 }
 
 fn parse_palette_command(input: &str) -> std::result::Result<PaletteCommand, String> {
@@ -413,6 +546,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &AppState) {
 fn render_route_body(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
     match app.route {
         Route::Notes => render_notes_route(frame, area, app),
+        Route::Search => render_search_route(frame, area, app),
         _ => {
             let body = Paragraph::new(app.route.help_text())
                 .block(Block::default().borders(Borders::ALL).title("Route"))
@@ -463,6 +597,68 @@ fn render_notes_route(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState
         .block(Block::default().borders(Borders::ALL).title("Viewer"))
         .wrap(Wrap { trim: false });
     frame.render_widget(viewer, columns[1]);
+}
+
+fn render_search_route(frame: &mut ratatui::Frame<'_>, area: Rect, app: &AppState) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(area);
+
+    let mode = if app.search_input_mode {
+        "input"
+    } else {
+        "navigate"
+    };
+    let query = Paragraph::new(format!(
+        "query: {} | mode: {} | keys: / enter esc, up/down, enter=open",
+        app.search_query, mode
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Search"));
+    frame.render_widget(query, rows[0]);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(rows[1]);
+
+    let items = app
+        .search_results
+        .iter()
+        .map(|item| ListItem::new(Line::from(format!("{} ({})", item.path, item.title))))
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Results ({})", app.search_results.len())),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let mut list_state = ListState::default();
+    if !app.search_results.is_empty() {
+        list_state.select(Some(app.selected_search_index));
+    }
+    frame.render_stateful_widget(list, columns[0], &mut list_state);
+
+    let preview = if let Some(selected) = app.search_results.get(app.selected_search_index) {
+        format!(
+            "path: {}\ntitle: {}\nupdated_at: {}",
+            selected.path,
+            selected.title,
+            selected.updated_at.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        "No results loaded. Press /, type a query, then Enter.".to_string()
+    };
+    let details = Paragraph::new(preview)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Selected Result"),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(details, columns[1]);
 }
 
 fn centered_rect(horizontal_percent: u16, vertical_percent: u16, area: Rect) -> Rect {
@@ -651,5 +847,41 @@ mod tests {
             .expect("second selected note view should be loaded");
         assert_eq!(second.path, "notes/beta.md");
         assert!(second.body.contains("Body B"));
+    }
+
+    #[test]
+    fn search_route_filters_results_and_opens_selected_note() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        let db_path = tempdir.path().join("obs.sqlite");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+
+        let mut setup_kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let _ = assert_bridge_ok(setup_kernel.note_put("notes/alpha.md", "# Alpha\n\nBody A"));
+        let _ = assert_bridge_ok(setup_kernel.note_put("notes/beta.md", "# Beta\n\nBody B"));
+        let _ = assert_bridge_ok(setup_kernel.note_put("notes/project-beta.md", "# Project Beta"));
+
+        let context = AppContext::with_bridge(setup_kernel);
+        let mut app = AppState::default();
+        app.switch_route(Route::Search, &context);
+        app.handle_key(key(KeyCode::Char('/')), &context);
+        for ch in "beta".chars() {
+            app.handle_key(key(KeyCode::Char(ch)), &context);
+        }
+        app.handle_key(key(KeyCode::Enter), &context);
+
+        assert_eq!(app.route, Route::Search);
+        assert_eq!(app.search_query, "beta");
+        assert_eq!(app.search_results.len(), 2);
+        assert_eq!(app.search_results[0].path, "notes/beta.md");
+
+        app.handle_key(key(KeyCode::Enter), &context);
+        assert_eq!(app.route, Route::Notes);
+        let selected = app
+            .selected_note_view
+            .as_ref()
+            .expect("selected note should open from search");
+        assert_eq!(selected.path, "notes/beta.md");
+        assert!(selected.body.contains("Body B"));
     }
 }

@@ -1252,3 +1252,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
 - outcomes: [integrated notes route with SDK bridge-backed note list pagination and note viewer loading; added route-specific selection keymap (up/down/j/k/enter/r); added integration test that seeds notes through bridge writes and validates route selection/view rendering behavior]
 - residual_risk: notes route relies on bridge read envelopes and does not yet support inline editing in terminal
+
+- timestamp: 2026-03-03T20:23:47Z
+- session: session-2026-03-03-a
+- ticket: TUI-004
+- action: done
+- evidence:
+  - files: [crates/obs-tui/src/main.rs, crates/obs-tui/README.md, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+- outcomes: [implemented searchable route with slash-triggered query input mode, SDK-backed query filtering over indexed notes, keyboard result navigation, and Enter-based open-note transition into Notes route; added integration test validating query->result->open flow]
+- residual_risk: search currently performs client-side filtering over note windows and does not yet use dedicated indexed ranking/scoring
