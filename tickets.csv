@@ -53,7 +53,7 @@
 "IDX-008","Add index self-heal command","idx","phase2","IDX-007","done","P1","codex","3","0","","command repairs common inconsistencies"
 "LINK-001","Implement wikilink parser","link","phase1","SDK-004","done","P1","codex","3","0","","parses target/display/heading/block forms"
 "LINK-002","Implement deterministic path resolver","link","phase1","ARC-005|LINK-001","done","P1","codex","3","0","","ties resolved by documented algorithm"
-"LINK-003","Implement heading target resolver","link","phase1","LINK-001","todo","P1","unassigned","3","0","","heading links resolve to indexed headings"
+"LINK-003","Implement heading target resolver","link","phase1","LINK-001","done","P1","codex","3","0","","heading links resolve to indexed headings"
 "LINK-004","Implement block target resolver","link","phase2","LINK-001","todo","P1","unassigned","3","0","","block refs resolve to indexed blocks"
 "LINK-005","Implement unresolved link tracking","link","phase2","LINK-002","todo","P1","unassigned","3","0","","unresolved links persisted and queryable"
 "LINK-006","Implement backlink graph service","link","phase2","LINK-002","todo","P1","unassigned","3","0","","outgoing/backlink queries return stable order"

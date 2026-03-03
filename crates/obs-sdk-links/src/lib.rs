@@ -1,5 +1,7 @@
 //! Wikilink parsing and extraction primitives.
 
+use std::collections::HashMap;
+
 use thiserror::Error;
 
 /// Parsed wikilink token.
@@ -82,6 +84,15 @@ pub struct LinkResolution {
     pub is_ambiguous: bool,
 }
 
+/// Heading fragment resolution result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadingResolution {
+    /// Normalized heading slug when fragment exists on the resolved target file.
+    pub resolved_heading_slug: Option<String>,
+    /// True when heading requirement is satisfied.
+    pub is_resolved: bool,
+}
+
 /// Resolve raw target against candidate normalized paths using deterministic tie-breakers.
 #[must_use]
 pub fn resolve_target(
@@ -129,6 +140,83 @@ pub fn resolve_target(
         resolved_path,
         is_ambiguous: matched_candidates.len() > 1,
         matched_candidates,
+    }
+}
+
+/// Convert heading text or heading fragment value into an Obsidian-style slug.
+#[must_use]
+pub fn slugify_heading(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+
+    for character in value.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+            continue;
+        }
+
+        if character.is_alphanumeric() {
+            for lower in character.to_lowercase() {
+                slug.push(lower);
+            }
+            previous_was_separator = false;
+            continue;
+        }
+
+        if !previous_was_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        let _ = slug.pop();
+    }
+
+    slug
+}
+
+/// Resolve heading fragment against target heading slug index.
+#[must_use]
+pub fn resolve_heading_target(
+    heading_fragment: Option<&str>,
+    resolved_path: Option<&str>,
+    heading_index: &HashMap<String, Vec<String>>,
+) -> HeadingResolution {
+    let Some(fragment) = heading_fragment else {
+        return HeadingResolution {
+            resolved_heading_slug: None,
+            is_resolved: true,
+        };
+    };
+    let Some(path) = resolved_path else {
+        return HeadingResolution {
+            resolved_heading_slug: None,
+            is_resolved: false,
+        };
+    };
+
+    let requested_slug = slugify_heading(fragment);
+    if requested_slug.is_empty() {
+        return HeadingResolution {
+            resolved_heading_slug: None,
+            is_resolved: false,
+        };
+    }
+
+    let matched = heading_index
+        .get(path)
+        .and_then(|headings| {
+            headings
+                .iter()
+                .find(|heading| heading.eq_ignore_ascii_case(&requested_slug))
+        })
+        .cloned();
+
+    HeadingResolution {
+        resolved_heading_slug: matched.clone(),
+        is_resolved: matched.is_some(),
     }
 }
 
@@ -260,7 +348,12 @@ pub enum WikiLinkParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{WikiLinkParseError, extract_wikilinks, parse_wikilink, resolve_target};
+    use std::collections::HashMap;
+
+    use super::{
+        WikiLinkParseError, extract_wikilinks, parse_wikilink, resolve_heading_target,
+        resolve_target, slugify_heading,
+    };
 
     #[test]
     fn parse_supports_target_display_heading_and_block_forms() {
@@ -344,5 +437,30 @@ mod tests {
         );
         assert!(!resolution.is_ambiguous);
         assert_eq!(resolution.matched_candidates, vec!["notes/project/beta.md"]);
+    }
+
+    #[test]
+    fn slugify_heading_normalizes_spaces_case_and_punctuation() {
+        assert_eq!(slugify_heading("Project Plan"), "project-plan");
+        assert_eq!(slugify_heading("  API: v2.0 Scope  "), "api-v2-0-scope");
+        assert_eq!(slugify_heading("Überblick"), "überblick");
+    }
+
+    #[test]
+    fn resolve_heading_target_matches_indexed_slugs() {
+        let mut heading_index = HashMap::new();
+        heading_index.insert(
+            "notes/a.md".to_string(),
+            vec!["project-plan".to_string(), "status".to_string()],
+        );
+
+        let found =
+            resolve_heading_target(Some("Project Plan"), Some("notes/a.md"), &heading_index);
+        assert!(found.is_resolved);
+        assert_eq!(found.resolved_heading_slug.as_deref(), Some("project-plan"));
+
+        let missing = resolve_heading_target(Some("Unknown"), Some("notes/a.md"), &heading_index);
+        assert!(!missing.is_resolved);
+        assert_eq!(missing.resolved_heading_slug, None);
     }
 }

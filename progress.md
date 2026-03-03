@@ -592,3 +592,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [index self-heal service added to auto-repair common inconsistencies from checker output, including orphan row cleanup, link flag repair, and stale file row deletion with post-heal verification]
 - residual_risk: self-heal currently applies deterministic row-level fixes only and does not yet trigger secondary semantic rebuild passes for higher-order graph inconsistencies beyond reported issue set
+
+- timestamp: 2026-03-03T17:08:14Z
+- session: session-2026-03-03-a
+- ticket: LINK-003
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-links/src/lib.rs, crates/obs-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [heading slug normalization and heading-fragment resolver added; indexing now validates heading fragments against indexed heading slugs and marks missing headings unresolved]
+- residual_risk: heading slugging follows current local normalization rules and may diverge from exact Obsidian edge-case slug behavior for uncommon punctuation/unicode sequences
