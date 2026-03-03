@@ -1,5 +1,5 @@
 id,title,area,phase,depends_on,status,priority,owner,max_retries,retry_count,blocked_reason,dod
-"DOC-001","Create architecture ADR index","doc","phase0","","todo","P0","unassigned","3","0","","`docs/adr/README.md` with numbering and template"
+"DOC-001","Create architecture ADR index","doc","phase0","","done","P0","codex","3","0","","`docs/adr/README.md` with numbering and template"
 "DOC-002","Write product scope contract v1","doc","phase0","DOC-001","todo","P0","unassigned","3","0","","Scope doc lists in/out items and acceptance criteria"
 "DOC-003","Write Obsidian compatibility matrix","doc","phase0","DOC-001","todo","P0","unassigned","3","0","","Matrix covers links, properties, bases, markdown subset"
 "DOC-004","Write SDK API surface spec","doc","phase0","DOC-001","todo","P0","unassigned","3","0","","Typed interface doc for all read/write/system APIs"

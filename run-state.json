@@ -3,9 +3,9 @@
   "manifest_path": "tickets.csv",
   "phase": "phase0",
   "active_ticket": null,
-  "last_completed_ticket": null,
-  "session_status": "idle",
+  "last_completed_ticket": "DOC-001",
+  "session_status": "running",
   "retry": {},
   "blockers": [],
-  "updated_at": null
+  "updated_at": "2026-03-03T15:10:00Z"
 }
