@@ -522,3 +522,13 @@ Append-only execution log for autonomous runs.
   - commands: [bun run util:check]
   - outcomes: [full indexing workflow implemented to rebuild files/links/properties/bases tables and persist index state summary in one transaction]
 - residual_risk: v1 full rebuild currently reparses all files and clears caches; incremental/coalesced indexing optimizations are tracked by IDX-002 and IDX-003
+
+- timestamp: 2026-03-03T16:46:15Z
+- session: session-2026-03-03-a
+- ticket: IDX-002
+- action: done
+- evidence:
+  - files: [crates/obs-sdk-service/src/indexing.rs, crates/obs-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+  - commands: [bun run util:check]
+  - outcomes: [incremental indexing service implemented for targeted path updates with per-file link/property/base refresh and deletion handling]
+- residual_risk: incremental link resolution currently recomputes only changed source files; cross-note backfill optimization remains for later coalescing/reconcile tickets

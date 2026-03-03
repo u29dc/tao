@@ -18,7 +18,7 @@ use obs_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
     VaultScanError, VaultScanService,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::json;
 use thiserror::Error;
 
@@ -306,6 +306,295 @@ impl FullIndexService {
     }
 }
 
+/// Result payload for incremental indexing workflow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalIndexResult {
+    /// Number of changed paths processed.
+    pub processed_paths: u64,
+    /// Number of files inserted or updated.
+    pub upserted_files: u64,
+    /// Number of files removed from index.
+    pub removed_files: u64,
+    /// Number of links reindexed.
+    pub links_reindexed: u64,
+    /// Number of properties reindexed.
+    pub properties_reindexed: u64,
+    /// Number of bases reindexed.
+    pub bases_reindexed: u64,
+}
+
+/// Incremental indexing service for targeted path updates.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IncrementalIndexService {
+    parser: MarkdownParser,
+}
+
+impl IncrementalIndexService {
+    /// Apply incremental indexing updates for one or more changed relative paths.
+    pub fn apply_changes(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changed_paths: &[PathBuf],
+        case_policy: CasePolicy,
+    ) -> Result<IncrementalIndexResult, FullIndexError> {
+        let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
+            .map_err(|source| FullIndexError::CreateFingerprintService {
+                source: Box::new(source),
+            })?;
+
+        let transaction =
+            connection
+                .transaction()
+                .map_err(|source| FullIndexError::BeginTransaction {
+                    source: Box::new(source),
+                })?;
+
+        let mut upserted_files = 0_u64;
+        let mut removed_files = 0_u64;
+        let mut links_reindexed = 0_u64;
+        let mut properties_reindexed = 0_u64;
+        let mut bases_reindexed = 0_u64;
+
+        for changed_path in changed_paths {
+            let normalized = normalize_changed_path(changed_path)?;
+            let absolute = vault_root.join(changed_path);
+
+            if absolute.exists() {
+                let fingerprint =
+                    fingerprint_service
+                        .fingerprint(changed_path)
+                        .map_err(|source| FullIndexError::Fingerprint {
+                            path: absolute.clone(),
+                            source: Box::new(source),
+                        })?;
+                let modified_unix_ms =
+                    i64::try_from(fingerprint.modified_unix_ms).map_err(|_| {
+                        FullIndexError::TimestampOverflow {
+                            value: fingerprint.modified_unix_ms,
+                        }
+                    })?;
+
+                let existing = FilesRepository::get_by_normalized_path(&transaction, &normalized)
+                    .map_err(|source| FullIndexError::UpsertFileMetadata {
+                    source: Box::new(source),
+                })?;
+                let file_id = existing
+                    .map(|record| record.file_id)
+                    .unwrap_or_else(|| deterministic_id("file", &normalized));
+
+                FilesRepository::upsert(
+                    &transaction,
+                    &FileRecordInput {
+                        file_id: file_id.clone(),
+                        normalized_path: normalized.clone(),
+                        match_key: fingerprint.match_key,
+                        absolute_path: fingerprint.absolute.to_string_lossy().to_string(),
+                        size_bytes: fingerprint.size_bytes,
+                        modified_unix_ms,
+                        hash_blake3: fingerprint.hash_blake3,
+                        is_markdown: normalized.ends_with(".md"),
+                    },
+                )
+                .map_err(|source| FullIndexError::UpsertFileMetadata {
+                    source: Box::new(source),
+                })?;
+
+                transaction
+                    .execute(
+                        "DELETE FROM links WHERE source_file_id = ?1",
+                        params![file_id],
+                    )
+                    .map_err(|source| FullIndexError::ExecuteSql {
+                        operation: "delete_links_for_file",
+                        source: Box::new(source),
+                    })?;
+                transaction
+                    .execute(
+                        "DELETE FROM properties WHERE file_id = ?1",
+                        params![file_id],
+                    )
+                    .map_err(|source| FullIndexError::ExecuteSql {
+                        operation: "delete_properties_for_file",
+                        source: Box::new(source),
+                    })?;
+                transaction
+                    .execute("DELETE FROM bases WHERE file_id = ?1", params![file_id])
+                    .map_err(|source| FullIndexError::ExecuteSql {
+                        operation: "delete_bases_for_file",
+                        source: Box::new(source),
+                    })?;
+
+                if normalized.ends_with(".md") {
+                    let markdown = fs::read_to_string(&absolute).map_err(|source| {
+                        FullIndexError::ReadFile {
+                            path: absolute.clone(),
+                            source,
+                        }
+                    })?;
+                    let parsed = self
+                        .parser
+                        .parse(MarkdownParseRequest {
+                            normalized_path: normalized.clone(),
+                            raw: markdown.clone(),
+                        })
+                        .map_err(|source| FullIndexError::ParseMarkdown {
+                            path: absolute.clone(),
+                            source: Box::new(source),
+                        })?;
+
+                    let property_records =
+                        build_property_records(&file_id, &normalized, &markdown, &absolute)?;
+                    properties_reindexed += property_records.len() as u64;
+                    for property in &property_records {
+                        PropertiesRepository::upsert(&transaction, property).map_err(|source| {
+                            FullIndexError::UpsertProperty {
+                                source: Box::new(source),
+                            }
+                        })?;
+                    }
+
+                    let candidates = FilesRepository::list_all(&transaction)
+                        .map_err(|source| FullIndexError::UpsertFileMetadata {
+                            source: Box::new(source),
+                        })?
+                        .into_iter()
+                        .filter(|record| record.is_markdown)
+                        .map(|record| record.normalized_path)
+                        .collect::<Vec<_>>();
+
+                    for (index, link) in extract_wikilinks(&parsed.body).iter().enumerate() {
+                        let resolution = resolve_target(&link.raw, Some(&normalized), &candidates);
+                        let resolved_file_id = resolution
+                            .resolved_path
+                            .and_then(|path| {
+                                FilesRepository::get_by_normalized_path(&transaction, &path)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .map(|record| record.file_id);
+                        let is_unresolved = resolved_file_id.is_none();
+
+                        LinksRepository::insert(
+                            &transaction,
+                            &LinkRecordInput {
+                                link_id: deterministic_id(
+                                    "link",
+                                    &format!("{file_id}:{index}:{}", link.raw),
+                                ),
+                                source_file_id: file_id.clone(),
+                                raw_target: link.target.clone(),
+                                resolved_file_id,
+                                heading_slug: link.heading.clone(),
+                                block_id: link.block.clone(),
+                                is_unresolved,
+                            },
+                        )
+                        .map_err(|source| FullIndexError::InsertLink {
+                            source: Box::new(source),
+                        })?;
+                        links_reindexed += 1;
+                    }
+                } else if normalized.ends_with(".base") {
+                    let raw = fs::read_to_string(&absolute).map_err(|source| {
+                        FullIndexError::ReadFile {
+                            path: absolute.clone(),
+                            source,
+                        }
+                    })?;
+                    let config_json =
+                        serde_json::to_string(&json!({ "raw": raw })).map_err(|source| {
+                            FullIndexError::SerializeBaseConfig {
+                                path: absolute.clone(),
+                                source,
+                            }
+                        })?;
+
+                    BasesRepository::upsert(
+                        &transaction,
+                        &BaseRecordInput {
+                            base_id: deterministic_id("base", &normalized),
+                            file_id,
+                            config_json,
+                        },
+                    )
+                    .map_err(|source| FullIndexError::UpsertBase {
+                        source: Box::new(source),
+                    })?;
+                    bases_reindexed += 1;
+                }
+
+                upserted_files += 1;
+            } else if let Some(existing) =
+                FilesRepository::get_by_normalized_path(&transaction, &normalized).map_err(
+                    |source| FullIndexError::UpsertFileMetadata {
+                        source: Box::new(source),
+                    },
+                )?
+            {
+                FilesRepository::delete_by_id(&transaction, &existing.file_id).map_err(
+                    |source| FullIndexError::UpsertFileMetadata {
+                        source: Box::new(source),
+                    },
+                )?;
+                removed_files += 1;
+            }
+        }
+
+        let now_unix_ms = current_unix_ms()?;
+        IndexStateRepository::upsert(
+            &transaction,
+            &IndexStateRecordInput {
+                key: "last_index_at".to_string(),
+                value_json: now_unix_ms.to_string(),
+            },
+        )
+        .map_err(|source| FullIndexError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+
+        let summary_json = serde_json::to_string(&json!({
+            "mode": "incremental",
+            "processed_paths": changed_paths.len(),
+            "upserted_files": upserted_files,
+            "removed_files": removed_files,
+            "links_reindexed": links_reindexed,
+            "properties_reindexed": properties_reindexed,
+            "bases_reindexed": bases_reindexed,
+            "completed_unix_ms": now_unix_ms,
+        }))
+        .map_err(|source| FullIndexError::SerializeStateSummary {
+            source: Box::new(source),
+        })?;
+
+        IndexStateRepository::upsert(
+            &transaction,
+            &IndexStateRecordInput {
+                key: "last_incremental_index_summary".to_string(),
+                value_json: summary_json,
+            },
+        )
+        .map_err(|source| FullIndexError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+
+        transaction
+            .commit()
+            .map_err(|source| FullIndexError::CommitTransaction {
+                source: Box::new(source),
+            })?;
+
+        Ok(IncrementalIndexResult {
+            processed_paths: changed_paths.len() as u64,
+            upserted_files,
+            removed_files,
+            links_reindexed,
+            properties_reindexed,
+            bases_reindexed,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MarkdownIndexDocument {
     file_id: String,
@@ -385,6 +674,46 @@ fn typed_value_to_json(value: &TypedPropertyValue) -> serde_json::Value {
 fn deterministic_id(prefix: &str, input: &str) -> String {
     let hash = blake3::hash(input.as_bytes()).to_hex();
     format!("{prefix}_{}", &hash[..16])
+}
+
+fn normalize_changed_path(path: &Path) -> Result<String, FullIndexError> {
+    if path.is_absolute() {
+        return Err(FullIndexError::InvalidChangedPath {
+            path: path.to_path_buf(),
+            reason: "path must be relative".to_string(),
+        });
+    }
+
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                let segment =
+                    segment
+                        .to_str()
+                        .ok_or_else(|| FullIndexError::InvalidChangedPath {
+                            path: path.to_path_buf(),
+                            reason: "path component is not utf-8".to_string(),
+                        })?;
+                segments.push(segment.to_string());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(FullIndexError::InvalidChangedPath {
+                    path: path.to_path_buf(),
+                    reason: "path must not contain parent traversal".to_string(),
+                });
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(FullIndexError::InvalidChangedPath {
+                    path: path.to_path_buf(),
+                    reason: "unsupported path component".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(segments.join("/"))
 }
 
 fn current_unix_ms() -> Result<u128, FullIndexError> {
@@ -480,6 +809,14 @@ pub enum FullIndexError {
         /// Raw timestamp value.
         value: u128,
     },
+    /// Changed path input is invalid for incremental indexing.
+    #[error("invalid changed path '{path}': {reason}")]
+    InvalidChangedPath {
+        /// Invalid changed path.
+        path: PathBuf,
+        /// Validation reason.
+        reason: String,
+    },
     /// Beginning sqlite transaction failed.
     #[error("failed to begin full index transaction: {source}")]
     BeginTransaction {
@@ -490,6 +827,15 @@ pub enum FullIndexError {
     /// Clearing index tables failed.
     #[error("failed to clear index tables before rebuild: {source}")]
     ClearTables {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Executing incremental maintenance SQL failed.
+    #[error("failed to execute sql operation '{operation}': {source}")]
+    ExecuteSql {
+        /// SQL operation identifier.
+        operation: &'static str,
         /// SQLite error.
         #[source]
         source: Box<rusqlite::Error>,
@@ -555,6 +901,7 @@ pub enum FullIndexError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use obs_sdk_storage::{
         BasesRepository, FilesRepository, IndexStateRepository, LinksRepository,
@@ -563,7 +910,7 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{CasePolicy, FullIndexService};
+    use super::{CasePolicy, FullIndexService, IncrementalIndexService};
 
     #[test]
     fn rebuild_populates_core_tables_for_files_links_properties_bases_and_state() {
@@ -630,6 +977,96 @@ mod tests {
             IndexStateRepository::get_by_key(&connection, "last_full_index_summary")
                 .expect("get summary state")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn incremental_apply_changes_reindexes_only_changed_markdown_file() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A\n[[b]]").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let before_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b before")
+            .expect("b exists before");
+
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nstatus: done\n---\n# A updated\n[[b]]\n[[missing]]",
+        )
+        .expect("update a");
+
+        let result = IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/a.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental update");
+
+        assert_eq!(result.processed_paths, 1);
+        assert_eq!(result.upserted_files, 1);
+        assert_eq!(result.removed_files, 0);
+
+        let after_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b after")
+            .expect("b exists after");
+        assert_eq!(before_b.file_id, after_b.file_id);
+        assert_eq!(before_b.hash_blake3, after_b.hash_blake3);
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get source")
+            .expect("source exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing");
+        assert_eq!(outgoing.len(), 2);
+        assert_eq!(outgoing.iter().filter(|row| row.is_unresolved).count(), 1);
+
+        let properties =
+            PropertiesRepository::list_for_file_with_path(&connection, &source.file_id)
+                .expect("list properties");
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].key, "status");
+    }
+
+    #[test]
+    fn incremental_apply_changes_removes_deleted_file_metadata() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::remove_file(temp.path().join("notes/a.md")).expect("remove a");
+
+        let result = IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/a.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental delete");
+
+        assert_eq!(result.processed_paths, 1);
+        assert_eq!(result.upserted_files, 0);
+        assert_eq!(result.removed_files, 1);
+        assert!(
+            FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+                .expect("get deleted file")
+                .is_none()
         );
     }
 }

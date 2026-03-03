@@ -19,7 +19,10 @@ pub use import_export::{
     TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
-pub use indexing::{FullIndexError, FullIndexResult, FullIndexService};
+pub use indexing::{
+    FullIndexError, FullIndexResult, FullIndexService, IncrementalIndexResult,
+    IncrementalIndexService,
+};
 pub use tracing_hooks::ServiceTraceContext;
 
 use obs_sdk_core::{DomainEvent, DomainEventBus, NoteChangeKind};
