@@ -78,7 +78,7 @@
 "FFI-005","Implement bridge error mapping","ffi","phase3","DOC-005|FFI-002","done","P1","codex","3","0","","Rust errors map to Swift typed errors"
 "FFI-006","Implement event subscription bridge","ffi","phase3","SDK-007|FFI-002","done","P1","codex","3","0","","Swift receives index/update events"
 "FFI-007","Implement batch/list windowing APIs","ffi","phase3","FFI-002","done","P1","codex","3","0","","large lists exposed via paged endpoints"
-"FFI-008","Add bridge performance benchmarks","ffi","phase3","INFRA-007|FFI-006","todo","P1","unassigned","3","0","","boundary call budgets tracked in CI report"
+"FFI-008","Add bridge performance benchmarks","ffi","phase3","INFRA-007|FFI-006","done","P1","codex","3","0","","boundary call budgets tracked in CI report"
 "APP-001","Create macOS app shell project","app","phase3","ARC-002","todo","P1","unassigned","3","0","","app launches with split layout scaffolding"
 "APP-002","Integrate bridge package into app build","app","phase3","FFI-002","todo","P1","unassigned","3","0","","app links and calls rust read APIs"
 "APP-003","Implement vault picker and open flow","app","phase3","APP-002","todo","P1","unassigned","3","0","","opens vault and shows root state"

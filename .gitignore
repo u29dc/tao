@@ -6,3 +6,4 @@ build/
 .tmp/
 apps/obs-macos/.build/
 apps/obs-macos/.swiftpm/
+bench/reports/

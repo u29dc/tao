@@ -13,4 +13,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 clap.workspace = true
+obs-sdk-bridge = { path = "../obs-sdk-bridge" }
+serde_json.workspace = true
+tempfile = "3.17.1"

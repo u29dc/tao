@@ -37,5 +37,14 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      - name: bridge benchmark report
+        run: cargo run -p obs-bench -- --scenario bridge --iterations 200 --json-out bench/reports/bridge-call-budgets.json
+
+      - name: upload bridge benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-bench-report
+          path: bench/reports/bridge-call-budgets.json
+
       - name: build
         run: cargo build --workspace

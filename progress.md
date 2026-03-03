@@ -812,3 +812,13 @@ Append-only execution log for autonomous runs.
   - commands: [swift test, bun run util:check]
   - outcomes: [paged `notes-list` windowing API added with cursor+limit controls and deterministic path ordering; Rust bridge tests verify two-page traversal; Swift client now exposes `notesList` API and integration tests verify stable paging semantics over larger note sets]
 - residual_risk: note summary titles currently derive from path stem for list latency predictability, so richer title extraction from parsed markdown remains a future enhancement if UI requires higher fidelity in large lists
+
+- timestamp: 2026-03-03T18:11:39Z
+- session: session-2026-03-03-a
+- ticket: FFI-008
+- action: done
+- evidence:
+  - files: [crates/obs-bench/Cargo.toml, crates/obs-bench/src/main.rs, .github/workflows/rust-ci.yml, package.json, docs/specs/performance-budgets.md, .gitignore, Cargo.lock, tickets.csv, run-state.json]
+  - commands: [bun run util:bench:bridge, swift test, bun run util:check]
+  - outcomes: [obs-bench now includes a bridge scenario measuring `note_get`, `notes_list`, `note_put`, and `events_poll` p50/p95/max with JSON report output and optional budget enforcement; rust-ci now generates and uploads `bench/reports/bridge-call-budgets.json` as an artifact; local benchmark/report run and full gates pass]
+- residual_risk: benchmark currently exercises in-process bridge kernel calls rather than subprocess transport overhead, so end-to-end Swift subprocess boundary latency characterization should be added if transport remains process-based
