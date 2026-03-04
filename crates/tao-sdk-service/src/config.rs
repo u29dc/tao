@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -69,11 +70,7 @@ impl SdkConfigLoader {
         cwd: &Path,
     ) -> Result<SdkConfig, SdkConfigError> {
         let root_dir = resolve_root_config_dir(cwd);
-        let root_config =
-            load_or_bootstrap(&root_dir).map_err(|source| SdkConfigError::RootConfig {
-                path: root_dir.join("config.toml"),
-                source,
-            })?;
+        let root_config = load_root_config_or_defaults(&root_dir)?;
 
         let vault_root_input = choose_path(
             overrides.vault_root,
@@ -187,6 +184,36 @@ impl SdkConfigLoader {
             feature_flags,
         })
     }
+}
+
+fn load_root_config_or_defaults(root_dir: &Path) -> Result<TaoConfig, SdkConfigError> {
+    match load_or_bootstrap(root_dir) {
+        Ok(config) => Ok(config),
+        Err(source @ tao_sdk_config::TaoConfigError::CreateParent { .. })
+        | Err(source @ tao_sdk_config::TaoConfigError::Write { .. }) => {
+            Ok(root_config_fallback(&source))
+        }
+        Err(
+            ref source @ tao_sdk_config::TaoConfigError::Read {
+                source: ref read_source,
+                ..
+            },
+        ) if matches!(
+            read_source.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+        ) =>
+        {
+            Ok(root_config_fallback(source))
+        }
+        Err(source) => Err(SdkConfigError::RootConfig {
+            path: root_dir.join("config.toml"),
+            source,
+        }),
+    }
+}
+
+fn root_config_fallback(_source: &tao_sdk_config::TaoConfigError) -> TaoConfig {
+    TaoConfig::defaults()
 }
 
 /// Bootstrap snapshot returned after config resolution and migration readiness checks.
