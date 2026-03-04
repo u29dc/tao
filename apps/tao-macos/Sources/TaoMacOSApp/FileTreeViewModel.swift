@@ -12,41 +12,39 @@ struct FileTreeNode: Identifiable, Hashable {
 @MainActor
 final class FileTreeViewModel: ObservableObject {
     @Published private(set) var roots: [FileTreeNode] = []
-    @Published private(set) var canLoadMore = false
     @Published private(set) var isLoading = false
+    @Published private(set) var stats: BridgeVaultStats?
     @Published var errorMessage: String?
 
     private var vaultRoot = ""
-    private var dbPath = ""
-    private var nextCursor: String?
     private var summaries: [BridgeNoteSummary] = []
+    private var notePaths: Set<String> = []
 
     var hasLoadedNotes: Bool {
         !summaries.isEmpty
     }
 
-    func bindVault(vaultRoot: String, dbPath: String, eagerLoad: Bool = true) {
-        guard self.vaultRoot != vaultRoot || self.dbPath != dbPath else {
+    func bindVault(vaultRoot: String, eagerLoad: Bool = true) {
+        guard self.vaultRoot != vaultRoot else {
             return
         }
 
         self.vaultRoot = vaultRoot
-        self.dbPath = dbPath
-        self.nextCursor = nil
         self.summaries = []
+        self.notePaths = []
         self.roots = []
-        self.canLoadMore = false
+        self.stats = nil
         self.errorMessage = nil
         if eagerLoad {
-            loadNextPage()
+            reload()
         }
     }
 
-    func loadNextPage() {
+    func reload() {
         guard !isLoading else {
             return
         }
-        guard !vaultRoot.isEmpty, !dbPath.isEmpty else {
+        guard !vaultRoot.isEmpty else {
             errorMessage = "open a vault first"
             return
         }
@@ -54,26 +52,40 @@ final class FileTreeViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        let requestVaultRoot = vaultRoot
-        let requestDbPath = dbPath
-        let requestCursor = nextCursor
+        let requestVaultRoot = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
 
         Task {
             do {
-                let page = try await Task.detached(priority: .userInitiated) {
-                    try TaoBridgeClient().notesList(
+                let (stats, allNotes) = try await Task.detached(priority: .userInitiated) {
+                    let client = TaoBridgeClient()
+                    let startup = try client.startupBundle(
                         vaultRoot: requestVaultRoot,
-                        dbPath: requestDbPath,
-                        afterPath: requestCursor,
-                        limit: 1000
+                        dbPath: "",
+                        limit: 1_000
                     )
+                    var notes = startup.notes.items
+                    var cursor = startup.notes.nextCursor
+                    while let cursorPath = cursor {
+                        let page = try client.notesList(
+                            vaultRoot: requestVaultRoot,
+                            dbPath: "",
+                            afterPath: cursorPath,
+                            limit: 1_000
+                        )
+                        notes.append(contentsOf: page.items)
+                        cursor = page.nextCursor
+                    }
+                    return (startup.stats, notes)
                 }.value
 
                 await MainActor.run {
-                    summaries.append(contentsOf: page.items)
-                    nextCursor = page.nextCursor
-                    canLoadMore = page.nextCursor != nil
+                    summaries = allNotes
+                        .sorted { left, right in
+                            left.path.localizedCaseInsensitiveCompare(right.path) == .orderedAscending
+                        }
+                    notePaths = Set(summaries.map(\.path))
                     roots = FileTreeBuilder.build(from: summaries)
+                    self.stats = stats
                     isLoading = false
                 }
             } catch {
@@ -83,6 +95,10 @@ final class FileTreeViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func isNotePath(_ path: String) -> Bool {
+        notePaths.contains(path)
     }
 
     func quickOpenMatches(query: String, limit: Int = 25) -> [BridgeNoteSummary] {
