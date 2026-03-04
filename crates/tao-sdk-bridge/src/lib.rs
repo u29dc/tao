@@ -12,11 +12,13 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use tao_sdk_bases::{BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest};
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_service::{
-    BaseTableExecutorService, HealthSnapshotService, NoteCrudService, WatcherStatus,
+    BaseTableExecutorService, FullIndexService, HealthSnapshotService, NoteCrudService,
+    WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, run_migrations,
 };
+use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
 pub use runtime::{BridgeStartupBundle, TaoBridgeRuntime, TaoBridgeRuntimeError};
@@ -428,6 +430,32 @@ impl BridgeKernel {
     #[must_use]
     pub fn schema_version(&self) -> &'static str {
         BRIDGE_SCHEMA_VERSION
+    }
+
+    /// Ensure bridge index contains at least one scan pass for the current vault.
+    pub fn ensure_indexed(&mut self) -> Result<bool, BridgeEnsureIndexError> {
+        let existing_markdown_rows = self
+            .connection
+            .query_row(
+                "SELECT COUNT(1) FROM files WHERE is_markdown = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|source| BridgeEnsureIndexError::CountIndexedFiles { source })?;
+
+        if existing_markdown_rows > 0 {
+            return Ok(false);
+        }
+
+        FullIndexService::default()
+            .rebuild(
+                &self.vault_root,
+                &mut self.connection,
+                CasePolicy::Sensitive,
+            )
+            .map_err(|source| BridgeEnsureIndexError::RebuildIndex { source })?;
+
+        Ok(true)
     }
 
     /// Return bridge ping envelope.
@@ -1244,6 +1272,25 @@ pub enum BridgeInitError {
         /// SQLite error.
         #[source]
         source: rusqlite::Error,
+    },
+}
+
+/// Bridge index bootstrap failures.
+#[derive(Debug, Error)]
+pub enum BridgeEnsureIndexError {
+    /// Counting indexed markdown rows failed.
+    #[error("failed to count indexed markdown rows: {source}")]
+    CountIndexedFiles {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Full index rebuild failed during bootstrap.
+    #[error("failed to rebuild index: {source}")]
+    RebuildIndex {
+        /// Full index service error.
+        #[source]
+        source: tao_sdk_service::FullIndexError,
     },
 }
 

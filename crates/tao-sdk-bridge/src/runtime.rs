@@ -146,6 +146,10 @@ impl TaoBridgeRuntime {
 
     pub fn startup_bundle_json(&self, limit: Option<u64>) -> Result<String, TaoBridgeRuntimeError> {
         with_kernel(&self.kernel, |kernel| {
+            kernel.ensure_indexed().map_err(|source| {
+                TaoBridgeRuntimeError::Runtime(format!("startup index bootstrap failed: {source}"))
+            })?;
+
             let stats = expect_envelope_value(kernel.vault_stats(), "vault_stats")?;
             let notes = expect_envelope_value(
                 kernel.notes_list(None, normalize_window_limit(limit)),
@@ -208,17 +212,18 @@ mod tests {
     use super::TaoBridgeRuntime;
 
     #[test]
-    fn runtime_bootstraps_and_returns_startup_bundle_json() {
+    fn runtime_startup_bundle_bootstraps_index_from_vault_filesystem() {
         let temp = tempfile::tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(
+            vault_root.join("notes/alpha.md"),
+            "---\nstatus: active\n---\n\n# Alpha\n\nBody",
+        )
+        .expect("seed note");
 
         let runtime = TaoBridgeRuntime::new(vault_root.to_string_lossy().to_string(), None)
             .expect("create runtime");
-        let put_envelope = runtime
-            .note_put_json("notes/alpha.md".to_string(), "# Alpha\n".to_string())
-            .expect("put note");
-        assert!(put_envelope.contains("\"ok\":true"));
 
         let startup = runtime
             .startup_bundle_json(Some(32))

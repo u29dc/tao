@@ -800,6 +800,7 @@ dependencies = [
  "tao-sdk-markdown",
  "tao-sdk-service",
  "tao-sdk-storage",
+ "tao-sdk-vault",
  "tempfile",
  "thiserror",
  "uniffi",
