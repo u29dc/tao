@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Usage: scripts/bench.sh [--suite SUITE] [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--skip-generate]
+
+Unified benchmark driver for Tao SDK/bridge/core/CLI workloads.
+
+Suites:
+  all      Run sdk + full read-only cli matrix (default)
+  sdk      Run parse/resolve/search/bridge/ffi/startup + baseline query/graph budgets
+  cli      Run full read-only CLI command matrix
+  bridge   Run bridge scenario only
+  ffi      Run ffi scenario only
+  startup  Run startup scenario only
+  parse    Run parse scenario only
+  resolve  Run resolve scenario only
+  search   Run search scenario only
+
+Options:
+  --profile PROFILE   Fixture profile for CLI workloads: 1k|5k|10k|25k (default: 10k)
+  --seed N            Fixture seed (default: 42)
+  --runs N            Hyperfine runs per command (default: 25)
+  --warmup N          Hyperfine warmup runs per command (default: 5)
+  --output DIR        Benchmark output root (default: .benchmarks/reports)
+  --skip-generate     Reuse existing fixture and skip generation/validation
+  -h, --help          Show this help
+USAGE
+}
+
+SUITE="all"
+FIXTURE_PROFILE="10k"
+SEED="42"
+RUNS="25"
+WARMUP="5"
+OUTPUT_ROOT=".benchmarks/reports"
+SKIP_GENERATE=0
+FIXTURE_ROOT="vault/generated"
+CLI_BUDGET_MS="10"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --suite)
+      SUITE="${2:-}"
+      shift 2
+      ;;
+    --profile)
+      FIXTURE_PROFILE="${2:-}"
+      shift 2
+      ;;
+    --seed)
+      SEED="${2:-}"
+      shift 2
+      ;;
+    --runs)
+      RUNS="${2:-}"
+      shift 2
+      ;;
+    --warmup)
+      WARMUP="${2:-}"
+      shift 2
+      ;;
+    --output)
+      OUTPUT_ROOT="${2:-}"
+      shift 2
+      ;;
+    --skip-generate)
+      SKIP_GENERATE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! [[ "$RUNS" =~ ^[0-9]+$ ]]; then
+  echo "--runs must be an integer" >&2
+  exit 1
+fi
+if ! [[ "$WARMUP" =~ ^[0-9]+$ ]]; then
+  echo "--warmup must be an integer" >&2
+  exit 1
+fi
+if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
+  echo "--seed must be an integer" >&2
+  exit 1
+fi
+case "$FIXTURE_PROFILE" in
+  1k|5k|10k|25k)
+    ;;
+  *)
+    echo "--profile must be one of: 1k|5k|10k|25k" >&2
+    exit 1
+    ;;
+esac
+case "$SUITE" in
+  all|sdk|cli|bridge|ffi|startup|parse|resolve|search|core)
+    ;;
+  *)
+    echo "--suite must be one of: all|sdk|cli|bridge|ffi|startup|parse|resolve|search|core" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$SUITE" == "core" ]]; then
+  SUITE="sdk"
+fi
+
+REPORT_DIR="${OUTPUT_ROOT}"
+CLI_MATRIX_REPORT_DIR="${REPORT_DIR}/cli-readonly"
+CLI_MATRIX_SUMMARY_PATH="${CLI_MATRIX_REPORT_DIR}/summary.json"
+BENCH_BIN="target/release/tao-bench"
+CLI_BIN="target/release/tao"
+FIXTURE_VAULT="${FIXTURE_ROOT}/vault-${FIXTURE_PROFILE}"
+DB_PATH="${FIXTURE_VAULT}/.tao/index.sqlite"
+SAMPLE_NOTE="notes/projects/project-1.md"
+SAMPLE_BASE="views/projects.base"
+SAMPLE_VIEW="Projects"
+
+PARSE_REPORT="${REPORT_DIR}/parse-bench.json"
+RESOLVE_REPORT="${REPORT_DIR}/resolve-bench.json"
+SEARCH_REPORT="${REPORT_DIR}/search-bench.json"
+BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
+FFI_REPORT="${REPORT_DIR}/ffi-call-budgets.json"
+STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
+HYPERFINE_QUERY_REPORT="${REPORT_DIR}/query-docs-hyperfine.json"
+HYPERFINE_GRAPH_REPORT="${REPORT_DIR}/graph-unresolved-hyperfine.json"
+
+mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
+
+build_bins_if_needed() {
+  if [[ ! -x "${BENCH_BIN}" ]]; then
+    echo "Building release benchmark binary..."
+    cargo build --release -p tao-bench
+  fi
+  if [[ ! -x "${CLI_BIN}" ]]; then
+    echo "Building release CLI binary..."
+    cargo build --release -p tao-cli
+  fi
+}
+
+require_hyperfine() {
+  if ! command -v hyperfine >/dev/null 2>&1; then
+    echo "hyperfine is required for suite '${SUITE}'" >&2
+    exit 1
+  fi
+}
+
+prepare_fixture() {
+  if [[ "${SKIP_GENERATE}" -eq 0 ]]; then
+    echo "Generating deterministic fixtures (profile=${FIXTURE_PROFILE}, seed=${SEED})..."
+    ./scripts/fixtures.sh --profile "${FIXTURE_PROFILE}" --seed "${SEED}" --output "${FIXTURE_ROOT}"
+  fi
+
+  if [[ ! -d "${FIXTURE_VAULT}" ]]; then
+    echo "fixture vault not found: ${FIXTURE_VAULT}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_NOTE}" ]]; then
+    echo "sample note missing: ${FIXTURE_VAULT}/${SAMPLE_NOTE}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_BASE}" ]]; then
+    echo "sample base missing: ${FIXTURE_VAULT}/${SAMPLE_BASE}" >&2
+    exit 1
+  fi
+
+  echo "Seeding index for CLI benchmarks..."
+  "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  "${CLI_BIN}" --json vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+}
+
+run_tao_bench_scenario() {
+  local scenario="$1"
+  local iterations="$2"
+  local report_path="$3"
+  shift 3
+  echo "Running tao-bench scenario=${scenario}..."
+  "${BENCH_BIN}" \
+    --scenario "${scenario}" \
+    --iterations "${iterations}" \
+    "$@" \
+    --json-out "${report_path}"
+}
+
+validate_startup_budget() {
+  bun --eval '
+    const fs = require("node:fs");
+    const reportPath = process.argv[1];
+    const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    const p95 = report?.latency?.p95_ms;
+    const target = report?.budget?.target_p95_ms ?? 900;
+
+    if (typeof p95 !== "number") {
+      console.error("startup budget gate failed: missing latency.p95_ms in report");
+      process.exit(1);
+    }
+    if (p95 > target) {
+      console.error(`startup budget gate failed: p95 ${p95}ms exceeded target ${target}ms`);
+      process.exit(1);
+    }
+    console.log(`startup budget gate passed: p95 ${p95}ms <= ${target}ms`);
+  ' "${STARTUP_REPORT}"
+}
+
+run_baseline_cli_budgets() {
+  require_hyperfine
+
+  echo "Running baseline query/docs hyperfine budget..."
+  hyperfine \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --export-json "${HYPERFINE_QUERY_REPORT}" \
+    "${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+
+  echo "Running baseline graph/unresolved hyperfine budget..."
+  hyperfine \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --export-json "${HYPERFINE_GRAPH_REPORT}" \
+    "${CLI_BIN} --json graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0 > /dev/null"
+
+  bun --eval '
+    const fs = require("node:fs");
+    const [queryPath, graphPath, budget] = process.argv.slice(1);
+    const query = JSON.parse(fs.readFileSync(queryPath, "utf8"));
+    const graph = JSON.parse(fs.readFileSync(graphPath, "utf8"));
+    const threshold = Number(budget);
+
+    const queryMeanMs = (query.results?.[0]?.mean ?? 0) * 1000;
+    const graphMeanMs = (graph.results?.[0]?.mean ?? 0) * 1000;
+
+    if (queryMeanMs > threshold) {
+      console.error(`query budget failed: ${queryMeanMs.toFixed(3)}ms > ${threshold}ms`);
+      process.exit(1);
+    }
+    if (graphMeanMs > threshold) {
+      console.error(`graph budget failed: ${graphMeanMs.toFixed(3)}ms > ${threshold}ms`);
+      process.exit(1);
+    }
+
+    console.log(`query budget passed: ${queryMeanMs.toFixed(3)}ms <= ${threshold}ms`);
+    console.log(`graph budget passed: ${graphMeanMs.toFixed(3)}ms <= ${threshold}ms`);
+  ' "${HYPERFINE_QUERY_REPORT}" "${HYPERFINE_GRAPH_REPORT}" "${CLI_BUDGET_MS}"
+}
+
+cli_matrix_benchmark() {
+  local id="$1"
+  local cmd="$2"
+  local report_path="${CLI_MATRIX_REPORT_DIR}/${id}.json"
+  echo "benchmarking ${id}"
+  hyperfine \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --export-json "${report_path}" \
+    "${cmd}"
+}
+
+run_cli_matrix() {
+  require_hyperfine
+
+  COMMAND_MATRIX=$(cat <<EOF
+vault-stats|${CLI_BIN} --json vault stats --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+vault-preflight|${CLI_BIN} --json vault preflight --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+doc-read|${CLI_BIN} --json doc read --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+doc-list|${CLI_BIN} --json doc list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+base-list|${CLI_BIN} --json base list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+base-schema|${CLI_BIN} --json base schema --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE}
+base-view|${CLI_BIN} --json base view --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --page 1 --page-size 50
+graph-outgoing|${CLI_BIN} --json graph outgoing --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+graph-backlinks|${CLI_BIN} --json graph backlinks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+graph-unresolved|${CLI_BIN} --json graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-deadends|${CLI_BIN} --json graph deadends --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-orphans|${CLI_BIN} --json graph orphans --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-components|${CLI_BIN} --json graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-walk|${CLI_BIN} --json graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200
+meta-properties|${CLI_BIN} --json meta properties --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-tags|${CLI_BIN} --json meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-aliases|${CLI_BIN} --json meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-tasks|${CLI_BIN} --json meta tasks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+task-list|${CLI_BIN} --json task list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+query-docs|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0
+query-graph|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --limit 50 --offset 0
+query-graph-path|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 50 --offset 0
+query-task|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from task --query follow --limit 50 --offset 0
+query-meta-tags|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:tags --limit 50 --offset 0
+query-meta-aliases|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:aliases --limit 50 --offset 0
+query-meta-properties|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:properties --limit 50 --offset 0
+query-base|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 50 --offset 0
+EOF
+)
+
+  while IFS="|" read -r id cmd; do
+    [[ -z "${id}" ]] && continue
+    cli_matrix_benchmark "${id}" "${cmd}"
+  done <<< "${COMMAND_MATRIX}"
+
+  bun --eval '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [reportDir, summaryPath, profile, runs, warmup] = process.argv.slice(1);
+    const files = fs
+      .readdirSync(reportDir)
+      .filter((file) => file.endsWith(".json") && file !== "summary.json");
+    const commands = files
+      .map((file) => {
+        const payload = JSON.parse(fs.readFileSync(path.join(reportDir, file), "utf8"));
+        const result = payload.results?.[0] ?? {};
+        return {
+          id: file.replace(/\.json$/, ""),
+          mean_ms: Number(((result.mean ?? 0) * 1000).toFixed(3)),
+          stddev_ms: Number(((result.stddev ?? 0) * 1000).toFixed(3)),
+          min_ms: Number(((result.min ?? 0) * 1000).toFixed(3)),
+          max_ms: Number(((result.max ?? 0) * 1000).toFixed(3)),
+        };
+      })
+      .sort((a, b) => a.mean_ms - b.mean_ms);
+    const summary = {
+      generated_at: new Date().toISOString(),
+      profile,
+      runs: Number(runs),
+      warmup: Number(warmup),
+      commands,
+    };
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    console.log(`summary written to ${summaryPath}`);
+  ' "${CLI_MATRIX_REPORT_DIR}" "${CLI_MATRIX_SUMMARY_PATH}" "${FIXTURE_PROFILE}" "${RUNS}" "${WARMUP}"
+
+  echo "CLI matrix reports:"
+  echo "  report_dir=${CLI_MATRIX_REPORT_DIR}"
+  echo "  summary=${CLI_MATRIX_SUMMARY_PATH}"
+}
+
+run_sdk_suite() {
+  run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
+  run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 10000
+  run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
+  run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
+  run_tao_bench_scenario ffi 200 "${FFI_REPORT}" --enforce-budgets --max-p50-ms 20 --max-p95-ms 60
+  run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
+  validate_startup_budget
+  run_baseline_cli_budgets
+}
+
+build_bins_if_needed
+
+case "${SUITE}" in
+  all)
+    prepare_fixture
+    run_sdk_suite
+    run_cli_matrix
+    ;;
+  sdk)
+    prepare_fixture
+    run_sdk_suite
+    ;;
+  cli)
+    prepare_fixture
+    run_cli_matrix
+    ;;
+  bridge)
+    run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
+    ;;
+  ffi)
+    run_tao_bench_scenario ffi 200 "${FFI_REPORT}" --enforce-budgets --max-p50-ms 20 --max-p95-ms 60
+    ;;
+  startup)
+    run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
+    validate_startup_budget
+    ;;
+  parse)
+    run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
+    ;;
+  resolve)
+    run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 10000
+    ;;
+  search)
+    run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
+    ;;
+esac
+
+echo "Benchmark suite '${SUITE}' complete."
+echo "Reports written under ${REPORT_DIR}"

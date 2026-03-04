@@ -38,7 +38,7 @@ jobs:
         run: cargo test --workspace --release
 
       - name: perf budget gate
-        run: ./scripts/budgets.sh
+        run: ./scripts/bench.sh --suite sdk
 
       - name: upload perf reports
         uses: actions/upload-artifact@v4
@@ -48,6 +48,11 @@ jobs:
             .benchmarks/reports/bridge-call-budgets.json
             .benchmarks/reports/ffi-call-budgets.json
             .benchmarks/reports/startup-budgets.json
+            .benchmarks/reports/parse-bench.json
+            .benchmarks/reports/resolve-bench.json
+            .benchmarks/reports/search-bench.json
+            .benchmarks/reports/query-docs-hyperfine.json
+            .benchmarks/reports/graph-unresolved-hyperfine.json
 
       - name: build
         run: cargo build --workspace --release

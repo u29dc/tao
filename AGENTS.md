@@ -3,6 +3,11 @@
 ## 1. Documentation
 
 - Primary policy: this file is the canonical operational reference for repository architecture, commands, quality gates, and roadmap state.
+- Embedded spec decisions are maintained here (no standalone `docs/` spec directory):
+    - CLI IA and compatibility alias map
+    - unified query contract and scope semantics
+    - parity scope (`now/next/later`)
+    - synthetic fixture and performance benchmark runbooks
 - External references for tool behavior and standards:
     - `https://bun.sh/docs/llms.txt`
     - `https://swift.org/documentation/`
@@ -27,7 +32,7 @@ crates/
   tao-tui/                      Placeholder shell (intentionally minimal)
 vault/                          Root shipped fixture vault for QA and manual smoke
 plan/                           Execution control plane (plan, tickets, run-state, progress)
-scripts/                        Operational scripts (clean, ffi, budgets, fixtures, release_cli, release_mac)
+scripts/                        Operational scripts (clean, ffi, fixtures, bench, release)
 ```
 
 ## 3. Stack
@@ -46,11 +51,16 @@ scripts/                        Operational scripts (clean, ffi, budgets, fixtur
 - `bun run util:clean` -> remove build/runtime artifacts and local install outputs.
 - `bun run util:ffi` -> build bridge and regenerate Swift UniFFI bindings.
 - `bun run build` -> full release build pipeline (`util:ffi` + `release:cli` + `release:mac`).
+- `bun run release:all` -> unified release pipeline for CLI + macOS app packaging.
 - `bun run release:cli` -> release Rust binaries install + CLI/TUI bundle output.
 - `bun run release:mac` -> release Swift app bundle + signed zip package output.
 - `bun run util:check` -> format, lint, release check/test, audit, and full release build.
-- `./scripts/budgets.sh` -> bridge/ffi/startup performance budget gate.
+- `bun run bench` / `bun run bench:all` -> full benchmark suite (`sdk` + read-only CLI matrix).
+- `bun run bench:sdk` -> SDK/bridge/startup scenarios + baseline query/graph budgets.
+- `bun run bench:cli` -> comprehensive read-only CLI benchmark matrix.
+- `./scripts/bench.sh` -> unified benchmark driver (`--suite all|sdk|cli|bridge|ffi|startup|parse|resolve|search`).
 - `./scripts/fixtures.sh [output-root]` -> deterministic synthetic vault generation (default `vault/generated`).
+- `./scripts/fixtures.sh --skip-validate` -> opt out of built-in fixture validation.
 - `bun run dev -- --json vault open --vault-root <path>` -> CLI open/bootstrap using vault-root only.
 - `swift run --package-path apps/tao-macos TaoMacOSApp` -> launch macOS app.
 
@@ -79,11 +89,16 @@ scripts/                        Operational scripts (clean, ffi, budgets, fixtur
 ## 7. Performance and Benchmarks
 
 - Benchmark output root: `.benchmarks/reports/` (gitignored).
-- Guardrails:
+- Core guardrails (`bench:sdk`):
     - Bridge scenario: `note_get`, `notes_list`, `note_put`, `events_poll`.
     - FFI scenario: `note_open`, `tree_window`, `startup_bundle`.
     - Startup scenario: end-to-end open/list/context budget.
-- Budget gate script fails on latency regressions and writes machine-readable JSON reports.
+- Baseline CLI latency budgets (enforced in `bench:sdk`):
+    - `query --from docs` mean <= `10ms`
+    - `graph unresolved` mean <= `10ms`
+- Comprehensive CLI matrix (`bench:cli`) benchmarks all read-only command families:
+    - `vault` read paths, `doc` read/list, `base` list/view/schema, `graph` diagnostics/traversal, `meta`, `task list`, and `query` scopes.
+- `bench:cli` writes per-command `hyperfine` JSON reports and `.benchmarks/reports/cli-readonly/summary.json`.
 
 ## 8. Quality Gates
 
@@ -107,3 +122,69 @@ scripts/                        Operational scripts (clean, ffi, budgets, fixtur
 - Execution contract:
     - update `plan/tickets.csv`, `plan/run-state.json`, and `plan/progress.md` with evidence on each completed ticket
     - keep blockers explicit in `plan/blockers.md`
+
+## 10. CLI IA and Compatibility Contract
+
+- Compact command surface:
+    - `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
+- Compatibility aliases remain supported:
+    - `note`, `links`, `properties`, `bases`, `search`
+- JSON envelope contract for all `--json` commands:
+    - `{ ok, value: { command, summary, args }, error }`
+    - failures return `ok=false`, `value=null`, structured `error`.
+- Write gate policy:
+    - mutating operations require `--allow-writes`
+    - read-only operations must never require write gate.
+
+## 11. Unified Query Contract
+
+- Entrypoint:
+    - `tao query --vault-root <path> --from <scope> [options]`
+- Supported scopes:
+    - `docs`
+    - `graph` (unresolved by default; outgoing/backlinks when `--path` is supplied)
+    - `task`
+    - `meta:tags`
+    - `meta:aliases`
+    - `meta:properties`
+    - `base:<id-or-path>` (requires `--view-name`)
+- Core query options:
+    - `--query <text>`
+    - `--path <note-path>`
+    - `--view-name <name>`
+    - `--limit <n>`
+    - `--offset <n>`
+
+## 12. Parity Scope Map
+
+- Now:
+    - compact CLI IA
+    - frontmatter + body wikilink indexing parity
+    - graph diagnostics/traversal (`unresolved`, `deadends`, `orphans`, `components`, `walk`)
+    - metadata aggregations (`properties`, `tags`, `aliases`, `tasks`)
+    - task extraction + state transitions with write gate
+    - deterministic synthetic fixture generation + validation
+- Next:
+    - planner-level projection/ranking/explain parity for all query adapters
+    - richer relation-aware base typing and schema introspection
+    - persistent daemon runtime (`taod`) and warm client mode
+    - incremental reindex + hot-query cache budget gates
+- Later:
+    - sync/recovery/versioned retention flows
+    - app-shell control parity surfaces
+    - advanced task workflows (priority, recurrence, assignees, rollups)
+
+## 13. Synthetic Fixture Policy
+
+- Fixture generator:
+    - `./scripts/fixtures.sh --profile all --seed 42 --output vault/generated`
+    - profiles: `1k`, `5k`, `10k`, `25k`, `all`
+- Validation:
+    - built into `./scripts/fixtures.sh` by default
+- Validation invariants:
+    - no hub files
+    - required base files (`contacts`, `companies`, `projects`, `meetings`)
+    - markdown tasks/tags present
+    - body + frontmatter wikilinks present
+    - unresolved ratio within bounded range
+    - no personal vault/path leakage markers
