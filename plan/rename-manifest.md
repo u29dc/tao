@@ -7,24 +7,29 @@ Rename project identity from `obs` to `tao` across source, build scripts, packag
 ## 2) Rename Classes
 
 1. Repository and remote identity:
+
 - `u29dc/obs` -> `u29dc/tao`
 - `git@github.com:u29dc/obs.git` -> `git@github.com:u29dc/tao.git`
 
 2. Workspace/package identity:
+
 - crate names `obs-*` -> `tao-*`
 - package name `obs` -> `tao`
 - binary names `obs`, `tao-tui`, `tao-sdk-bridge` -> `tao`, `tao-tui`, `tao-sdk-bridge`
 
 3. Directory identity:
+
 - `apps/tao-macos` -> `apps/tao-macos`
 - Rust crate directories `crates/tao-*` -> `crates/tao-*`
 
 4. Runtime/config identity:
+
 - env vars `OBS_*` -> `TAO_*`
 - default sqlite path `.obs.sqlite` -> `.tao.sqlite`
 - install path `${HOME}/.tools/obs` -> `${HOME}/.tools/tao`
 
 5. Source symbols and labels:
+
 - Swift/Rust identifiers, user-facing command names, docs references
 
 ## 3) Exclusions and Guardrails

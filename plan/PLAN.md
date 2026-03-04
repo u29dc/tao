@@ -889,10 +889,10 @@ Ticket selection algorithm:
 
 - Default `max_retries` per ticket is `3`.
 - On failure:
-  - increment retry counter
-  - write failure summary + stack trace excerpt + attempted fix in `plan/progress.md`
-  - if retries remain, return ticket to `todo`
-  - if retries exhausted, set ticket to `failed`, add blocker entry, continue with other unblocked tickets
+    - increment retry counter
+    - write failure summary + stack trace excerpt + attempted fix in `plan/progress.md`
+    - if retries remain, return ticket to `todo`
+    - if retries exhausted, set ticket to `failed`, add blocker entry, continue with other unblocked tickets
 - Never silently skip failed tickets.
 
 ### 19.5 Evidence requirements for `done`
@@ -902,9 +902,9 @@ A ticket can only be set to `done` if all are true:
 - Code/config/docs change exists in workspace and is relevant to ticket DoD.
 - Required checks for that ticket scope passed locally.
 - `plan/progress.md` contains a one-line evidence pointer:
-  - changed files
-  - commands run
-  - pass/fail outcomes
+    - changed files
+    - commands run
+    - pass/fail outcomes
 - Any residual risk is explicitly noted.
 
 ### 19.6 Quality gate policy
@@ -1120,3 +1120,74 @@ Exit condition:
 - macOS `.app` is self-contained and launchable without absolute local dylib paths.
 - `util:check` enforces Rust + Swift release-quality gates.
 - Search/watch crates are non-placeholder and actively used by CLI/runtime flows.
+
+## 23) Phase 23 - Elegance, Parity+, and No-Hub Graph Model
+
+### 23.1 Product Directive (Superseding Prior Hub Assumptions)
+
+- Tao must not require manually authored hub notes to keep graph structure coherent.
+- Graph connectivity must be inferred from:
+- canonical folder/file topology
+- wikilinks in markdown body
+- wikilinks embedded in frontmatter values
+- typed metadata relations from bases/properties
+- Do not add a `hubs` command.
+- Do not generate synthetic hub notes in fixtures.
+
+### 23.2 Command Surface Direction (Compact, One-Word Groups)
+
+Target top-level groups for the next surface:
+
+- `vault` -> lifecycle, reconcile, stats
+- `doc` -> read/write/list/move primitives
+- `base` -> schema/view/query for `.base`
+- `graph` -> outgoing/backlinks/unresolved/walk/components
+- `meta` -> properties/tags/aliases/tasks aggregation
+- `task` -> task extraction/state ops
+- `query` -> unified retrieval across docs/bases/graph/meta
+
+Design constraints:
+
+- Avoid Obsidian-style command sprawl.
+- Prefer orthogonal primitives over many thin aliases.
+- Keep existing wrappers only as compatibility shims during migration.
+
+### 23.3 Success Bar for This Phase
+
+- Frontmatter-only wiki links contribute to outgoing/backlinks exactly like body links.
+- Graph traversal works without hub notes on generated 1k/10k/25k vault profiles.
+- `query` command can target docs, bases, and graph scopes from one interface.
+- New synthetic vault generator is realistic enough to replace Dropbox-based dev benchmarking.
+- Performance gates enforce sub-10ms p50 for primary read paths on synthetic 10k profile (daemon mode allowed for CLI startup amortization).
+
+### 23.3.1 Ticket Success-Criteria Contract (Mandatory)
+
+- Every `phase23` ticket `dod` MUST start with `Pass when`.
+- Every `dod` MUST include three elements:
+- required artifacts (`file`, `doc`, or `API` output shape)
+- execution proof (`command` or test target)
+- acceptance assertions (thresholds, schema checks, or deterministic snapshot/hash checks)
+- Vague criteria are invalid (`works`, `improved`, `faster`, `better`, `stable` without measurable assertion).
+- Ticket closure evidence in `plan/progress.md` MUST reference the exact command(s) and outcomes that satisfy `dod`.
+
+### 23.4 Deterministic Execution Order (Tonight Program)
+
+- Data realism first: `DATA-001..DATA-006`
+- Graph correctness and no-hub inference: `GRAPH-001..GRAPH-006`
+- Unified query core: `QUERY-001..QUERY-006`
+- Base parity+: `BASE-009..BASE-012`
+- Task engine parity: `TASK-001..TASK-003`
+- Command surface migration: `CLI-010..CLI-016`
+- Performance hardening: `PERF-009..PERF-014`
+- Performance hardening (extended): `PERF-015..PERF-016`
+- Workflow parity expansion: `PARITY-001..PARITY-003`
+- Validation and closure: `QA-013..QA-020`
+- Data realism (extended): `DATA-007`
+- Specs and narrative updates: `DOC-010..DOC-013`
+
+### 23.5 Phase 23 Exit Criteria
+
+- All `phase23` tickets are `done` with evidence in `plan/progress.md`.
+- `plan/blockers.md` has no open high-severity blockers.
+- `bun run util:check` passes.
+- Benchmark budgets pass on generated vaults only (no Dropbox vault dependency in dev loop).

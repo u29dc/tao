@@ -9,18 +9,18 @@ Append-only execution log for autonomous runs.
 - ticket: <ticket-id>
 - action: start|attempt|pass|fail|blocked|done
 - evidence:
-  - files: [path1, path2]
-  - commands: [cmd1, cmd2]
-  - outcomes: [summary]
+    - files: [path1, path2]
+    - commands: [cmd1, cmd2]
+    - outcomes: [summary]
 - residual_risk: <text or none>
 - timestamp: 2026-03-03T15:10:00Z
 - session: session-2026-03-03-a
 - ticket: DOC-001
 - action: done
 - evidence:
-  - files: [docs/adr/README.md, tickets.csv, run-state.json]
-  - commands: [mkdir -p docs/adr, write docs/adr/README.md]
-  - outcomes: [adr index scaffold added]
+    - files: [docs/adr/README.md, tickets.csv, run-state.json]
+    - commands: [mkdir -p docs/adr, write docs/adr/README.md]
+    - outcomes: [adr index scaffold added]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:12:00Z
@@ -28,9 +28,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-002
 - action: done
 - evidence:
-  - files: [docs/product/scope-v1.md, tickets.csv, run-state.json]
-  - commands: [mkdir -p docs/product, write docs/product/scope-v1.md]
-  - outcomes: [v1 scope contract with acceptance criteria added]
+    - files: [docs/product/scope-v1.md, tickets.csv, run-state.json]
+    - commands: [mkdir -p docs/product, write docs/product/scope-v1.md]
+    - outcomes: [v1 scope contract with acceptance criteria added]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:14:00Z
@@ -38,9 +38,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-003
 - action: done
 - evidence:
-  - files: [docs/specs/obsidian-compatibility-matrix.md, tickets.csv, run-state.json]
-  - commands: [write compatibility matrix]
-  - outcomes: [feature-by-feature compatibility targets documented]
+    - files: [docs/specs/obsidian-compatibility-matrix.md, tickets.csv, run-state.json]
+    - commands: [write compatibility matrix]
+    - outcomes: [feature-by-feature compatibility targets documented]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:16:00Z
@@ -48,9 +48,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-004
 - action: done
 - evidence:
-  - files: [docs/specs/sdk-api-surface.md, tickets.csv, run-state.json]
-  - commands: [write sdk api surface spec]
-  - outcomes: [typed service contracts and dto versioning policy defined]
+    - files: [docs/specs/sdk-api-surface.md, tickets.csv, run-state.json]
+    - commands: [write sdk api surface spec]
+    - outcomes: [typed service contracts and dto versioning policy defined]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:19:00Z
@@ -58,9 +58,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-005
 - action: done
 - evidence:
-  - files: [docs/specs/error-codes.md, tickets.csv, run-state.json]
-  - commands: [write error code catalog]
-  - outcomes: [stable sdk error code registry added]
+    - files: [docs/specs/error-codes.md, tickets.csv, run-state.json]
+    - commands: [write error code catalog]
+    - outcomes: [stable sdk error code registry added]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:21:00Z
@@ -68,9 +68,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-006
 - action: done
 - evidence:
-  - files: [docs/specs/performance-budgets.md, tickets.csv, run-state.json]
-  - commands: [write performance budget contract]
-  - outcomes: [latency throughput memory and ci perf gate policy defined]
+    - files: [docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+    - commands: [write performance budget contract]
+    - outcomes: [latency throughput memory and ci perf gate policy defined]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:25:00Z
@@ -78,9 +78,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-001
 - action: done
 - evidence:
-  - files: [Cargo.toml, docs/architecture/workspace-boundaries.md, crates/*/README.md, tickets.csv, run-state.json]
-  - commands: [write workspace members and crate boundary docs]
-  - outcomes: [workspace member map and crate responsibility docs committed]
+    - files: [Cargo.toml, docs/architecture/workspace-boundaries.md, crates/*/README.md, tickets.csv, run-state.json]
+    - commands: [write workspace members and crate boundary docs]
+    - outcomes: [workspace member map and crate responsibility docs committed]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:27:00Z
@@ -88,9 +88,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-002
 - action: done
 - evidence:
-  - files: [docs/architecture/swift-app-boundaries.md, apps/tao-macos/README.md, tickets.csv, run-state.json]
-  - commands: [write swift module boundaries and app scaffold readme]
-  - outcomes: [swift adapter boundaries and target layout documented]
+    - files: [docs/architecture/swift-app-boundaries.md, apps/tao-macos/README.md, tickets.csv, run-state.json]
+    - commands: [write swift module boundaries and app scaffold readme]
+    - outcomes: [swift adapter boundaries and target layout documented]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:29:00Z
@@ -98,9 +98,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-003
 - action: done
 - evidence:
-  - files: [docs/architecture/bridge-dto-contracts.md, tickets.csv, run-state.json]
-  - commands: [write bridge dto contract spec]
-  - outcomes: [swift rust boundary dto and versioning rules documented]
+    - files: [docs/architecture/bridge-dto-contracts.md, tickets.csv, run-state.json]
+    - commands: [write bridge dto contract spec]
+    - outcomes: [swift rust boundary dto and versioning rules documented]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:31:00Z
@@ -108,9 +108,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-004
 - action: done
 - evidence:
-  - files: [docs/architecture/index-event-model.md, tickets.csv, run-state.json]
-  - commands: [write index event model spec]
-  - outcomes: [typed event kinds envelope and delivery rules documented]
+    - files: [docs/architecture/index-event-model.md, tickets.csv, run-state.json]
+    - commands: [write index event model spec]
+    - outcomes: [typed event kinds envelope and delivery rules documented]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:33:00Z
@@ -118,9 +118,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-005
 - action: done
 - evidence:
-  - files: [docs/architecture/link-resolver-policy.md, tickets.csv, run-state.json]
-  - commands: [write resolver tie-break policy]
-  - outcomes: [deterministic ambiguity and fragment resolution policy added]
+    - files: [docs/architecture/link-resolver-policy.md, tickets.csv, run-state.json]
+    - commands: [write resolver tie-break policy]
+    - outcomes: [deterministic ambiguity and fragment resolution policy added]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:35:00Z
@@ -128,9 +128,9 @@ Append-only execution log for autonomous runs.
 - ticket: ARC-006
 - action: done
 - evidence:
-  - files: [docs/architecture/migration-versioning-strategy.md, docs/db/migration-runbook.md, tickets.csv, run-state.json]
-  - commands: [write migration strategy and runbook]
-  - outcomes: [schema versioning and migration policy contract documented]
+    - files: [docs/architecture/migration-versioning-strategy.md, docs/db/migration-runbook.md, tickets.csv, run-state.json]
+    - commands: [write migration strategy and runbook]
+    - outcomes: [schema versioning and migration policy contract documented]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:40:00Z
@@ -138,9 +138,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-001
 - action: done
 - evidence:
-  - files: [crates/*/Cargo.toml, crates/*/src/*, Cargo.lock, tickets.csv, run-state.json]
-  - commands: [cargo check --workspace]
-  - outcomes: [workspace skeleton crates compile successfully]
+    - files: [crates/*/Cargo.toml, crates/*/src/*, Cargo.lock, tickets.csv, run-state.json]
+    - commands: [cargo check --workspace]
+    - outcomes: [workspace skeleton crates compile successfully]
 - residual_risk: placeholder implementations only
 
 - timestamp: 2026-03-03T15:43:00Z
@@ -148,9 +148,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-002
 - action: done
 - evidence:
-  - files: [Cargo.toml, crates/*/Cargo.toml, tickets.csv, run-state.json]
-  - commands: [cargo check --workspace, cargo clippy --workspace --all-targets --all-features -- -D warnings]
-  - outcomes: [workspace unsafe forbid lint policy enabled and validated]
+    - files: [Cargo.toml, crates/*/Cargo.toml, tickets.csv, run-state.json]
+    - commands: [cargo check --workspace, cargo clippy --workspace --all-targets --all-features -- -D warnings]
+    - outcomes: [workspace unsafe forbid lint policy enabled and validated]
 - residual_risk: strict clippy groups beyond all are deferred to avoid placeholder churn
 
 - timestamp: 2026-03-03T15:47:00Z
@@ -158,9 +158,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-003
 - action: done
 - evidence:
-  - files: [.gitignore, package.json, commitlint.config.js, lint-staged.config.js, .husky/*, bun.lock, tickets.csv, run-state.json]
-  - commands: [bun install, bun run util:check]
-  - outcomes: [root scripts hooks and commitlint stack aligned and quality gate passed]
+    - files: [.gitignore, package.json, commitlint.config.js, lint-staged.config.js, .husky/*, bun.lock, tickets.csv, run-state.json]
+    - commands: [bun install, bun run util:check]
+    - outcomes: [root scripts hooks and commitlint stack aligned and quality gate passed]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:49:00Z
@@ -168,9 +168,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-004
 - action: done
 - evidence:
-  - files: [.github/workflows/rust-ci.yml, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [github rust quality workflow added and local full gate passed]
+    - files: [.github/workflows/rust-ci.yml, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [github rust quality workflow added and local full gate passed]
 - residual_risk: ci runtime for cargo-audit install not benchmarked yet
 
 - timestamp: 2026-03-03T15:52:00Z
@@ -178,9 +178,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-005
 - action: done
 - evidence:
-  - files: [.github/workflows/swift-ci.yml, apps/tao-macos/Package.swift, apps/tao-macos/Sources/*, apps/tao-macos/Tests/*, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [swift build/test ci scaffold added and validated locally]
+    - files: [.github/workflows/swift-ci.yml, apps/tao-macos/Package.swift, apps/tao-macos/Sources/*, apps/tao-macos/Tests/*, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [swift build/test ci scaffold added and validated locally]
 - residual_risk: full xcodeproj app shell still pending APP-001
 
 - timestamp: 2026-03-03T15:55:00Z
@@ -188,9 +188,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-005
 - action: attempt
 - evidence:
-  - files: [apps/tao-macos/.build/*]
-  - commands: [git rm -r --cached apps/tao-macos/.build]
-  - outcomes: [remove generated swift artifacts accidentally committed in prior commit]
+    - files: [apps/tao-macos/.build/*]
+    - commands: [git rm -r --cached apps/tao-macos/.build]
+    - outcomes: [remove generated swift artifacts accidentally committed in prior commit]
 - residual_risk: none
 
 - timestamp: 2026-03-03T15:58:00Z
@@ -198,9 +198,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-006
 - action: done
 - evidence:
-  - files: [.github/workflows/audit.yml, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [dedicated cargo-audit ci workflow integrated and validated locally]
+    - files: [.github/workflows/audit.yml, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [dedicated cargo-audit ci workflow integrated and validated locally]
 - residual_risk: audit db network dependency in ci remains external
 
 - timestamp: 2026-03-03T16:02:00Z
@@ -208,9 +208,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-007
 - action: done
 - evidence:
-  - files: [Cargo.toml, crates/tao-bench/*, bench/fixtures/README.md, scripts/generate-fixtures.sh, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [bench crate and deterministic fixture generation scaffold added]
+    - files: [Cargo.toml, crates/tao-bench/*, bench/fixtures/README.md, scripts/generate-fixtures.sh, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [bench crate and deterministic fixture generation scaffold added]
 - residual_risk: fixture generation runtime for 25k profile may be heavy in ci
 
 - timestamp: 2026-03-03T16:27:30Z
@@ -218,9 +218,9 @@ Append-only execution log for autonomous runs.
 - ticket: INFRA-008
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [release and bench profile tuning aligned to performance contract; lockfile synced]
+    - files: [Cargo.toml, Cargo.lock, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [release and bench profile tuning aligned to performance contract; lockfile synced]
 - residual_risk: panic=abort reduces runtime overhead but requires panic-free boundary discipline in ffi paths
 
 - timestamp: 2026-03-03T16:39:00Z
@@ -228,9 +228,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-001
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [path canonicalization service implemented with unicode normalization, symlink resolution, case-policy keys, and vault-boundary checks]
+    - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [path canonicalization service implemented with unicode normalization, symlink resolution, case-policy keys, and vault-boundary checks]
 - residual_risk: canonicalization currently requires on-disk path existence and does not normalize non-existent create-target paths yet
 
 - timestamp: 2026-03-03T16:52:00Z
@@ -238,9 +238,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-002
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, crates/tao-sdk-vault/src/path.rs, crates/tao-sdk-vault/src/scan.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [full vault scan service implemented with deterministic sorted manifest entries and stable canonical path metadata]
+    - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, crates/tao-sdk-vault/src/path.rs, crates/tao-sdk-vault/src/scan.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [full vault scan service implemented with deterministic sorted manifest entries and stable canonical path metadata]
 - residual_risk: scan currently includes all files; markdown-only filtering is deferred to ingest pipeline tickets
 
 - timestamp: 2026-03-03T17:03:00Z
@@ -248,9 +248,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-003
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, crates/tao-sdk-vault/src/fingerprint.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [file fingerprint service implemented with canonical path mapping and tested mtime/size/blake3 hashing]
+    - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/lib.rs, crates/tao-sdk-vault/src/fingerprint.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [file fingerprint service implemented with canonical path mapping and tested mtime/size/blake3 hashing]
 - residual_risk: full-file hashing on every request may be expensive for very large binaries; batching/caching deferred to indexing tickets
 
 - timestamp: 2026-03-03T17:16:00Z
@@ -258,9 +258,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-004
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-markdown/Cargo.toml, crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [markdown parser entrypoints and service-layer ingest pipeline shell implemented and validated]
+    - files: [Cargo.lock, crates/tao-sdk-markdown/Cargo.toml, crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [markdown parser entrypoints and service-layer ingest pipeline shell implemented and validated]
 - residual_risk: markdown parser intentionally scopes to shell behavior (frontmatter/headings/title) and defers full ast/link extraction to later tickets
 
 - timestamp: 2026-03-03T17:27:00Z
@@ -268,9 +268,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-005
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-markdown/Cargo.toml, crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-markdown/src/render_cache.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [hash-keyed rendered HTML cache policy implemented with LRU eviction and deterministic unit tests]
+    - files: [Cargo.lock, crates/tao-sdk-markdown/Cargo.toml, crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-markdown/src/render_cache.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [hash-keyed rendered HTML cache policy implemented with LRU eviction and deterministic unit tests]
 - residual_risk: cache is in-memory only for now; persistence and cross-process sharing are deferred
 
 - timestamp: 2026-03-03T17:41:00Z
@@ -278,9 +278,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-001
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/migrations/0001_init.sql, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [initial sqlite schema migration added and validated as clean + idempotent]
+    - files: [Cargo.lock, crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/migrations/0001_init.sql, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [initial sqlite schema migration added and validated as clean + idempotent]
 - residual_risk: foreign key integrity relies on sqlite pragma activation at connection open, which will be enforced in migration runner ticket
 
 - timestamp: 2026-03-03T17:52:00Z
@@ -288,9 +288,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-002
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [forward-only migration runner with checksum verification and mismatch guard implemented]
+    - files: [Cargo.lock, crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [forward-only migration runner with checksum verification and mismatch guard implemented]
 - residual_risk: migration manifest currently includes only `0001_init`; additional migrations will expand checksum coverage
 
 - timestamp: 2026-03-03T18:04:00Z
@@ -298,9 +298,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/files.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [files repository CRUD and transactional bulk upsert implemented with integration tests]
+    - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/files.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [files repository CRUD and transactional bulk upsert implemented with integration tests]
 - residual_risk: repository currently uses string ids directly; typed id wrappers can be introduced in sdk-core primitives later
 
 - timestamp: 2026-03-03T18:16:00Z
@@ -308,9 +308,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-004
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/transaction.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [typed storage transaction wrapper implemented and consumed by service-layer write service]
+    - files: [Cargo.lock, crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/transaction.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [typed storage transaction wrapper implemented and consumed by service-layer write service]
 - residual_risk: wrapper currently targets files repository operations; additional typed repo surfaces will expand in later db tickets
 
 - timestamp: 2026-03-03T18:29:00Z
@@ -318,9 +318,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/links.rs, crates/tao-sdk-storage/src/properties.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [links and properties repositories implemented with source/target join query coverage in integration tests]
+    - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-sdk-storage/src/links.rs, crates/tao-sdk-storage/src/properties.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [links and properties repositories implemented with source/target join query coverage in integration tests]
 - residual_risk: properties upsert keeps existing `property_id` on `(file_id,key)` conflict; identity mutation policy can be revisited if needed
 
 - timestamp: 2026-03-03T18:41:00Z
@@ -328,9 +328,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [service-layer sdk transaction coordinator added and verified for atomic write/rollback behavior]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [service-layer sdk transaction coordinator added and verified for atomic write/rollback behavior]
 - residual_risk: coordinator currently manages file metadata writes only; additional domain write coordinators will be layered as services expand
 
 - timestamp: 2026-03-03T18:49:00Z
@@ -338,9 +338,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-core/src/lib.rs, crates/tao-sdk-core/src/event_bus.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [in-process domain event bus implemented with subscribe/unsubscribe and publish fan-out tests]
+    - files: [crates/tao-sdk-core/src/lib.rs, crates/tao-sdk-core/src/event_bus.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [in-process domain event bus implemented with subscribe/unsubscribe and publish fan-out tests]
 - residual_risk: bus currently delivers events synchronously in-process; async/backpressure semantics can be layered later if required
 
 - timestamp: 2026-03-03T19:00:00Z
@@ -348,9 +348,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-008
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [note create/update/delete service implemented with filesystem + metadata coordination and integration tests]
+    - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [note create/update/delete service implemented with filesystem + metadata coordination and integration tests]
 - residual_risk: create currently fails on existing file (create_new); dedicated rename/move conflict policies remain in SDK-009
 
 - timestamp: 2026-03-03T19:12:00Z
@@ -358,9 +358,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-009
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-storage/src/files.rs, crates/tao-sdk-storage/src/transaction.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [note rename/move service flows implemented with link-resolution consistency integration tests]
+    - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-storage/src/files.rs, crates/tao-sdk-storage/src/transaction.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [note rename/move service flows implemented with link-resolution consistency integration tests]
 - residual_risk: rename currently assumes local filesystem rename semantics; cross-device moves would need copy+fsync fallback handling
 
 - timestamp: 2026-03-03T19:25:00Z
@@ -368,9 +368,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-010
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [health snapshot service implemented reporting index lag, db status, watcher status, and scan counts]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [health snapshot service implemented reporting index lag, db status, watcher status, and scan counts]
 - residual_risk: watcher status currently supplied by caller state; deeper watcher diagnostics will be provided once watch module is fully implemented
 
 - timestamp: 2026-03-03T19:38:00Z
@@ -378,9 +378,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-001
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-links/Cargo.toml, crates/tao-sdk-links/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [wikilink parser implemented for target/display/heading/block forms with markdown extraction tests]
+    - files: [Cargo.lock, crates/tao-sdk-links/Cargo.toml, crates/tao-sdk-links/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [wikilink parser implemented for target/display/heading/block forms with markdown extraction tests]
 - residual_risk: parser currently handles bracket-form wikilinks only; embedded edge-case tokenization in complex markdown contexts will be expanded in resolver tickets
 
 - timestamp: 2026-03-03T19:50:00Z
@@ -388,9 +388,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-001
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-properties/Cargo.toml, crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [front matter extraction implemented with captured YAML parse errors and non-crashing malformed handling]
+    - files: [Cargo.lock, crates/tao-sdk-properties/Cargo.toml, crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [front matter extraction implemented with captured YAML parse errors and non-crashing malformed handling]
 - residual_risk: extraction currently expects top-level `---` fences; alternative delimiter styles are out of scope for v1 parser
 
 - timestamp: 2026-03-03T20:02:00Z
@@ -398,9 +398,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [typed property projection implemented with normalized bool/number/date/list value handling]
+    - files: [crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [typed property projection implemented with normalized bool/number/date/list value handling]
 - residual_risk: date normalization currently uses lightweight iso-pattern matching; timezone-aware coercion can be tightened if required
 
 - timestamp: 2026-03-03T20:15:00Z
@@ -408,9 +408,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-links/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [deterministic path resolver implemented with same-folder, distance, and lexical tie-break ordering]
+    - files: [crates/tao-sdk-links/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [deterministic path resolver implemented with same-folder, distance, and lexical tie-break ordering]
 - residual_risk: resolver currently compares markdown extension variants only (`.md`); additional extension strategies can be added if v1 scope expands
 
 - timestamp: 2026-03-03T20:30:00Z
@@ -418,9 +418,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-003
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [typed property update service implemented with front matter writeback, repository persistence, and re-parse validation]
+    - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [typed property update service implemented with front matter writeback, repository persistence, and re-parse validation]
 - residual_risk: property serialization currently rewrites full front matter block; preserving original key ordering/comments would need a YAML-preserving editor
 
 - timestamp: 2026-03-03T16:20:59Z
@@ -428,9 +428,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-011
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/src/import_export.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [import/export service boundaries implemented with typed transfer planning, dry-run/apply execution modes, and boundary contract tests]
+    - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/src/import_export.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [import/export service boundaries implemented with typed transfer planning, dry-run/apply execution modes, and boundary contract tests]
 - residual_risk: transfer execution currently performs direct filesystem copies without conflict-resolution policies beyond overwrite toggle
 
 - timestamp: 2026-03-03T16:24:39Z
@@ -438,9 +438,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-012
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [note service flows now enforce failure-safe rollback for create/update/rename/delete with added rollback regression tests]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [note service flows now enforce failure-safe rollback for create/update/rename/delete with added rollback regression tests]
 - residual_risk: rollback assumes local filesystem operations are immediately reversible; cross-device rename edge-cases may need explicit fallback copy semantics
 
 - timestamp: 2026-03-03T16:27:00Z
@@ -448,9 +448,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-013
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [idempotent reconcile service implemented to upsert changed files, remove stale rows, and produce stable repeated-run results]
+    - files: [crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [idempotent reconcile service implemented to upsert changed files, remove stale rows, and produce stable repeated-run results]
 - residual_risk: reconcile currently covers files table drift only; link/property/bases cross-table reconcile will be extended in index tickets
 
 - timestamp: 2026-03-03T16:30:40Z
@@ -458,9 +458,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-014
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/src/tracing_hooks.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [service-level tracing hooks added with structured operation/correlation context and traced wrappers for note/property/reconcile services]
+    - files: [Cargo.lock, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/src/tracing_hooks.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [service-level tracing hooks added with structured operation/correlation context and traced wrappers for note/property/reconcile services]
 - residual_risk: hooks currently wrap service entrypoints but do not yet enforce context propagation across all nested internal calls
 
 - timestamp: 2026-03-03T16:32:42Z
@@ -468,9 +468,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-015
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [sdk config loader implemented with deterministic override/env/default precedence and validation tests for vault, case policy, and bool parsing]
+    - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [sdk config loader implemented with deterministic override/env/default precedence and validation tests for vault, case policy, and bool parsing]
 - residual_risk: config currently targets core runtime paths and tracing toggle; additional deployment-specific options may be added as SDK surface expands
 
 - timestamp: 2026-03-03T16:34:45Z
@@ -478,9 +478,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-016
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/feature_flags.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [feature flag registry implemented with typed known flags, unknown-flag tracking, runtime toggles, and config loader support for OBS_FEATURE_FLAGS]
+    - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/feature_flags.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [feature flag registry implemented with typed known flags, unknown-flag tracking, runtime toggles, and config loader support for OBS_FEATURE_FLAGS]
 - residual_risk: registry currently toggles behavior flags in-memory; feature gating of downstream codepaths will be expanded as module implementations land
 
 - timestamp: 2026-03-03T16:36:24Z
@@ -488,9 +488,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/bases.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [bases repository implemented with upsert/get/delete/list join APIs and deterministic ordering tests]
+    - files: [crates/tao-sdk-storage/src/bases.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [bases repository implemented with upsert/get/delete/list join APIs and deterministic ordering tests]
 - residual_risk: current bases persistence stores raw config JSON only; typed base parsing/validation remains in later BASE tickets
 
 - timestamp: 2026-03-03T16:38:10Z
@@ -498,9 +498,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/render_cache.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [render cache repository implemented with upsert/get/list/delete operations and persistence tests]
+    - files: [crates/tao-sdk-storage/src/render_cache.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [render cache repository implemented with upsert/get/list/delete operations and persistence tests]
 - residual_risk: current render cache storage focuses on row persistence; cross-service invalidation orchestration remains in indexing tickets
 
 - timestamp: 2026-03-03T16:39:43Z
@@ -508,9 +508,9 @@ Append-only execution log for autonomous runs.
 - ticket: DB-008
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/index_state.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [index state repository implemented with checkpoint/reconcile key persistence and deterministic listing tests]
+    - files: [crates/tao-sdk-storage/src/index_state.rs, crates/tao-sdk-storage/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [index state repository implemented with checkpoint/reconcile key persistence and deterministic listing tests]
 - residual_risk: repository currently stores opaque JSON payloads; schema-level key/value contracts are enforced in higher-level index services
 
 - timestamp: 2026-03-03T16:42:57Z
@@ -518,9 +518,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/Cargo.toml, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [full indexing workflow implemented to rebuild files/links/properties/bases tables and persist index state summary in one transaction]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/Cargo.toml, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [full indexing workflow implemented to rebuild files/links/properties/bases tables and persist index state summary in one transaction]
 - residual_risk: v1 full rebuild currently reparses all files and clears caches; incremental/coalesced indexing optimizations are tracked by IDX-002 and IDX-003
 
 - timestamp: 2026-03-03T16:46:15Z
@@ -528,9 +528,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [incremental indexing service implemented for targeted path updates with per-file link/property/base refresh and deletion handling]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [incremental indexing service implemented for targeted path updates with per-file link/property/base refresh and deletion handling]
 - residual_risk: incremental link resolution currently recomputes only changed source files; cross-note backfill optimization remains for later coalescing/reconcile tickets
 
 - timestamp: 2026-03-03T16:47:47Z
@@ -538,9 +538,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [coalesced batch indexing implemented with path deduplication, bounded batch size enforcement, and aggregate batch metrics]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [coalesced batch indexing implemented with path deduplication, bounded batch size enforcement, and aggregate batch metrics]
 - residual_risk: coalescing currently batches by normalized path keys only; advanced priority heuristics for high-churn paths can be added in watcher tuning work
 
 - timestamp: 2026-03-03T16:51:50Z
@@ -548,9 +548,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [stale cleanup workflow added to remove non-live file rows transactionally, persist summary state, and validate cleanup/noop behavior with integration tests]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [stale cleanup workflow added to remove non-live file rows transactionally, persist summary state, and validate cleanup/noop behavior with integration tests]
 - residual_risk: stale cleanup removes stale metadata but does not recompute live link unresolved flags; full/incremental indexing remains source of truth for link-state refresh
 
 - timestamp: 2026-03-03T16:55:37Z
@@ -558,9 +558,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/Cargo.toml, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [checkpointed incremental indexing service added with persisted progress state, resumable execution after interruption, and summary checkpoint metrics]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-service/Cargo.toml, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [checkpointed incremental indexing service added with persisted progress state, resumable execution after interruption, and summary checkpoint metrics]
 - residual_risk: checkpointed runs currently serialize checkpoint progress per batch and may add index_state write overhead on very high-frequency change streams
 
 - timestamp: 2026-03-03T16:58:59Z
@@ -568,9 +568,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [reconciliation scanner detects inserted/updated/removed drift paths from vault-vs-index comparison and repairs missed watcher events using bounded coalesced incremental batches]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [reconciliation scanner detects inserted/updated/removed drift paths from vault-vs-index comparison and repairs missed watcher events using bounded coalesced incremental batches]
 - residual_risk: path ordering now prioritizes inserts before updates to improve same-run link resolution, but highly interdependent multi-hop link graphs may still need a second incremental pass for full convergence
 
 - timestamp: 2026-03-03T17:02:11Z
@@ -578,9 +578,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [index consistency checker added with typed issue report for orphan properties/bases/render-cache rows, broken link references, unresolved flag mismatches, outside-root paths, and missing on-disk files]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [index consistency checker added with typed issue report for orphan properties/bases/render-cache rows, broken link references, unresolved flag mismatches, outside-root paths, and missing on-disk files]
 - residual_risk: injected-corruption tests require disabling sqlite foreign key checks, so runtime checker still assumes corruption can come from external/manual writes or earlier schema enforcement gaps
 
 - timestamp: 2026-03-03T17:04:19Z
@@ -588,9 +588,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-008
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [index self-heal service added to auto-repair common inconsistencies from checker output, including orphan row cleanup, link flag repair, and stale file row deletion with post-heal verification]
+    - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [index self-heal service added to auto-repair common inconsistencies from checker output, including orphan row cleanup, link flag repair, and stale file row deletion with post-heal verification]
 - residual_risk: self-heal currently applies deterministic row-level fixes only and does not yet trigger secondary semantic rebuild passes for higher-order graph inconsistencies beyond reported issue set
 
 - timestamp: 2026-03-03T17:08:14Z
@@ -598,9 +598,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-links/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [heading slug normalization and heading-fragment resolver added; indexing now validates heading fragments against indexed heading slugs and marks missing headings unresolved]
+    - files: [crates/tao-sdk-links/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [heading slug normalization and heading-fragment resolver added; indexing now validates heading fragments against indexed heading slugs and marks missing headings unresolved]
 - residual_risk: heading slugging follows current local normalization rules and may diverge from exact Obsidian edge-case slug behavior for uncommon punctuation/unicode sequences
 
 - timestamp: 2026-03-03T17:10:26Z
@@ -608,9 +608,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-links/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [block-id extraction and block-fragment resolver added; indexing now validates block fragments against indexed block ids and marks missing blocks unresolved]
+    - files: [crates/tao-sdk-links/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [block-id extraction and block-fragment resolver added; indexing now validates block fragments against indexed block ids and marks missing blocks unresolved]
 - residual_risk: block-id extraction currently follows inline marker parsing rules and may miss atypical/escaped markdown edge cases that need full markdown AST support
 
 - timestamp: 2026-03-03T17:12:00Z
@@ -618,9 +618,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/links.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [links repository now exposes unresolved-link listing with joined paths and deterministic ordering, with repository tests covering resolved/unresolved separation]
+    - files: [crates/tao-sdk-storage/src/links.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [links repository now exposes unresolved-link listing with joined paths and deterministic ordering, with repository tests covering resolved/unresolved separation]
 - residual_risk: unresolved tracking remains table-driven and currently does not include explicit unresolved reason taxonomy (path vs heading vs block)
 
 - timestamp: 2026-03-03T17:13:42Z
@@ -628,9 +628,9 @@ Append-only execution log for autonomous runs.
 - ticket: LINK-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-storage/src/links.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [backlink graph service added with outgoing/backlink/unresolved queries mapped to typed edges, preserving deterministic ordering from repository queries]
+    - files: [crates/tao-sdk-service/src/lib.rs, crates/tao-sdk-storage/src/links.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [backlink graph service added with outgoing/backlink/unresolved queries mapped to typed edges, preserving deterministic ordering from repository queries]
 - residual_risk: link graph service currently provides query views only and does not yet expose pagination for very large backlink sets
 
 - timestamp: 2026-03-03T17:15:42Z
@@ -638,9 +638,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [default property mapping layer added to normalize and merge tag/tags, alias/aliases, and cssclass/cssclasses into canonical list-based typed properties]
+    - files: [crates/tao-sdk-properties/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [default property mapping layer added to normalize and merge tag/tags, alias/aliases, and cssclass/cssclasses into canonical list-based typed properties]
 - residual_risk: default mapping merge order follows YAML entry iteration and canonical list normalization; future compatibility checks may still be needed for full Obsidian plugin-specific property conventions
 
 - timestamp: 2026-03-03T17:17:04Z
@@ -648,9 +648,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [markdown parsing now tolerates unclosed front matter fences by treating content as body, and indexing tests verify malformed front matter does not crash indexing or link resolution]
+    - files: [crates/tao-sdk-markdown/src/lib.rs, crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [markdown parsing now tolerates unclosed front matter fences by treating content as body, and indexing tests verify malformed front matter does not crash indexing or link resolution]
 - residual_risk: tolerance currently prefers resilience over strict diagnostics, so malformed fence detection is not surfaced as an explicit runtime warning yet
 
 - timestamp: 2026-03-03T17:20:55Z
@@ -658,9 +658,9 @@ Append-only execution log for autonomous runs.
 - ticket: PROP-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [property query service now exposes key-based filter/sort/pagination with deterministic ordering and request validation; service tests cover filtering, paging, updated_at sorting, and invalid request handling]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [property query service now exposes key-based filter/sort/pagination with deterministic ordering and request validation; service tests cover filtering, paging, updated_at sorting, and invalid request handling]
 - residual_risk: value filtering currently operates on serialized JSON payload text, so future bases query planner may add type-aware predicate operators for stronger semantics
 
 - timestamp: 2026-03-03T17:25:13Z
@@ -668,9 +668,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bases/Cargo.toml, crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [tao-sdk-bases now provides a typed `.base` parser with structured view/filter/sort/column models, deterministic validation errors, and parser tests for valid shorthand+mapping syntax and invalid schema cases]
+    - files: [crates/tao-sdk-bases/Cargo.toml, crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [tao-sdk-bases now provides a typed `.base` parser with structured view/filter/sort/column models, deterministic validation errors, and parser tests for valid shorthand+mapping syntax and invalid schema cases]
 - residual_risk: parser currently supports table views only by design for v1 scope, so non-table view types remain explicit unsupported values
 
 - timestamp: 2026-03-03T17:26:45Z
@@ -678,9 +678,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [base view registry added to expose deterministic view listing and name lookup with typed kind plus serialized config payload, including duplicate-name validation and registry tests]
+    - files: [crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [base view registry added to expose deterministic view listing and name lookup with typed kind plus serialized config payload, including duplicate-name validation and registry tests]
 - residual_risk: registry currently validates duplicate names case-insensitively but does not yet enforce stricter naming conventions beyond non-empty normalized strings
 
 - timestamp: 2026-03-03T17:28:56Z
@@ -688,9 +688,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [base table query planner added to compile registry view configs into deterministic query plans with normalized pagination, required property key extraction, and per-key property-query hints aligned to PROP-006 sort/filter capabilities]
+    - files: [crates/tao-sdk-bases/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [base table query planner added to compile registry view configs into deterministic query plans with normalized pagination, required property key extraction, and per-key property-query hints aligned to PROP-006 sort/filter capabilities]
 - residual_risk: planner currently emits metadata plans only; execution semantics for non-contains operators and multi-key joins are deferred to BASE-004 executor logic
 
 - timestamp: 2026-03-03T17:33:25Z
@@ -698,9 +698,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [service-level base table executor added to run compiled plans against sqlite metadata with source scoping, filter evaluation, deterministic sort, pagination, column projection, and typed error handling for malformed property payloads]
+    - files: [crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [service-level base table executor added to run compiled plans against sqlite metadata with source scoping, filter evaluation, deterministic sort, pagination, column projection, and typed error handling for malformed property payloads]
 - residual_risk: current executor computes row sets in-memory from repository scans, so very large vaults may require future SQL-pushdown optimization for tighter latency/memory budgets
 
 - timestamp: 2026-03-03T17:36:20Z
@@ -708,9 +708,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [base column config persistence service added to update and persist ordered column layouts plus visibility flags in stored base config json, with tests covering successful updates, missing views, and invalid legacy payload handling]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [base column config persistence service added to update and persist ordered column layouts plus visibility flags in stored base config json, with tests covering successful updates, missing views, and invalid legacy payload handling]
 - residual_risk: persistence currently expects base config json to decode into the typed BaseDocument schema, so legacy non-conforming payloads need migration or normalization before edit operations
 
 - timestamp: 2026-03-03T17:38:12Z
@@ -718,9 +718,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [base table executor now emits per-column summary rows with count/min/max/avg over filtered datasets while preserving paged row delivery and deterministic ordering]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [base table executor now emits per-column summary rows with count/min/max/avg over filtered datasets while preserving paged row delivery and deterministic ordering]
 - residual_risk: summary computation currently runs in-memory over filtered candidates, so high-cardinality base views may need SQL aggregation pushdown in later performance tickets
 
 - timestamp: 2026-03-03T17:40:47Z
@@ -728,9 +728,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bases/src/lib.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [base validation diagnostics API added at both parser and service layers, including schema/semantic diagnostics with stable codes and severity, plus id-or-path lookup validation endpoint over persisted base configs]
+    - files: [crates/tao-sdk-bases/src/lib.rs, crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [base validation diagnostics API added at both parser and service layers, including schema/semantic diagnostics with stable codes and severity, plus id-or-path lookup validation endpoint over persisted base configs]
 - residual_risk: service validation currently depends on stored config json shape rather than reparsing raw `.base` files, so legacy rows require normalization to the typed document schema for richer diagnostics
 
 - timestamp: 2026-03-03T17:43:47Z
@@ -738,9 +738,9 @@ Append-only execution log for autonomous runs.
 - ticket: BASE-008
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [cached base table query service added with automatic metadata-digest invalidation and explicit invalidate API, ensuring cached base results refresh when files/properties/bases metadata changes]
+    - files: [crates/tao-sdk-service/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [cached base table query service added with automatic metadata-digest invalidation and explicit invalidate API, ensuring cached base results refresh when files/properties/bases metadata changes]
 - residual_risk: metadata digest currently hashes full files/properties/bases row sets per execution, so very large datasets may need incremental digest tracking for lower cache-overhead in performance-sensitive paths
 
 - timestamp: 2026-03-03T17:47:27Z
@@ -748,9 +748,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [tao-sdk-bridge placeholder replaced with a concrete bridge kernel exposing versioned envelope DTOs plus minimal read shell APIs (`ping`, `vault_stats`, `note_get`) over SDK services]
+    - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [tao-sdk-bridge placeholder replaced with a concrete bridge kernel exposing versioned envelope DTOs plus minimal read shell APIs (`ping`, `vault_stats`, `note_get`) over SDK services]
 - residual_risk: bridge currently exposes Rust-native APIs and DTO envelopes but does not yet include generated Swift interop bindings, which are covered by FFI-002 and later bridge tickets
 
 - timestamp: 2026-03-03T17:50:40Z
@@ -758,9 +758,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [Swift bridge client bindings added for `vault_stats` and `note_get`, backed by bridge shell command output and typed envelope decoding; Swift test confirms both read calls succeed end-to-end]
+    - files: [crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [Swift bridge client bindings added for `vault_stats` and `note_get`, backed by bridge shell command output and typed envelope decoding; Swift test confirms both read calls succeed end-to-end]
 - residual_risk: current Swift bridge binding path invokes the Rust bridge shell via subprocess, so direct in-process FFI transport and zero-copy optimization remain for later bridge hardening tickets
 
 - timestamp: 2026-03-03T17:54:38Z
@@ -768,9 +768,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, Cargo.lock, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [bridge write DTO and `note_put` API added with deterministic id generation and safe create-or-update semantics; bridge shell exposes `note-put`; Swift client and tests now verify write+read round-trip behavior through the bridge]
+    - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, Cargo.lock, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [bridge write DTO and `note_put` API added with deterministic id generation and safe create-or-update semantics; bridge shell exposes `note-put`; Swift client and tests now verify write+read round-trip behavior through the bridge]
 - residual_risk: bridge write path currently rewrites full note content per call and relies on subprocess json transport, so partial-update and in-process ffi optimization remain for later tickets
 
 - timestamp: 2026-03-03T17:57:57Z
@@ -778,9 +778,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [bridge schema version upgraded to `v1.0` with explicit parser and major-version compatibility checks in Rust and Swift; Swift client now rejects incompatible major versions at envelope decode time; compatibility tests cover `v1`/minor acceptance and `v2` rejection]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [bridge schema version upgraded to `v1.0` with explicit parser and major-version compatibility checks in Rust and Swift; Swift client now rejects incompatible major versions at envelope decode time; compatibility tests cover `v1`/minor acceptance and `v2` rejection]
 - residual_risk: compatibility policy currently validates major version only, so richer feature-negotiation for optional capabilities is deferred to later bridge evolution tickets
 
 - timestamp: 2026-03-03T18:00:30Z
@@ -788,9 +788,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `TaoBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [bridge error code constants centralized in Rust and Swift now maps bridge `code` values to typed `TaoBridgeTypedError` cases with deterministic known/unknown behavior; test coverage now verifies known-code mapping and unknown fallback mapping]
 - residual_risk: typed mapping currently covers existing bridge codes and preserves unknown fallback, so new codes still require explicit app-level UX copy when surfaced in APP-010
 
 - timestamp: 2026-03-03T18:05:08Z
@@ -798,9 +798,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [bridge now persists note-change events in a sqlite-backed `bridge_events` log and exposes `events-poll` cursor API through bridge shell; Swift client adds typed event polling API and tests confirm create/update writes are delivered and cursor-based polling drains incrementally]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [bridge now persists note-change events in a sqlite-backed `bridge_events` log and exposes `events-poll` cursor API through bridge shell; Swift client adds typed event polling API and tests confirm create/update writes are delivered and cursor-based polling drains incrementally]
 - residual_risk: current subscription transport is poll-based rather than push-streaming, so real-time event fanout and backpressure policies are deferred to future transport optimization tickets
 
 - timestamp: 2026-03-03T18:07:50Z
@@ -808,9 +808,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test, bun run util:check]
-  - outcomes: [paged `notes-list` windowing API added with cursor+limit controls and deterministic path ordering; Rust bridge tests verify two-page traversal; Swift client now exposes `notesList` API and integration tests verify stable paging semantics over larger note sets]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test, bun run util:check]
+    - outcomes: [paged `notes-list` windowing API added with cursor+limit controls and deterministic path ordering; Rust bridge tests verify two-page traversal; Swift client now exposes `notesList` API and integration tests verify stable paging semantics over larger note sets]
 - residual_risk: note summary titles currently derive from path stem for list latency predictability, so richer title extraction from parsed markdown remains a future enhancement if UI requires higher fidelity in large lists
 
 - timestamp: 2026-03-03T18:11:39Z
@@ -818,9 +818,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-008
 - action: done
 - evidence:
-  - files: [crates/tao-bench/Cargo.toml, crates/tao-bench/src/main.rs, .github/workflows/rust-ci.yml, package.json, docs/specs/performance-budgets.md, .gitignore, Cargo.lock, tickets.csv, run-state.json]
-  - commands: [bun run util:bench:bridge, swift test, bun run util:check]
-  - outcomes: [tao-bench now includes a bridge scenario measuring `note_get`, `notes_list`, `note_put`, and `events_poll` p50/p95/max with JSON report output and optional budget enforcement; rust-ci now generates and uploads `bench/reports/bridge-call-budgets.json` as an artifact; local benchmark/report run and full gates pass]
+    - files: [crates/tao-bench/Cargo.toml, crates/tao-bench/src/main.rs, .github/workflows/rust-ci.yml, package.json, docs/specs/performance-budgets.md, .gitignore, Cargo.lock, tickets.csv, run-state.json]
+    - commands: [bun run util:bench:bridge, swift test, bun run util:check]
+    - outcomes: [tao-bench now includes a bridge scenario measuring `note_get`, `notes_list`, `note_put`, and `events_poll` p50/p95/max with JSON report output and optional budget enforcement; rust-ci now generates and uploads `bench/reports/bridge-call-budgets.json` as an artifact; local benchmark/report run and full gates pass]
 - residual_risk: benchmark currently exercises in-process bridge kernel calls rather than subprocess transport overhead, so end-to-end Swift subprocess boundary latency characterization should be added if transport remains process-based
 
 - timestamp: 2026-03-03T18:15:19Z
@@ -828,9 +828,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-001
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [macOS executable target `TaoMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
+    - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [macOS executable target `TaoMacOSApp` added to Swift package and launches with a concrete three-pane `NavigationSplitView` scaffold (sidebar/content/inspector), providing the app shell baseline for subsequent vault/navigation features]
 - residual_risk: app shell currently contains placeholder pane content and no persisted state, so feature tickets APP-002 onward fill bridge integration and workflow behavior
 
 - timestamp: 2026-03-03T18:17:09Z
@@ -838,9 +838,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-002
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [app shell now directly invokes `TaoBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [app shell now directly invokes `TaoBridgeClient.vaultStats` from UI controls with async loading/error states, proving the executable target links the bridge package and executes Rust-backed read APIs at runtime]
 - residual_risk: bridge read invocation currently depends on manual vault/sqlite path entry, so APP-003 introduces guided vault-open UX and persisted session context
 
 - timestamp: 2026-03-03T18:18:24Z
@@ -848,9 +848,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-003
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [native macOS vault picker flow added via `NSOpenPanel`; selecting a folder sets vault/database paths, triggers bridge stats load, and surfaces opened-vault root state in the UI header]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [native macOS vault picker flow added via `NSOpenPanel`; selecting a folder sets vault/database paths, triggers bridge stats load, and surfaces opened-vault root state in the UI header]
 - residual_risk: opened vault and database path state is currently in-memory only, so startup restoration for last session remains a dedicated follow-up in APP-012
 
 - timestamp: 2026-03-03T18:20:35Z
@@ -858,9 +858,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-004
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [lazy-loaded file tree view model added with paged `notesList` ingestion, hierarchical path-to-tree conversion, load-more cursor behavior, and selection wiring in Notes pane; app now navigates large note sets incrementally]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [lazy-loaded file tree view model added with paged `notesList` ingestion, hierarchical path-to-tree conversion, load-more cursor behavior, and selection wiring in Notes pane; app now navigates large note sets incrementally]
 - residual_risk: current tree hydration requests fixed-size pages and rebuilds the tree in-memory each append, so future perf passes may switch to incremental node insertion for very large vaults
 
 - timestamp: 2026-03-03T18:22:08Z
@@ -868,9 +868,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-005
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [note selection now triggers bridge `noteGet` reads with async loading/error handling, and inspector pane renders selected note markdown/title content directly from Rust-backed payloads]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [note selection now triggers bridge `noteGet` reads with async loading/error handling, and inspector pane renders selected note markdown/title content directly from Rust-backed payloads]
 - residual_risk: markdown rendering currently uses native `Text(.init(...))` without advanced syntax theming or embedded resource handling, so rich renderer parity remains a future UI enhancement
 
 - timestamp: 2026-03-03T18:23:39Z
@@ -878,9 +878,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-006
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [properties pane added to inspector with parsed frontmatter key/value display, editable raw frontmatter text area, and `Save Properties` flow that persists through bridge `notePut` then reloads the note]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [properties pane added to inspector with parsed frontmatter key/value display, editable raw frontmatter text area, and `Save Properties` flow that persists through bridge `notePut` then reloads the note]
 - residual_risk: property editing currently rewrites full frontmatter block text without schema/type guardrails, so richer typed property controls remain future UX hardening work
 
 - timestamp: 2026-03-03T18:27:04Z
@@ -888,9 +888,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-007
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [bridge `note-links` endpoint added with outgoing/backlink DTOs and CLI command; Swift client now exposes typed `noteLinks` API; inspector renders outgoing and backlink panels for selected notes with loading/error states]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [bridge `note-links` endpoint added with outgoing/backlink DTOs and CLI command; Swift client now exposes typed `noteLinks` API; inspector renders outgoing and backlink panels for selected notes with loading/error states]
 - residual_risk: current bridge link panel payload omits display-text extraction and advanced fragment semantics, so richer link presentation can be layered without changing panel wiring
 
 - timestamp: 2026-03-03T18:31:49Z
@@ -898,9 +898,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-008
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [added app-level Navigate command with `cmd+k` shortcut, quick-open sheet UI, query filtering over loaded note summaries, and direct note selection routing so command palette opens notes by search]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [added app-level Navigate command with `cmd+k` shortcut, quick-open sheet UI, query filtering over loaded note summaries, and direct note selection routing so command palette opens notes by search]
 - residual_risk: quick-open currently searches the loaded in-memory note summary window, so very large vaults still require additional pagination loads before all notes become discoverable
 
 - timestamp: 2026-03-03T18:42:35Z
@@ -908,9 +908,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-009
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-bridge, swift build, swift test, bun run util:check]
-  - outcomes: [added bridge `bases-list`/`bases-view` endpoints with planner+executor wiring and typed errors; Swift bridge client now exposes base list/table APIs; app Bases pane now loads indexed bases, selects views, renders paged table rows, and supports previous/next pagination controls]
+    - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-sdk-bridge, swift build, swift test, bun run util:check]
+    - outcomes: [added bridge `bases-list`/`bases-view` endpoints with planner+executor wiring and typed errors; Swift bridge client now exposes base list/table APIs; app Bases pane now loads indexed bases, selects views, renders paged table rows, and supports previous/next pagination controls]
 - residual_risk: base row rendering currently flattens selected column values into one summary cell in the macOS table, so follow-up UI refinement can split into true per-column table cells once dynamic column composition is introduced
 
 - timestamp: 2026-03-03T18:48:33Z
@@ -918,9 +918,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-010
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [app now surfaces typed bridge errors in a unified banner with error code/hint/context fields and operation-specific recovery buttons; recovery actions route to retry handlers for vault stats, note load/save, links, and bases table operations]
+    - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [app now surfaces typed bridge errors in a unified banner with error code/hint/context fields and operation-specific recovery buttons; recovery actions route to retry handlers for vault stats, note load/save, links, and bases table operations]
 - residual_risk: error actions currently retry the last in-memory operation context only, so future hardening can persist richer failure context for retries across app restart boundaries
 
 - timestamp: 2026-03-03T18:50:46Z
@@ -928,9 +928,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-011
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [added global reduced-motion handling in the app view layer by disabling implicit animations when accessibility reduce-motion is enabled and gating key UI animation bindings behind the setting]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [added global reduced-motion handling in the app view layer by disabling implicit animations when accessibility reduce-motion is enabled and gating key UI animation bindings behind the setting]
 - residual_risk: current app motion profile is still intentionally minimal, so additional feature-specific transitions introduced later must continue to honor the same reduce-motion guardrails
 
 - timestamp: 2026-03-03T18:53:30Z
@@ -938,9 +938,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-012
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
-  - commands: [swift build, swift test, bun run util:check]
-  - outcomes: [added persisted startup state for vault/db/note paths, launch-time restoration with path safety checks, restoration-aware failure cleanup, and automatic state updates whenever vault or note selection changes]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, tickets.csv, run-state.json]
+    - commands: [swift build, swift test, bun run util:check]
+    - outcomes: [added persisted startup state for vault/db/note paths, launch-time restoration with path safety checks, restoration-aware failure cleanup, and automatic state updates whenever vault or note selection changes]
 - residual_risk: restored note selection currently replays immediately after vault stats load without waiting for full tree hydration, so future UX polish can add explicit restored-state loading indicators
 
 - timestamp: 2026-03-03T18:55:55Z
@@ -948,9 +948,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-001
 - action: done
 - evidence:
-  - files: [crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-cli, cargo run -p tao-cli -- --help, bun run util:check]
-  - outcomes: [replaced CLI placeholder with grouped command tree (`vault`, `note`, `links`, `properties`, `bases`, `search`) and scaffolded typed subcommand argument structs with placeholder dispatch handlers; added CLI help test asserting grouped command presence]
+    - files: [crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-cli, cargo run -p tao-cli -- --help, bun run util:check]
+    - outcomes: [replaced CLI placeholder with grouped command tree (`vault`, `note`, `links`, `properties`, `bases`, `search`) and scaffolded typed subcommand argument structs with placeholder dispatch handlers; added CLI help test asserting grouped command presence]
 - residual_risk: scaffold handlers currently print placeholder output, so JSON envelope and SDK-backed command execution are implemented in subsequent CLI tickets
 
 - timestamp: 2026-03-03T18:58:39Z
@@ -958,9 +958,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-002
 - action: done
 - evidence:
-  - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-cli, cargo run -p tao-cli -- --json vault open --vault-root /tmp/vault --db-path /tmp/obs.sqlite, bun run util:check]
-  - outcomes: [added global `--json` flag with single-envelope stdout output (`ok/value/error`) for all scaffolded commands, refactored CLI dispatch to structured command results, and added tests covering grouped help + envelope JSON shape]
+    - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-cli, cargo run -p tao-cli -- --json vault open --vault-root /tmp/vault --db-path /tmp/obs.sqlite, bun run util:check]
+    - outcomes: [added global `--json` flag with single-envelope stdout output (`ok/value/error`) for all scaffolded commands, refactored CLI dispatch to structured command results, and added tests covering grouped help + envelope JSON shape]
 - residual_risk: current envelope `error` branch is not exercised by command execution yet because handlers are still placeholders pending SDK-backed wrappers
 
 - timestamp: 2026-03-03T19:05:03Z
@@ -968,8 +968,8 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-003
 - action: done
 - evidence:
-  - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-cli -- --json vault open/reindex/stats/reconcile ..., bun run util:check]
+    - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-cli -- --json vault open/reindex/stats/reconcile ..., bun run util:check]
 - outcomes: [replaced vault command placeholders with SDK-backed wrappers that validate vault/db paths, run migrations, and execute open/stats/reindex/reconcile with stable JSON payloads; added test hardening with temporary vault paths so JSON envelope tests remain deterministic]
 - residual_risk: wrapper currently assumes case-sensitive policy for reindex/reconcile and fixed watcher/index-lag values for stats, so runtime flags for these knobs remain future work
 
@@ -978,8 +978,8 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-004
 - action: done
 - evidence:
-  - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-cli -- --json note put/get/list ..., bun run util:check]
+    - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-cli -- --json note put/get/list ..., bun run util:check]
 - outcomes: [replaced note command placeholders with SDK-backed bridge wrappers (`note.get`, `note.put`, `note.list`), added bridge envelope-to-cli error mapping, and implemented paged list aggregation for stable JSON note list output]
 - residual_risk: note list currently uses fixed page size 1000 per bridge call and does not expose cursor/limit flags yet, so very large vault windows are aggregated in-process
 
@@ -988,8 +988,8 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-005
 - action: done
 - evidence:
-  - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-cli -- --json links outgoing/backlinks ..., cargo run -p tao-cli -- --json properties set/get ..., bun run util:check]
+    - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-cli -- --json links outgoing/backlinks ..., cargo run -p tao-cli -- --json properties set/get ..., bun run util:check]
 - outcomes: [implemented `links.outgoing`/`links.backlinks` wrappers using bridge link panels with stable item payloads; implemented `properties.get` using indexed property rows and `properties.set` using typed property update service with CLI value parsing for primitives/json arrays]
 - residual_risk: property set currently stringifies JSON object payloads because SDK typed property model supports scalar/list/null only, so nested object edits require future schema support
 
@@ -998,8 +998,8 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-006
 - action: done
 - evidence:
-  - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-cli -- --json bases list/view ..., cargo run -p tao-cli -- --json search query ..., bun run util:check]
+    - files: [crates/tao-cli/Cargo.toml, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-cli -- --json bases list/view ..., cargo run -p tao-cli -- --json search query ..., bun run util:check]
 - outcomes: [implemented `bases.list` and `bases.view` wrappers over indexed base rows with fallback decoding for current `{raw: ...}` base storage payloads, plus deterministic search windowing over indexed markdown file paths/titles with limit/offset in stable JSON envelopes]
 - residual_risk: current search wrapper is metadata/path-title based rather than full-text ranking, and bases table output currently includes `.base` rows when view filters do not exclude non-markdown sources
 
@@ -1008,8 +1008,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-001
 - action: done
 - evidence:
-  - files: [qa/fixtures/conformance-vault/README.md, qa/fixtures/conformance-vault/notes/*.md, qa/fixtures/conformance-vault/views/*.base, qa/fixtures/conformance-vault/assets/diagram.png, tickets.csv, run-state.json]
-  - commands: [create fixture vault files, bun run util:check]
+    - files: [qa/fixtures/conformance-vault/README.md, qa/fixtures/conformance-vault/notes/*.md, qa/fixtures/conformance-vault/views/*.base, qa/fixtures/conformance-vault/assets/diagram.png, tickets.csv, run-state.json]
+    - commands: [create fixture vault files, bun run util:check]
 - outcomes: [added deterministic conformance fixture vault covering link ambiguity/unresolved/heading/block cases, typed+malformed front matter samples, valid+invalid base configs, project table-filter dataset, and non-markdown asset handling]
 - residual_risk: fixture includes representative edge cases but does not yet include very large-file or unicode-path stress variants for parser/load tests
 
@@ -1018,8 +1018,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [added SDK integration harness test that copies the conformance fixture vault into a temp workspace, runs sqlite migrations + full indexing, validates health snapshot and link graph outputs, and asserts end-to-end fixture behavior under real service flows]
 - residual_risk: harness currently validates core indexing/graph behavior but does not yet assert every property/base row in golden snapshots
 
@@ -1028,8 +1028,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [added repeated-rebuild determinism test that snapshots resolved link mappings in stable order and asserts identical resolver outputs across consecutive full-index runs, including expected ambiguous-link tie-break target for `[[apple]]` from `notes/alpha.md`]
 - residual_risk: determinism coverage currently targets fixture link rows and does not yet fuzz randomized path-order inputs
 
@@ -1038,8 +1038,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [added malformed-frontmatter integration test asserting full index rebuild succeeds on the fixture vault, malformed note remains indexed as a file row, and no corrupt property rows are produced for malformed YAML content]
 - residual_risk: malformed coverage currently focuses on one representative broken YAML pattern and can be extended with additional malformed scalar/list/object variants
 
@@ -1048,9 +1048,9 @@ Append-only execution log for autonomous runs.
 - ticket: QA-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [added fixture-driven base parser/table snapshot test that decodes indexed base raw payloads, compiles `ActiveProjects` view plans, asserts exact table row snapshots, and verifies invalid base configs fail parser validation]
+    - files: [crates/tao-sdk-service/tests/conformance_harness.rs, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [added fixture-driven base parser/table snapshot test that decodes indexed base raw payloads, compiles `ActiveProjects` view plans, asserts exact table row snapshots, and verifies invalid base configs fail parser validation]
 - residual_risk: snapshot currently validates key projected cells and row set, but does not yet cover pagination window permutations for the same view
 
 - timestamp: 2026-03-03T19:35:01Z
@@ -1058,8 +1058,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-001
 - action: done
 - evidence:
-  - files: [bench/reports/perf-001-bridge-1k.json, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 1000 --json-out bench/reports/perf-001-bridge-1k.json, bun run util:check]
+    - files: [bench/reports/perf-001-bridge-1k.json, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 1000 --json-out bench/reports/perf-001-bridge-1k.json, bun run util:check]
 - outcomes: [captured and committed 1k-note bridge baseline report with p50/p95/max latencies for `note_get`, `notes_list`, `note_put`, and `events_poll` under documented perf budget thresholds]
 - residual_risk: single-host baseline reflects current Apple Silicon environment only and should be re-captured on CI-hosted runners for cross-machine drift checks
 
@@ -1068,8 +1068,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-002
 - action: done
 - evidence:
-  - files: [bench/reports/perf-002-bridge-5k.json, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 5000 --json-out bench/reports/perf-002-bridge-5k.json, bun run util:check]
+    - files: [bench/reports/perf-002-bridge-5k.json, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 5000 --json-out bench/reports/perf-002-bridge-5k.json, bun run util:check]
 - outcomes: [captured and committed 5k-note bridge baseline report with p50/p95/max latency distributions, including documented 5k `notes_list` scaling characteristics and budget pass status]
 - residual_risk: one observed `note_put` max outlier at 52.299ms remains below hard p95 budget but should be monitored for IO jitter regression in CI
 
@@ -1078,8 +1078,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-003
 - action: done
 - evidence:
-  - files: [bench/reports/perf-003-bridge-10k.json, bench/reports/perf-003-bridge-10k-time.txt, bench/reports/perf-003-startup-smoke.json, bench/reports/perf-003-startup-smoke-time.txt, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario bridge --iterations 1 --bridge-notes 1 --json-out bench/reports/perf-003-startup-smoke.json, bun run util:check]
+    - files: [bench/reports/perf-003-bridge-10k.json, bench/reports/perf-003-bridge-10k-time.txt, bench/reports/perf-003-startup-smoke.json, bench/reports/perf-003-startup-smoke-time.txt, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario bridge --iterations 200 --bridge-notes 10000 --json-out bench/reports/perf-003-bridge-10k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario bridge --iterations 1 --bridge-notes 1 --json-out bench/reports/perf-003-startup-smoke.json, bun run util:check]
 - outcomes: [captured and committed 10k-note bridge baseline with p50/p95 latencies, plus startup-smoke and `/usr/bin/time -l` memory/process telemetry artifacts to satisfy memory and startup metric coverage]
 - residual_risk: startup-smoke currently uses bridge single-iteration proxy instead of full Swift cold-start trace, so UI-level startup budgets still need dedicated app profiling in phase5
 
@@ -1088,8 +1088,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/src/lib.rs, docs/db/sqlite-pragma-profile.md, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-storage, bun run util:check]
+    - files: [crates/tao-sdk-storage/Cargo.toml, crates/tao-sdk-storage/src/lib.rs, docs/db/sqlite-pragma-profile.md, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-sdk-storage, bun run util:check]
 - outcomes: [implemented default SQLite pragma profile application in migration startup (`foreign_keys`, `journal_mode=WAL`, `synchronous=NORMAL`, `temp_store=MEMORY`, `cache_size`, `wal_autocheckpoint`, `busy_timeout`), added file-db assertion test for profile values, and documented selected profile for runtime governance]
 - residual_risk: pragma profile is globally applied at connection startup and currently not environment-overridable, so future tuning by host class may require config-level profile variants
 
@@ -1098,8 +1098,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-005
 - action: done
 - evidence:
-  - files: [Cargo.lock, crates/tao-bench/Cargo.toml, crates/tao-bench/src/main.rs, crates/tao-sdk-links/src/lib.rs, bench/reports/perf-005-resolve-baseline.json, bench/reports/perf-005-resolve-optimized.json, bench/reports/perf-005-resolve-comparison.json, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-baseline.json, cargo run -p tao-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-optimized.json, bun run util:check]
+    - files: [Cargo.lock, crates/tao-bench/Cargo.toml, crates/tao-bench/src/main.rs, crates/tao-sdk-links/src/lib.rs, bench/reports/perf-005-resolve-baseline.json, bench/reports/perf-005-resolve-optimized.json, bench/reports/perf-005-resolve-comparison.json, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-baseline.json, cargo run -p tao-bench -- --scenario resolve --iterations 20 --bridge-notes 10000 --json-out bench/reports/perf-005-resolve-optimized.json, bun run util:check]
 - outcomes: [replaced resolve benchmark placeholder with real resolver workload harness, optimized resolver hot path to reduce per-candidate normalization/allocation in basename and path-match flows, and validated throughput improvement from 196.497 ops/s to 463.695 ops/s (2.36x) with lower p50/p95 latency]
 - residual_risk: benchmark uses synthetic candidate sets and may not fully represent deeply nested or unicode-heavy production vault path distributions
 
@@ -1108,8 +1108,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-service reconciliation_scanner_handles_burst_changes_consistently -- --nocapture, bun run util:check]
+    - files: [crates/tao-sdk-service/src/indexing.rs, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-sdk-service reconciliation_scanner_handles_burst_changes_consistently -- --nocapture, bun run util:check]
 - outcomes: [added burst-change chaos test that seeds 40 notes, applies concurrent-style update/delete/insert wave (35 drift paths), verifies reconciliation repair batching, validates final file cardinality, checks index consistency report is empty, and asserts subsequent reconcile pass is noop]
 - residual_risk: chaos sequence is deterministic and file-system local; additional randomized burst schedules could further strengthen long-run flake detection
 
@@ -1118,8 +1118,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-007
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
-  - commands: [swift test --package-path apps/tao-macos, bun run util:check]
+    - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, tickets.csv, run-state.json]
+    - commands: [swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added explicit Swift smoke test `app_smoke_launch_open_navigate_edit_flow` that validates launch health, note open, list/navigation across notes, edit via bridge write, and readback correctness in one end-to-end scenario]
 - residual_risk: smoke coverage currently validates bridge-backed UI workflows and not visual-level AppKit rendering assertions, so future UI automation can add screenshot/state verification
 
@@ -1128,8 +1128,8 @@ Append-only execution log for autonomous runs.
 - ticket: QA-008
 - action: done
 - evidence:
-  - files: [crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-cli, bun run util:check]
+    - files: [crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-cli, bun run util:check]
 - outcomes: [added CLI contract coverage that exercises every grouped `--json` command route (`vault`, `note`, `links`, `properties`, `bases`, `search`) and validates stable envelope schema (`ok/value/error`) plus payload shape (`command/summary/args`) for each command]
 - residual_risk: tests currently validate successful envelopes; explicit JSON error-envelope behavior is pending future CLI error contract hardening
 
@@ -1138,8 +1138,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-006
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, bench/reports/perf-006-bridge-call-batching.json, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-bridge, swift test --package-path apps/tao-macos, bun run util:check]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-bridge/src/main.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift, bench/reports/perf-006-bridge-call-batching.json, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-sdk-bridge, swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added batched bridge endpoint `note-context` (single call for note+links), switched note open flow to one boundary invocation, increased tree page size from 256 to 1024 to reduce list paging calls, and documented call-count reduction evidence for key app flows]
 - residual_risk: call-count report is deterministic path analysis and should be supplemented by runtime telemetry counters once app-level perf instrumentation ticket lands
 
@@ -1148,8 +1148,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-007
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, crates/tao-bench/src/main.rs, bench/reports/perf-007-startup-1k.json, bench/reports/perf-007-startup-1k-time.txt, tickets.csv, run-state.json]
-  - commands: [cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/tao-macos, bun run util:check]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, crates/tao-bench/src/main.rs, bench/reports/perf-007-startup-1k.json, bench/reports/perf-007-startup-1k-time.txt, tickets.csv, run-state.json]
+    - commands: [cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, /usr/bin/time -l cargo run -p tao-bench -- --scenario startup --iterations 50 --bridge-notes 1000 --json-out bench/reports/perf-007-startup-1k.json, swift test --package-path apps/tao-macos, bun run util:check]
 - outcomes: [added dedicated startup benchmark scenario that measures bridge startup pipeline (`open -> vault_stats -> notes_list -> note_context`) and emits p50/p95/max report, optimized app startup tree hydration to skip eager note-list loading when restoring a selected note, and validated startup p95 at 12.797ms against 900ms hard budget target]
 - residual_risk: startup benchmark currently models bridge/service startup path rather than full macOS compositor/UI boot, so Instruments-based cold-launch traces remain a future improvement
 
@@ -1158,8 +1158,8 @@ Append-only execution log for autonomous runs.
 - ticket: PERF-008
 - action: done
 - evidence:
-  - files: [.github/workflows/rust-ci.yml, scripts/check-perf-budgets.sh, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
-  - commands: [./scripts/check-perf-budgets.sh, bun run util:check]
+    - files: [.github/workflows/rust-ci.yml, scripts/check-perf-budgets.sh, docs/specs/performance-budgets.md, tickets.csv, run-state.json]
+    - commands: [./scripts/check-perf-budgets.sh, bun run util:check]
 - outcomes: [added CI perf budget gate script that enforces bridge latency budgets and startup p95 threshold, wired `rust-ci` to fail on budget regressions and upload both reports as artifacts, and documented the canonical CI perf gate workflow]
 - residual_risk: CI gate currently enforces bridge and startup benchmarks only; future expansion can include resolver throughput and large-vault (5k/10k/25k) perf gates for broader regression detection
 
@@ -1168,8 +1168,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-001
 - action: done
 - evidence:
-  - files: [docs/release/versioning-policy.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [docs/release/versioning-policy.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [added release versioning policy with SemVer rules for sdk/cli/bridge/app, bridge DTO major/minor compatibility rules, migration compatibility constraints, release tagging policy, and mandatory pre-tag validation checks]
 - residual_risk: policy is documentation-only until release automation enforces every rule directly from CI/tag workflows
 
@@ -1178,8 +1178,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-002
 - action: done
 - evidence:
-  - files: [docs/release/release-runbook.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [docs/release/release-runbook.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [added release checklist/runbook covering preflight quality gates, packaging steps, tag/version flow, post-publish validation, and explicit rollback procedure with failure classifications]
 - residual_risk: runbook references packaging workflows/scripts introduced in later release tickets and should remain synchronized with workflow names and script paths
 
@@ -1188,8 +1188,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-003
 - action: done
 - evidence:
-  - files: [scripts/release-package-cli.sh, package.json, tickets.csv, run-state.json]
-  - commands: [./scripts/release-package-cli.sh, bun run util:check]
+    - files: [scripts/release-package-cli.sh, package.json, tickets.csv, run-state.json]
+    - commands: [./scripts/release-package-cli.sh, bun run util:check]
 - outcomes: [added deterministic CLI/TUI release packaging script that builds release binaries, installs them into target output directory, validates executable health, and emits compressed release bundle at `dist/tao-cli-bundle.tar.gz`; wired script into `package.json` as `util:release:cli`]
 - residual_risk: script currently performs local install/package only; external distribution signing/notarization for binaries remains out of scope
 
@@ -1198,8 +1198,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-004
 - action: done
 - evidence:
-  - files: [scripts/package-macos-app.sh, .github/workflows/swift-release-artifact.yml, package.json, tickets.csv, run-state.json]
-  - commands: [./scripts/package-macos-app.sh, bun run util:check]
+    - files: [scripts/package-macos-app.sh, .github/workflows/swift-release-artifact.yml, package.json, tickets.csv, run-state.json]
+    - commands: [./scripts/package-macos-app.sh, bun run util:check]
 - outcomes: [added deterministic macOS app packaging script that builds release executable, assembles `.app` bundle, applies ad-hoc code signature, and exports zip artifact; added CI workflow `swift-release-artifact` to produce and upload signed app artifacts on tags/workflow dispatch]
 - residual_risk: CI signing is ad-hoc and suitable for internal distribution/testing; developer ID signing and notarization remain future release-hardening work
 
@@ -1208,8 +1208,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
-  - commands: [cargo test -p tao-sdk-storage, cargo test -p tao-cli, bun run util:check]
+    - files: [crates/tao-sdk-storage/src/lib.rs, crates/tao-cli/src/main.rs, tickets.csv, run-state.json]
+    - commands: [cargo test -p tao-sdk-storage, cargo test -p tao-cli, bun run util:check]
 - outcomes: [added SDK migration preflight API that validates migration table presence and checksum integrity before apply; wired CLI `vault preflight` JSON wrapper to surface migration health and pending count; extended CLI JSON contract matrix to include `vault.preflight`]
 - residual_risk: preflight validates known migration checksums but does not currently fail on unknown migration IDs present in `schema_migrations`
 
@@ -1218,8 +1218,8 @@ Append-only execution log for autonomous runs.
 - ticket: REL-006
 - action: done
 - evidence:
-  - files: [docs/release/v1.0.0-rc.1.md, docs/release/release-runbook.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/tao-macos, cargo run -p tao-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
+    - files: [docs/release/v1.0.0-rc.1.md, docs/release/release-runbook.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check, ./scripts/check-perf-budgets.sh, swift test --package-path apps/tao-macos, cargo run -p tao-cli -- --json vault preflight --vault-root <temp-vault> --db-path <temp-db>, ./scripts/release-package-cli.sh, ./scripts/package-macos-app.sh]
 - outcomes: [published v1.0.0-rc.1 acceptance report with dependency verification, command evidence, perf budget metrics, migration preflight envelope, and artifact checksums; corrected release runbook migration preflight package target from `obs` to `tao-cli`]
 - residual_risk: rc report confirms ad-hoc signing and does not include Developer ID notarization
 
@@ -1228,8 +1228,8 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-001
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [replaced raw print stub with explicit `AppState` and `Route` model, defaulted startup route to `placeholder`, and added unit test asserting placeholder boot route contract]
 - residual_risk: startup remains non-interactive until route shell/keymap ticket
 
@@ -1238,8 +1238,8 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-002
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml, crates/tao-tui/README.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml, crates/tao-tui/README.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [implemented alternate-screen TUI route shell with stable keymap-based route switching and quit handling; added command palette (`:`) with parsed `route <name>` and `quit` commands; added unit tests for keymap routing and palette parsing/flow]
 - residual_risk: route shell currently renders placeholders for notes/search/bases content pending integration tickets
 
@@ -1248,8 +1248,8 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-003
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml, crates/tao-tui/README.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml, crates/tao-tui/README.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [integrated notes route with SDK bridge-backed note list pagination and note viewer loading; added route-specific selection keymap (up/down/j/k/enter/r); added integration test that seeds notes through bridge writes and validates route selection/view rendering behavior]
 - residual_risk: notes route relies on bridge read envelopes and does not yet support inline editing in terminal
 
@@ -1258,8 +1258,8 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-004
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [implemented searchable route with slash-triggered query input mode, SDK-backed query filtering over indexed notes, keyboard result navigation, and Enter-based open-note transition into Notes route; added integration test validating query->result->open flow]
 - residual_risk: search currently performs client-side filtering over note windows and does not yet use dedicated indexed ranking/scoring
 
@@ -1268,8 +1268,8 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-005
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
-  - commands: [bun run util:check]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/README.md, tickets.csv, run-state.json]
+    - commands: [bun run util:check]
 - outcomes: [implemented bases route with bridge-backed base registry loading, base/view cycling, page navigation (`n`/`p`) and table row sort toggle (`s`); added table rendering with dynamic columns and stable row projection; added tests for sort-mode ordering and pagination gating]
 - residual_risk: bases row sort currently uses client-side path sorting within the returned page and does not recompile query planner order for arbitrary column sorts
 
@@ -1278,9 +1278,9 @@ Append-only execution log for autonomous runs.
 - ticket: PLAN-001
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, plan/progress.md, plan/blockers.md]
-  - commands: [mkdir -p plan, move control files into plan/]
-  - outcomes: [planning control files relocated to plan/ directory]
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, plan/progress.md, plan/blockers.md]
+    - commands: [mkdir -p plan, move control files into plan/]
+    - outcomes: [planning control files relocated to plan/ directory]
 - residual_risk: none
 
 - timestamp: 2026-03-03T23:34:00Z
@@ -1288,9 +1288,9 @@ Append-only execution log for autonomous runs.
 - ticket: PLAN-002
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, docs/release/release-runbook.md, docs/specs/performance-budgets.md, docs/product/scope-v1.md, plan/run-state.json]
-  - commands: [update operational path references to plan/*]
-  - outcomes: [control-path references now resolve to plan/ locations]
+    - files: [plan/PLAN.md, docs/release/release-runbook.md, docs/specs/performance-budgets.md, docs/product/scope-v1.md, plan/run-state.json]
+    - commands: [update operational path references to plan/*]
+    - outcomes: [control-path references now resolve to plan/ locations]
 - residual_risk: historical references in plan/progress.md entries intentionally preserved as archival context
 
 - timestamp: 2026-03-03T23:36:00Z
@@ -1298,9 +1298,9 @@ Append-only execution log for autonomous runs.
 - ticket: PLAN-003
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [append phase7+ roadmap extension and ticket families]
-  - outcomes: [phase7-phase11 roadmap and ticket mapping added]
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [append phase7+ roadmap extension and ticket families]
+    - outcomes: [phase7-phase11 roadmap and ticket mapping added]
 - residual_risk: detailed execution notes in section 21 must stay synchronized with future ticket edits
 
 - timestamp: 2026-03-03T23:42:00Z
@@ -1308,9 +1308,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-001
 - action: done
 - evidence:
-  - files: [plan/rename-manifest.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [write deterministic rename manifest with exclusions and validation queries]
-  - outcomes: [safe rename procedure and allowlist established]
+    - files: [plan/rename-manifest.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [write deterministic rename manifest with exclusions and validation queries]
+    - outcomes: [safe rename procedure and allowlist established]
 - residual_risk: none
 
 - timestamp: 2026-03-03T23:49:00Z
@@ -1318,9 +1318,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-002
 - action: done
 - evidence:
-  - files: [plan/tickets.csv, plan/run-state.json]
-  - commands: [gh repo rename tao --yes, git remote set-url origin git@github.com:u29dc/tao.git, gh repo view --json nameWithOwner]
-  - outcomes: [repository renamed to u29dc/tao and local origin remapped]
+    - files: [plan/tickets.csv, plan/run-state.json]
+    - commands: [gh repo rename tao --yes, git remote set-url origin git@github.com:u29dc/tao.git, gh repo view --json nameWithOwner]
+    - outcomes: [repository renamed to u29dc/tao and local origin remapped]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:02:00Z
@@ -1328,9 +1328,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-003
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, package.json, scripts/release-package-cli.sh, crates/tao-*/**, docs/architecture/workspace-boundaries.md, docs/release/versioning-policy.md]
-  - commands: [rename crates/obs-* directories to crates/tao-*, replace crate/package identifiers, cargo check --workspace, cargo run -p tao-cli -- --help, cargo run -p tao-bench -- --help]
-  - outcomes: [workspace crate names/imports/binaries migrated to tao namespace and validated by cargo metadata/check]
+    - files: [Cargo.toml, Cargo.lock, package.json, scripts/release-package-cli.sh, crates/tao-*/**, docs/architecture/workspace-boundaries.md, docs/release/versioning-policy.md]
+    - commands: [rename crates/obs-* directories to crates/tao-*, replace crate/package identifiers, cargo check --workspace, cargo run -p tao-cli -- --help, cargo run -p tao-bench -- --help]
+    - outcomes: [workspace crate names/imports/binaries migrated to tao namespace and validated by cargo metadata/check]
 - residual_risk: Swift app path/module identity remains in apps/tao-macos and is addressed by REN-004
 
 - timestamp: 2026-03-04T00:26:00Z
@@ -1338,9 +1338,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-004
 - action: done
 - evidence:
-  - files: [apps/tao-macos/**, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, scripts/package-macos-app.sh, docs/architecture/swift-app-boundaries.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [rename apps/obs-macos to apps/tao-macos, rename swift package/product/module symbols, swift package --package-path apps/tao-macos clean, swift test --package-path apps/tao-macos]
-  - outcomes: [Swift package path/modules moved to tao naming with passing build/tests]
+    - files: [apps/tao-macos/**, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, scripts/package-macos-app.sh, docs/architecture/swift-app-boundaries.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [rename apps/obs-macos to apps/tao-macos, rename swift package/product/module symbols, swift package --package-path apps/tao-macos clean, swift test --package-path apps/tao-macos]
+    - outcomes: [Swift package path/modules moved to tao naming with passing build/tests]
 - residual_risk: runtime defaults still include obs-specific env and db path names pending REN-005
 
 - timestamp: 2026-03-04T00:33:00Z
@@ -1348,9 +1348,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-cli/src/main.rs, crates/tao-bench/src/main.rs, crates/tao-sdk-bridge/src/lib.rs, crates/tao-tui/src/main.rs, crates/tao-sdk-service/tests/conformance_harness.rs, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
-  - commands: [replace OBS_* -> TAO_ and .obs/.obs.sqlite defaults -> .tao/.tao.sqlite across runtime and tests]
-  - outcomes: [runtime env vars and sqlite defaults now use tao naming]
+    - files: [crates/tao-sdk-service/src/config.rs, crates/tao-cli/src/main.rs, crates/tao-bench/src/main.rs, crates/tao-sdk-bridge/src/lib.rs, crates/tao-tui/src/main.rs, crates/tao-sdk-service/tests/conformance_harness.rs, apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
+    - commands: [replace OBS_* -> TAO_ and .obs/.obs.sqlite defaults -> .tao/.tao.sqlite across runtime and tests]
+    - outcomes: [runtime env vars and sqlite defaults now use tao naming]
 - residual_risk: broad identity strings still require allowlisted stale-reference sweep in REN-006
 
 - timestamp: 2026-03-04T00:43:00Z
@@ -1358,9 +1358,9 @@ Append-only execution log for autonomous runs.
 - ticket: REN-006
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, docs/release/release-runbook.md, docs/release/versioning-policy.md, docs/adr/README.md, bun.lock]
-  - commands: [rg -n "\\bobs\\b|obs-" with allowlist exclusions, update remaining active references to tao naming]
-  - outcomes: [non-allowlisted obs identity references removed from active code/docs/workflow paths]
+    - files: [plan/PLAN.md, plan/tickets.csv, docs/release/release-runbook.md, docs/release/versioning-policy.md, docs/adr/README.md, bun.lock]
+    - commands: [rg -n "\\bobs\\b|obs-" with allowlist exclusions, update remaining active references to tao naming]
+    - outcomes: [non-allowlisted obs identity references removed from active code/docs/workflow paths]
 - residual_risk: allowed residual mentions remain in plan/rename-manifest.md and historical plan/progress.md entries by design
 
 - timestamp: 2026-03-04T00:50:00Z
@@ -1368,9 +1368,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLEAN-001
 - action: done
 - evidence:
-  - files: [scripts/clean.sh, package.json, plan/tickets.csv, plan/run-state.json]
-  - commands: [add one-word cleanup script and wire util:clean task]
-  - outcomes: [deterministic cleanup script added for cargo/swift artifacts, dist output, and legacy install dirs]
+    - files: [scripts/clean.sh, package.json, plan/tickets.csv, plan/run-state.json]
+    - commands: [add one-word cleanup script and wire util:clean task]
+    - outcomes: [deterministic cleanup script added for cargo/swift artifacts, dist output, and legacy install dirs]
 - residual_risk: none
 
 - timestamp: 2026-03-03T23:36:30Z
@@ -1378,9 +1378,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLEAN-002
 - action: done
 - evidence:
-  - files: [plan/tickets.csv, plan/run-state.json]
-  - commands: [bun run util:clean, bun run util:check, swift test --package-path apps/tao-macos]
-  - outcomes: [cold-cache cleanup completed, rust quality gate passed, release artifacts rebuilt, swift package tests passed]
+    - files: [plan/tickets.csv, plan/run-state.json]
+    - commands: [bun run util:clean, bun run util:check, swift test --package-path apps/tao-macos]
+    - outcomes: [cold-cache cleanup completed, rust quality gate passed, release artifacts rebuilt, swift package tests passed]
 - residual_risk: cargo audit reports allowed advisories inherited via ratatui dependencies (paste unmaintained, lru unsound advisory); no direct workspace blocker under current allow policy
 
 - timestamp: 2026-03-03T23:44:00Z
@@ -1388,9 +1388,9 @@ Append-only execution log for autonomous runs.
 - ticket: BUILD-001
 - action: done
 - evidence:
-  - files: [package.json, scripts/check-perf-budgets.sh, .github/workflows/rust-ci.yml, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [bun run util:check]
-  - outcomes: [default rust and swift build/test scripts now run release configuration, perf budget script runs release bench binary, ci definitions aligned to release build defaults]
+    - files: [package.json, scripts/check-perf-budgets.sh, .github/workflows/rust-ci.yml, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [bun run util:check]
+    - outcomes: [default rust and swift build/test scripts now run release configuration, perf budget script runs release bench binary, ci definitions aligned to release build defaults]
 - residual_risk: workflows are disabled manually at repository level; file-level workflow defaults are ready for future re-enable
 
 - timestamp: 2026-03-03T23:41:00Z
@@ -1398,9 +1398,9 @@ Append-only execution log for autonomous runs.
 - ticket: BUILD-002
 - action: done
 - evidence:
-  - files: [package.json, scripts/check-perf-budgets.sh, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [bun run util:check, swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [runtime defaults now execute built release binaries for cli and bridge paths, no cargo-run runtime default path remains for app/cli execution flows]
+    - files: [package.json, scripts/check-perf-budgets.sh, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift, .github/workflows/swift-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [bun run util:check, swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [runtime defaults now execute built release binaries for cli and bridge paths, no cargo-run runtime default path remains for app/cli execution flows]
 - residual_risk: release bridge binary must exist before swift runtime/tests; workflows now build tao-sdk-bridge release binary before swift steps
 
 - timestamp: 2026-03-03T23:46:30Z
@@ -1408,9 +1408,9 @@ Append-only execution log for autonomous runs.
 - ticket: BUILD-003
 - action: done
 - evidence:
-  - files: [scripts/budgets.sh, scripts/fixtures.sh, scripts/package.sh, scripts/release.sh, package.json, .github/workflows/rust-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, docs/release/versioning-policy.md, docs/specs/performance-budgets.md, bench/fixtures/README.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [bun run util:check, ./scripts/budgets.sh]
-  - outcomes: [scripts directory now uses single-word script filenames with active call sites and docs updated, perf budget gate validated via renamed entrypoint]
+    - files: [scripts/budgets.sh, scripts/fixtures.sh, scripts/package.sh, scripts/release.sh, package.json, .github/workflows/rust-ci.yml, .github/workflows/swift-release-artifact.yml, docs/release/release-runbook.md, docs/release/v1.0.0-rc.1.md, docs/release/versioning-policy.md, docs/specs/performance-budgets.md, bench/fixtures/README.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [bun run util:check, ./scripts/budgets.sh]
+    - outcomes: [scripts directory now uses single-word script filenames with active call sites and docs updated, perf budget gate validated via renamed entrypoint]
 - residual_risk: historical references remain in prior plan/progress evidence entries by design
 
 - timestamp: 2026-03-03T23:50:00Z
@@ -1418,9 +1418,9 @@ Append-only execution log for autonomous runs.
 - ticket: CFG-001
 - action: done
 - evidence:
-  - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-config/Cargo.toml, crates/tao-sdk-config/src/lib.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-sdk-config, cargo check --workspace --release]
-  - outcomes: [new tao-sdk-config crate added with typed TOML schema, defaults, merge precedence trait, normalization/validation, and bootstrap template helpers]
+    - files: [Cargo.toml, Cargo.lock, crates/tao-sdk-config/Cargo.toml, crates/tao-sdk-config/src/lib.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-sdk-config, cargo check --workspace --release]
+    - outcomes: [new tao-sdk-config crate added with typed TOML schema, defaults, merge precedence trait, normalization/validation, and bootstrap template helpers]
 - residual_risk: crate is not yet wired into sdk runtime loader; CFG-002..CFG-004 will integrate bootstrap/read/precedence flows
 
 - timestamp: 2026-03-03T23:53:00Z
@@ -1428,9 +1428,9 @@ Append-only execution log for autonomous runs.
 - ticket: CFG-002
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-config/src/lib.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-sdk-config, cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
-  - outcomes: [root config bootstrap/read helpers added to tao-sdk-config and invoked by SdkConfigLoader so repository root config.toml is auto-created and parsed when missing]
+    - files: [crates/tao-sdk-config/src/lib.rs, crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-sdk-config, cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+    - outcomes: [root config bootstrap/read helpers added to tao-sdk-config and invoked by SdkConfigLoader so repository root config.toml is auto-created and parsed when missing]
 - residual_risk: root config values are loaded but not yet merged into effective runtime precedence (implemented in CFG-004)
 
 - timestamp: 2026-03-03T23:55:00Z
@@ -1438,9 +1438,9 @@ Append-only execution log for autonomous runs.
 - ticket: CFG-003
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
-  - outcomes: [vault config bootstrap/read added through SdkConfigLoader, with tests confirming vault-root config.toml auto-creation when missing]
+    - files: [crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+    - outcomes: [vault config bootstrap/read added through SdkConfigLoader, with tests confirming vault-root config.toml auto-creation when missing]
 - residual_risk: root/vault config files are loaded independently but precedence merge into effective settings is pending CFG-004
 
 - timestamp: 2026-03-03T23:59:00Z
@@ -1448,9 +1448,9 @@ Append-only execution log for autonomous runs.
 - ticket: CFG-004
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
-  - outcomes: [effective sdk config now applies precedence defaults < root config.toml < vault config.toml, while preserving higher-priority env and explicit overrides]
+    - files: [crates/tao-sdk-service/src/config.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+    - outcomes: [effective sdk config now applies precedence defaults < root config.toml < vault config.toml, while preserving higher-priority env and explicit overrides]
 - residual_risk: cli/sdk bootstrap APIs still expose only final resolved runtime values; richer bootstrap metadata wiring is handled in SDK-017
 
 - timestamp: 2026-03-04T00:02:30Z
@@ -1458,9 +1458,9 @@ Append-only execution log for autonomous runs.
 - ticket: SDK-017
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/lib.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
-  - outcomes: [new SdkBootstrapService API resolves config, ensures root+vault config files, opens sqlite, runs migrations, and returns db readiness metadata with resolved config paths]
+    - files: [crates/tao-sdk-service/src/config.rs, crates/tao-sdk-service/src/lib.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
+    - outcomes: [new SdkBootstrapService API resolves config, ensures root+vault config files, opens sqlite, runs migrations, and returns db readiness metadata with resolved config paths]
 - residual_risk: cli wrappers still call local bootstrap logic directly until CLI-007..CLI-009 migration completes
 
 - timestamp: 2026-03-04T00:18:00Z
@@ -1468,9 +1468,9 @@ Append-only execution log for autonomous runs.
 - ticket: PLAN-003
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [validate phase7+ roadmap sections and execution contract paths]
-  - outcomes: [phase7+ roadmap extension and execution contract already present in plan/PLAN.md; ticket state reconciled to done]
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [validate phase7+ roadmap sections and execution contract paths]
+    - outcomes: [phase7+ roadmap extension and execution contract already present in plan/PLAN.md; ticket state reconciled to done]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:24:00Z
@@ -1478,9 +1478,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-007
 - action: done
 - evidence:
-  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-cli --release]
-  - outcomes: [all CLI command groups now resolve effective vault/db paths from sdk config when only --vault-root is supplied]
+    - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-cli --release]
+    - outcomes: [all CLI command groups now resolve effective vault/db paths from sdk config when only --vault-root is supplied]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:25:00Z
@@ -1488,9 +1488,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-008
 - action: done
 - evidence:
-  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-cli --release]
-  - outcomes: [vault open test verifies sqlite file auto-creation through migration bootstrap when db path is omitted]
+    - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-cli --release]
+    - outcomes: [vault open test verifies sqlite file auto-creation through migration bootstrap when db path is omitted]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:26:00Z
@@ -1498,9 +1498,9 @@ Append-only execution log for autonomous runs.
 - ticket: CLI-009
 - action: done
 - evidence:
-  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
-  - commands: [cargo test -p tao-cli --release, bun run util:check]
-  - outcomes: [explicit --db-path override path remains supported and validated by contract test]
+    - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+    - commands: [cargo test -p tao-cli --release, bun run util:check]
+    - outcomes: [explicit --db-path override path remains supported and validated by contract test]
 - residual_risk: cargo audit still reports allowlisted advisory warnings via tao-tui transitive dependencies
 
 - timestamp: 2026-03-04T00:18:00Z
@@ -1508,9 +1508,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-009
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/runtime.rs, crates/tao-sdk-bridge/src/bin/uniffi-bindgen.rs, scripts/ffi.sh]
-  - commands: [cargo test -p tao-sdk-bridge --release, bun run util:ffi]
-  - outcomes: [bridge crate exports UniFFI runtime object and deterministic binding generation pipeline]
+    - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/runtime.rs, crates/tao-sdk-bridge/src/bin/uniffi-bindgen.rs, scripts/ffi.sh]
+    - commands: [cargo test -p tao-sdk-bridge --release, bun run util:ffi]
+    - outcomes: [bridge crate exports UniFFI runtime object and deterministic binding generation pipeline]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:18:30Z
@@ -1518,9 +1518,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-010
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/*]
-  - commands: [bun run util:ffi, swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [generated Swift bindings and FFI module map integrated into app package build]
+    - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/*]
+    - commands: [bun run util:ffi, swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [generated Swift bindings and FFI module map integrated into app package build]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:19:00Z
@@ -1528,9 +1528,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-011
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [swift bridge client caches long-lived runtime handles keyed by vault/db path]
+    - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [swift bridge client caches long-lived runtime handles keyed by vault/db path]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:19:30Z
@@ -1538,9 +1538,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-012
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [subprocess launch path removed from TaoBridgeClient; calls now execute through direct runtime bindings]
+    - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [subprocess launch path removed from TaoBridgeClient; calls now execute through direct runtime bindings]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:20:00Z
@@ -1548,9 +1548,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-013
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/runtime.rs, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [batched/windowed runtime APIs (`startup_bundle_json`, `notes_window_json`, `note_context_json`) adopted in file-tree and note-open flows]
+    - files: [crates/tao-sdk-bridge/src/runtime.rs, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [batched/windowed runtime APIs (`startup_bundle_json`, `notes_window_json`, `note_context_json`) adopted in file-tree and note-open flows]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:20:30Z
@@ -1558,9 +1558,9 @@ Append-only execution log for autonomous runs.
 - ticket: FFI-014
 - action: done
 - evidence:
-  - files: [crates/tao-bench/src/main.rs, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
-  - commands: [cargo run -p tao-bench --release -- --scenario ffi --iterations 20 --bridge-notes 200 --json-out .benchmarks/reports/ffi-call-budgets.json, ./scripts/budgets.sh]
-  - outcomes: [ffi latency scenario and budget checks added with machine-readable reports and ci artifact path updates]
+    - files: [crates/tao-bench/src/main.rs, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
+    - commands: [cargo run -p tao-bench --release -- --scenario ffi --iterations 20 --bridge-notes 200 --json-out .benchmarks/reports/ffi-call-budgets.json, ./scripts/budgets.sh]
+    - outcomes: [ffi latency scenario and budget checks added with machine-readable reports and ci artifact path updates]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:21:00Z
@@ -1568,9 +1568,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-013
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [debug/diagnostic panels removed from app shell]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [debug/diagnostic panels removed from app shell]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:21:30Z
@@ -1578,9 +1578,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-014
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [single sidebar tree + main note reader layout implemented]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [single sidebar tree + main note reader layout implemented]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:22:00Z
@@ -1588,9 +1588,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-015
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [front matter properties rendered as key/value section above markdown body]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [front matter properties rendered as key/value section above markdown body]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:22:30Z
@@ -1598,9 +1598,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-016
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [settings window supports vault folder selection and refresh behavior]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [settings window supports vault folder selection and refresh behavior]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:23:00Z
@@ -1608,9 +1608,9 @@ Append-only execution log for autonomous runs.
 - ticket: APP-017
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release, ./scripts/budgets.sh]
-  - outcomes: [startup bundle hydration + delayed-spinner threshold reduces perceived note-open latency]
+    - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release, ./scripts/budgets.sh]
+    - outcomes: [startup bundle hydration + delayed-spinner threshold reduces perceived note-open latency]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:23:30Z
@@ -1618,9 +1618,9 @@ Append-only execution log for autonomous runs.
 - ticket: VAULT-001
 - action: done
 - evidence:
-  - files: [vault/**, crates/tao-sdk-service/tests/conformance_harness.rs]
-  - commands: [git mv qa/fixtures/conformance-vault vault]
-  - outcomes: [shipped conformance fixture vault moved to repository root `vault/`]
+    - files: [vault/**, crates/tao-sdk-service/tests/conformance_harness.rs]
+    - commands: [git mv qa/fixtures/conformance-vault vault]
+    - outcomes: [shipped conformance fixture vault moved to repository root `vault/`]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:24:00Z
@@ -1628,9 +1628,9 @@ Append-only execution log for autonomous runs.
 - ticket: VAULT-002
 - action: done
 - evidence:
-  - files: [scripts/fixtures.sh, vault/README.md]
-  - commands: [update fixtures generator default output root]
-  - outcomes: [deterministic synthetic vault generator now targets `vault/generated`]
+    - files: [scripts/fixtures.sh, vault/README.md]
+    - commands: [update fixtures generator default output root]
+    - outcomes: [deterministic synthetic vault generator now targets `vault/generated`]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:24:30Z
@@ -1638,9 +1638,9 @@ Append-only execution log for autonomous runs.
 - ticket: BENCH-001
 - action: done
 - evidence:
-  - files: [.gitignore, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
-  - commands: [./scripts/budgets.sh]
-  - outcomes: [benchmark outputs redirected to `.benchmarks/reports` and gitignored]
+    - files: [.gitignore, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
+    - commands: [./scripts/budgets.sh]
+    - outcomes: [benchmark outputs redirected to `.benchmarks/reports` and gitignored]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:25:00Z
@@ -1648,9 +1648,9 @@ Append-only execution log for autonomous runs.
 - ticket: BENCH-002
 - action: done
 - evidence:
-  - files: [crates/tao-bench/**, bench/reports/* removed]
-  - commands: [git rm -r bench]
-  - outcomes: [benchmark harness source preserved while bulky static benchmark outputs removed from git]
+    - files: [crates/tao-bench/**, bench/reports/* removed]
+    - commands: [git rm -r bench]
+    - outcomes: [benchmark harness source preserved while bulky static benchmark outputs removed from git]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:25:30Z
@@ -1658,9 +1658,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-007
 - action: done
 - evidence:
-  - files: [AGENTS.md, docs/** removed]
-  - commands: [git rm -r -f docs]
-  - outcomes: [repository documentation consolidated into concise root AGENTS.md]
+    - files: [AGENTS.md, docs/** removed]
+    - commands: [git rm -r -f docs]
+    - outcomes: [repository documentation consolidated into concise root AGENTS.md]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:26:00Z
@@ -1668,9 +1668,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-008
 - action: done
 - evidence:
-  - files: [CLAUDE.md]
-  - commands: [ln -s AGENTS.md CLAUDE.md]
-  - outcomes: [CLAUDE.md now symlinks to AGENTS.md]
+    - files: [CLAUDE.md]
+    - commands: [ln -s AGENTS.md CLAUDE.md]
+    - outcomes: [CLAUDE.md now symlinks to AGENTS.md]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:26:30Z
@@ -1678,9 +1678,9 @@ Append-only execution log for autonomous runs.
 - ticket: DOC-009
 - action: done
 - evidence:
-  - files: [README.md]
-  - commands: [ln -s AGENTS.md README.md]
-  - outcomes: [README.md now symlinks to AGENTS.md]
+    - files: [README.md]
+    - commands: [ln -s AGENTS.md README.md]
+    - outcomes: [README.md now symlinks to AGENTS.md]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:27:00Z
@@ -1688,9 +1688,9 @@ Append-only execution log for autonomous runs.
 - ticket: TUI-006
 - action: done
 - evidence:
-  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml]
-  - commands: [cargo check --workspace --release]
-  - outcomes: [tui reset to minimal placeholder shell with no route/content logic]
+    - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml]
+    - commands: [cargo check --workspace --release]
+    - outcomes: [tui reset to minimal placeholder shell with no route/content logic]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:32:00Z
@@ -1698,9 +1698,9 @@ Append-only execution log for autonomous runs.
 - ticket: QA-009
 - action: done
 - evidence:
-  - files: [plan/tickets.csv, plan/run-state.json]
-  - commands: [bun run util:clean && bun run util:check]
-  - outcomes: [cold-cache release-quality gates passed across rust, bridge generation, swift build, and audits]
+    - files: [plan/tickets.csv, plan/run-state.json]
+    - commands: [bun run util:clean && bun run util:check]
+    - outcomes: [cold-cache release-quality gates passed across rust, bridge generation, swift build, and audits]
 - residual_risk: none
 
 - timestamp: 2026-03-04T00:32:20Z
@@ -1708,9 +1708,9 @@ Append-only execution log for autonomous runs.
 - ticket: QA-010
 - action: done
 - evidence:
-  - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
-  - commands: [swift test --package-path apps/tao-macos --configuration release]
-  - outcomes: [launch/open/navigate/edit smoke flow validated against root fixture vault behavior]
+    - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
+    - commands: [swift test --package-path apps/tao-macos --configuration release]
+    - outcomes: [launch/open/navigate/edit smoke flow validated against root fixture vault behavior]
 - residual_risk: direct interactive mouse/keyboard walkthrough remains user-verifiable on local machine
 
 - timestamp: 2026-03-04T00:32:40Z
@@ -1718,9 +1718,9 @@ Append-only execution log for autonomous runs.
 - ticket: REL-007
 - action: done
 - evidence:
-  - files: [plan/release-notes-tao.md]
-  - commands: [write tao transition release notes and migration guidance]
-  - outcomes: [published release notes for rename migration, ffi runtime, config bootstrap, and operational guidance]
+    - files: [plan/release-notes-tao.md]
+    - commands: [write tao transition release notes and migration guidance]
+    - outcomes: [published release notes for rename migration, ffi runtime, config bootstrap, and operational guidance]
 - residual_risk: none
 
 - timestamp: 2026-03-04T12:20:00Z
@@ -1728,9 +1728,9 @@ Append-only execution log for autonomous runs.
 - ticket: SEC-001
 - action: start
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
-  - commands: [update phase12 remediation contract and manifest]
-  - outcomes: [phase12 tickets added and run-state moved to in_progress]
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [update phase12 remediation contract and manifest]
+    - outcomes: [phase12 tickets added and run-state moved to in_progress]
 - residual_risk: remediation code changes pending
 
 - timestamp: 2026-03-04T11:31:00Z
@@ -1738,9 +1738,9 @@ Append-only execution log for autonomous runs.
 - ticket: SEC-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs]
-  - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json note get --vault-root <vault> --path /etc/hosts]
-  - outcomes: [bridge note_get now rejects absolute/parent traversal paths with bridge.note_get.invalid_path]
+    - files: [crates/tao-sdk-bridge/src/lib.rs]
+    - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json note get --vault-root <vault> --path /etc/hosts]
+    - outcomes: [bridge note_get now rejects absolute/parent traversal paths with bridge.note_get.invalid_path]
 - residual_risk: symlink-based path escape checks are enforced for readable existing note targets at read time
 
 - timestamp: 2026-03-04T11:31:30Z
@@ -1748,9 +1748,9 @@ Append-only execution log for autonomous runs.
 - ticket: IDX-009
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-bridge/src/lib.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
-  - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json links outgoing --vault-root <vault> --path notes/source.md]
-  - outcomes: [note_put now runs IncrementalIndexService and outgoing links update immediately without manual reindex]
+    - files: [crates/tao-sdk-bridge/src/lib.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+    - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json links outgoing --vault-root <vault> --path notes/source.md]
+    - outcomes: [note_put now runs IncrementalIndexService and outgoing links update immediately without manual reindex]
 - residual_risk: index refresh failures now surface as bridge.note_put.index_failed and require explicit recover action
 
 - timestamp: 2026-03-04T11:32:00Z
@@ -1758,9 +1758,9 @@ Append-only execution log for autonomous runs.
 - ticket: CFG-005
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-service/src/config.rs]
-  - commands: [cargo test -p tao-sdk-service --release, (cd / && /Users/han/Git/obs/target/release/tao --json vault open --vault-root <vault>)]
-  - outcomes: [root config bootstrap now skips filesystem-root cwd and avoids /config.toml write failures]
+    - files: [crates/tao-sdk-service/src/config.rs]
+    - commands: [cargo test -p tao-sdk-service --release, (cd / && /Users/han/Git/obs/target/release/tao --json vault open --vault-root <vault>)]
+    - outcomes: [root config bootstrap now skips filesystem-root cwd and avoids /config.toml write failures]
 - residual_risk: non-root unwritable cwd paths still rely on existing write/read fallback handling
 
 - timestamp: 2026-03-04T11:32:20Z
@@ -1768,9 +1768,9 @@ Append-only execution log for autonomous runs.
 - ticket: REL-008
 - action: done
 - evidence:
-  - files: [scripts/release_mac.sh, apps/tao-macos/Package.swift]
-  - commands: [bun run release:mac, otool -L dist/TaoMacOSApp.app/Contents/MacOS/TaoMacOSApp, otool -D dist/TaoMacOSApp.app/Contents/Frameworks/libtao_sdk_bridge.dylib]
-  - outcomes: [dist app now embeds bridge dylib in Frameworks and links via @rpath instead of absolute build-machine path]
+    - files: [scripts/release_mac.sh, apps/tao-macos/Package.swift]
+    - commands: [bun run release:mac, otool -L dist/TaoMacOSApp.app/Contents/MacOS/TaoMacOSApp, otool -D dist/TaoMacOSApp.app/Contents/Frameworks/libtao_sdk_bridge.dylib]
+    - outcomes: [dist app now embeds bridge dylib in Frameworks and links via @rpath instead of absolute build-machine path]
 - residual_risk: notarization and Developer ID signing remain out-of-scope for this local ad-hoc packaging flow
 
 - timestamp: 2026-03-04T11:32:40Z
@@ -1778,9 +1778,9 @@ Append-only execution log for autonomous runs.
 - ticket: SEARCH-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-search/Cargo.toml, crates/tao-sdk-search/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
-  - commands: [cargo test -p tao-sdk-search -p tao-cli --release, ./target/release/tao --json search query --vault-root <vault> --query hello]
-  - outcomes: [sdk-search now provides deterministic title/path/content search service and CLI search delegates to it with matched_in metadata]
+    - files: [crates/tao-sdk-search/Cargo.toml, crates/tao-sdk-search/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
+    - commands: [cargo test -p tao-sdk-search -p tao-cli --release, ./target/release/tao --json search query --vault-root <vault> --query hello]
+    - outcomes: [sdk-search now provides deterministic title/path/content search service and CLI search delegates to it with matched_in metadata]
 - residual_risk: search is currently lexical and file-content scanned, not SQLite FTS-accelerated
 
 - timestamp: 2026-03-04T11:32:50Z
@@ -1788,9 +1788,9 @@ Append-only execution log for autonomous runs.
 - ticket: WATCH-001
 - action: done
 - evidence:
-  - files: [crates/tao-sdk-watch/Cargo.toml, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
-  - commands: [cargo test -p tao-sdk-watch -p tao-cli --release]
-  - outcomes: [sdk-watch now exposes typed reconciliation adapter and CLI vault.reconcile is wired through watch crate]
+    - files: [crates/tao-sdk-watch/Cargo.toml, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
+    - commands: [cargo test -p tao-sdk-watch -p tao-cli --release]
+    - outcomes: [sdk-watch now exposes typed reconciliation adapter and CLI vault.reconcile is wired through watch crate]
 - residual_risk: filesystem event streaming remains reconciliation-driven, not persistent OS watcher subscription
 
 - timestamp: 2026-03-04T11:33:00Z
@@ -1798,9 +1798,9 @@ Append-only execution log for autonomous runs.
 - ticket: QA-011
 - action: done
 - evidence:
-  - files: [package.json]
-  - commands: [bun run util:check]
-  - outcomes: [util:check now includes swift test --configuration release --package-path apps/tao-macos]
+    - files: [package.json]
+    - commands: [bun run util:check]
+    - outcomes: [util:check now includes swift test --configuration release --package-path apps/tao-macos]
 - residual_risk: none
 
 - timestamp: 2026-03-04T11:33:20Z
@@ -1808,7 +1808,57 @@ Append-only execution log for autonomous runs.
 - ticket: QA-012
 - action: done
 - evidence:
-  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, scripts/release_mac.sh, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-search/src/lib.rs, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-sdk-service/src/config.rs, package.json]
-  - commands: [cargo test -p tao-sdk-bridge -p tao-sdk-service -p tao-sdk-search -p tao-sdk-watch -p tao-cli --release, bun run util:check, ./scripts/budgets.sh]
-  - outcomes: [all phase12 remediation tickets validated with release-quality gates and budgets passing]
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, scripts/release_mac.sh, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-search/src/lib.rs, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-sdk-service/src/config.rs, package.json]
+    - commands: [cargo test -p tao-sdk-bridge -p tao-sdk-service -p tao-sdk-search -p tao-sdk-watch -p tao-cli --release, bun run util:check, ./scripts/budgets.sh]
+    - outcomes: [all phase12 remediation tickets validated with release-quality gates and budgets passing]
+- residual_risk: none
+
+- timestamp: 2026-03-04T20:29:10Z
+- session: session-2026-03-04-phase23-rebaseline
+- ticket: DOC-010
+- action: done
+- evidence:
+    - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+    - commands: [update phase23 architecture section, append phase23 ticket manifest with explicit success criteria, set run-state to phase23 DATA-001]
+    - outcomes: [phase23 plan formalized with no-hub graph directive, synthetic-vault-first execution order, and 46 explicit tickets with measurable DoD criteria]
+- residual_risk: implementation complexity is high; deterministic execution requires strict ticket-order discipline and benchmark gate enforcement
+
+- timestamp: 2026-03-04T20:29:46Z
+- session: session-2026-03-04-phase23-rebaseline
+- ticket: DOC-010
+- action: update
+- evidence:
+    - files: [plan/tickets.csv, plan/run-state.json]
+    - commands: [refine phase23 DoD criteria for weak tickets, validate csv integrity and DoD completeness]
+    - outcomes: [all phase23 tickets now have explicit measurable success criteria with command-level verification expectations]
+- residual_risk: none
+
+- timestamp: 2026-03-04T20:34:10Z
+- session: session-2026-03-04-phase23-rebaseline
+- ticket: DOC-010
+- action: update
+- evidence:
+    - files: [plan/tickets.csv, plan/PLAN.md]
+    - commands: [rewrite phase23 DoD block with explicit pass/fail assertions, add mandatory phase23 DoD contract in PLAN]
+    - outcomes: [all phase23 tickets now use Pass-when criteria with artifact+command+assertion structure; PLAN now enforces this structure as a mandatory rule]
+- residual_risk: csv parse lint currently not automated; add a dedicated csv schema lint step in a later ticket to prevent malformed rows
+
+- timestamp: 2026-03-04T20:39:09Z
+- session: session-2026-03-04-phase23-rebaseline
+- ticket: DOC-013
+- action: update
+- evidence:
+  - files: [plan/tickets.csv]
+  - commands: [append delta ticket batch for uncovered checklist items from prior architecture message]
+  - outcomes: [added DOC-013 DATA-007 TASK-001 TASK-002 TASK-003 PERF-015 PERF-016 PARITY-001 PARITY-002 PARITY-003 with explicit Pass-when DoD criteria]
+- residual_risk: execution scope increased; sequencing and dependencies should be folded into PLAN execution order section in next planning edit
+
+- timestamp: 2026-03-04T20:39:19Z
+- session: session-2026-03-04-phase23-rebaseline
+- ticket: DOC-013
+- action: update
+- evidence:
+  - files: [plan/PLAN.md]
+  - commands: [extend phase23 deterministic execution order with DATA-007 TASK-001..003 PERF-015..016 PARITY-001..003 DOC-013]
+  - outcomes: [phase23 execution order now references the expanded ticket set and removes the sequencing gap noted in prior residual risk]
 - residual_risk: none

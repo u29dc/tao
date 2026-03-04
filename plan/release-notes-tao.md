@@ -7,18 +7,18 @@ Scope: rename migration, native runtime bridge, config/bootstrap defaults, and a
 
 - Project identity fully migrated from `obs` to `tao` (repo, binaries, package metadata, env names, runtime paths).
 - CLI now supports vault-root-first operation:
-  - `--vault-root` is sufficient for bootstrap and command execution.
-  - sqlite path auto-resolves and migrations auto-apply.
-  - `--db-path` remains available as an advanced override.
+    - `--vault-root` is sufficient for bootstrap and command execution.
+    - sqlite path auto-resolves and migrations auto-apply.
+    - `--db-path` remains available as an advanced override.
 - Native bridge runtime is now direct and persistent:
-  - `tao-sdk-bridge` exports a long-lived `TaoBridgeRuntime`.
-  - Swift client uses generated bindings with runtime-handle caching per vault/db key.
-  - subprocess-per-call bridge execution has been removed from the app path.
+    - `tao-sdk-bridge` exports a long-lived `TaoBridgeRuntime`.
+    - Swift client uses generated bindings with runtime-handle caching per vault/db key.
+    - subprocess-per-call bridge execution has been removed from the app path.
 - macOS app shell simplified:
-  - one file-tree sidebar
-  - one note reader pane with front matter properties + markdown content
-  - settings window for vault folder selection
-  - debug-oriented panes removed
+    - one file-tree sidebar
+    - one note reader pane with front matter properties + markdown content
+    - settings window for vault folder selection
+    - debug-oriented panes removed
 - TUI reset to explicit placeholder shell while the next TUI phase is deferred.
 
 ## 1. Repository + Binary Naming
@@ -54,7 +54,7 @@ Bootstrapping behavior:
 - Benchmark reports now write to `.benchmarks/reports/` (gitignored).
 - Budget gate covers bridge, ffi, and startup scenarios through `./scripts/budgets.sh`.
 - Full release-quality validation command remains:
-  - `bun run util:clean && bun run util:check`
+    - `bun run util:clean && bun run util:check`
 
 ## 5. Compatibility and Risk Notes
 
