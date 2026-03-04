@@ -13,11 +13,4 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
 clap.workspace = true
-crossterm = "0.29.0"
-tao-sdk-bridge = { path = "../tao-sdk-bridge" }
-ratatui = "0.29.0"
-
-[dev-dependencies]
-tempfile = "3.26.0"
