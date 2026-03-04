@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -14,8 +15,8 @@ use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_properties::TypedPropertyValue;
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
-    BaseTableExecutorService, HealthSnapshotService, PropertyUpdateService, SdkConfigLoader,
-    SdkConfigOverrides, WatcherStatus,
+    BacklinkGraphService, BaseTableExecutorService, HealthSnapshotService, PropertyUpdateService,
+    SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
@@ -38,6 +39,33 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Compact document operations.
+    Doc {
+        #[command(subcommand)]
+        command: DocCommands,
+    },
+    /// Compact base operations.
+    Base {
+        #[command(subcommand)]
+        command: BaseCommands,
+    },
+    /// Compact graph operations.
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommands,
+    },
+    /// Compact metadata operations.
+    Meta {
+        #[command(subcommand)]
+        command: MetaCommands,
+    },
+    /// Task extraction and state operations.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+    /// Unified read query entrypoint.
+    Query(QueryArgs),
     /// Vault lifecycle and indexing operations.
     Vault {
         #[command(subcommand)]
@@ -68,6 +96,64 @@ enum Commands {
         #[command(subcommand)]
         command: SearchCommands,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocCommands {
+    /// Return one note by normalized path.
+    Read(NotePathArgs),
+    /// Create or update one note.
+    Write(NotePutArgs),
+    /// List markdown note windows.
+    List(VaultPathArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum BaseCommands {
+    /// List indexed bases.
+    List(VaultPathArgs),
+    /// Query one base table view.
+    View(BaseViewArgs),
+    /// Return one base schema contract.
+    Schema(BaseSchemaArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum GraphCommands {
+    /// Return outgoing links for one note.
+    Outgoing(NotePathArgs),
+    /// Return backlinks for one note.
+    Backlinks(NotePathArgs),
+    /// Return unresolved graph links.
+    Unresolved(GraphWindowArgs),
+    /// Return notes with no outgoing resolved edges.
+    Deadends(GraphWindowArgs),
+    /// Return isolated notes with no incoming/outgoing resolved edges.
+    Orphans(GraphWindowArgs),
+    /// Return connected components across resolved graph edges.
+    Components(GraphWindowArgs),
+    /// Walk graph neighbors from one root note.
+    Walk(GraphWalkArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum MetaCommands {
+    /// Aggregate property keys across vault.
+    Properties(GraphWindowArgs),
+    /// Aggregate tags across vault.
+    Tags(GraphWindowArgs),
+    /// Aggregate aliases across vault.
+    Aliases(GraphWindowArgs),
+    /// Aggregate task counts across vault.
+    Tasks(TaskListArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCommands {
+    /// List extracted markdown tasks.
+    List(TaskListArgs),
+    /// Update checkbox state on one task line.
+    SetState(TaskSetStateArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -223,6 +309,126 @@ struct SearchQueryArgs {
     offset: u32,
 }
 
+#[derive(Debug, Clone, Args, Serialize)]
+struct BaseSchemaArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Base id or normalized base file path.
+    #[arg(long)]
+    path_or_id: String,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
+struct GraphWindowArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
+struct GraphWalkArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Root note path.
+    #[arg(long)]
+    path: String,
+    /// Maximum BFS depth.
+    #[arg(long, default_value_t = 2)]
+    depth: u32,
+    /// Maximum row count.
+    #[arg(long, default_value_t = 200)]
+    limit: u32,
+    /// Include unresolved links in traversal.
+    #[arg(long, default_value_t = false)]
+    include_unresolved: bool,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
+struct TaskListArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Optional state filter: open|done|cancelled.
+    #[arg(long)]
+    state: Option<String>,
+    /// Optional text filter.
+    #[arg(long)]
+    query: Option<String>,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
+struct TaskSetStateArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Vault-relative normalized note path.
+    #[arg(long)]
+    path: String,
+    /// One-based line number of task.
+    #[arg(long)]
+    line: usize,
+    /// Target state: open|done|cancelled.
+    #[arg(long)]
+    state: String,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
+struct QueryArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Scope selector: docs|graph|task|meta:tags|meta:aliases|meta:properties|base:<id-or-path>
+    #[arg(long)]
+    from: String,
+    /// Optional free text query.
+    #[arg(long)]
+    query: Option<String>,
+    /// Optional note path (for graph outgoing/backlinks).
+    #[arg(long)]
+    path: Option<String>,
+    /// Optional base view name when `--from base:<id>`.
+    #[arg(long)]
+    view_name: Option<String>,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
 impl VaultPathArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
@@ -259,6 +465,42 @@ impl SearchQueryArgs {
     }
 }
 
+impl BaseSchemaArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl GraphWindowArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl GraphWalkArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl TaskListArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl TaskSetStateArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl QueryArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct CommandResult {
     command: String,
@@ -270,6 +512,25 @@ struct CommandResult {
 struct ResolvedVaultPathArgs {
     vault_root: String,
     db_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExtractedTask {
+    path: String,
+    line: usize,
+    state: String,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedEdge {
+    link_id: String,
+    source_file_id: String,
+    source_path: String,
+    target_file_id: Option<String>,
+    target_path: Option<String>,
+    raw_target: String,
+    is_unresolved: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -307,6 +568,12 @@ fn main() -> Result<()> {
 
 fn dispatch(command: Commands, allow_writes: bool) -> Result<CommandResult> {
     match command {
+        Commands::Doc { command } => handle_doc(command, allow_writes),
+        Commands::Base { command } => handle_base(command),
+        Commands::Graph { command } => handle_graph(command),
+        Commands::Meta { command } => handle_meta(command),
+        Commands::Task { command } => handle_task(command, allow_writes),
+        Commands::Query(args) => handle_query(args),
         Commands::Vault { command } => handle_vault(command),
         Commands::Note { command } => handle_note(command, allow_writes),
         Commands::Links { command } => handle_links(command),
@@ -322,6 +589,663 @@ fn render_output(json: bool, result: &CommandResult) -> Result<String> {
     } else {
         Ok(result.summary.clone())
     }
+}
+
+fn retag_result(mut result: CommandResult, command: &str, summary: &str) -> CommandResult {
+    result.command = command.to_string();
+    result.summary = summary.to_string();
+    result
+}
+
+fn handle_doc(command: DocCommands, allow_writes: bool) -> Result<CommandResult> {
+    match command {
+        DocCommands::Read(args) => Ok(retag_result(
+            handle_note(NoteCommands::Get(args), allow_writes)?,
+            "doc.read",
+            "doc read completed",
+        )),
+        DocCommands::Write(args) => Ok(retag_result(
+            handle_note(NoteCommands::Put(args), allow_writes)?,
+            "doc.write",
+            "doc write completed",
+        )),
+        DocCommands::List(args) => Ok(retag_result(
+            handle_note(NoteCommands::List(args), allow_writes)?,
+            "doc.list",
+            "doc list completed",
+        )),
+    }
+}
+
+fn handle_base(command: BaseCommands) -> Result<CommandResult> {
+    match command {
+        BaseCommands::List(args) => Ok(retag_result(
+            handle_bases(BasesCommands::List(args))?,
+            "base.list",
+            "base list completed",
+        )),
+        BaseCommands::View(args) => Ok(retag_result(
+            handle_bases(BasesCommands::View(args))?,
+            "base.view",
+            "base view completed",
+        )),
+        BaseCommands::Schema(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let base = BasesRepository::list_with_paths(&connection)
+                .map_err(|source| anyhow!("query bases failed: {source}"))?
+                .into_iter()
+                .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
+                .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
+            let document = decode_base_document(&base.config_json)?;
+            let views = document
+                .views
+                .iter()
+                .map(|view| {
+                    serde_json::json!({
+                        "name": view.name,
+                        "kind": view.kind.as_str(),
+                        "source": view.source,
+                        "columns": view.columns.iter().map(|column| {
+                            serde_json::json!({
+                                "name": column.key,
+                                "label": column.label,
+                                "hidden": column.hidden,
+                                "width": column.width,
+                                "filterable": true,
+                                "sortable": true,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "base.schema".to_string(),
+                summary: "base schema completed".to_string(),
+                args: serde_json::json!({
+                    "base_id": base.base_id,
+                    "file_path": base.file_path,
+                    "views": views,
+                }),
+            })
+        }
+    }
+}
+
+fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
+    match command {
+        GraphCommands::Outgoing(args) => Ok(retag_result(
+            handle_links(LinksCommands::Outgoing(args))?,
+            "graph.outgoing",
+            "graph outgoing completed",
+        )),
+        GraphCommands::Backlinks(args) => Ok(retag_result(
+            handle_links(LinksCommands::Backlinks(args))?,
+            "graph.backlinks",
+            "graph backlinks completed",
+        )),
+        GraphCommands::Unresolved(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let rows = BacklinkGraphService
+                .unresolved_links(&connection)
+                .map_err(|source| anyhow!("query unresolved links failed: {source}"))?;
+            let total = rows.len();
+            let items = paginate_json_items(
+                rows.into_iter().map(link_edge_to_json).collect::<Vec<_>>(),
+                args.limit,
+                args.offset,
+            );
+            Ok(CommandResult {
+                command: "graph.unresolved".to_string(),
+                summary: "graph unresolved completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Deadends(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
+            let mut incoming_counts = HashMap::<String, usize>::new();
+            let mut outgoing_counts = HashMap::<String, usize>::new();
+            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
+                *outgoing_counts
+                    .entry(edge.source_file_id.clone())
+                    .or_insert(0) += 1;
+                if let Some(target_id) = &edge.target_file_id {
+                    *incoming_counts.entry(target_id.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut items = paths_by_id
+                .iter()
+                .filter_map(|(file_id, path)| {
+                    let incoming = *incoming_counts.get(file_id).unwrap_or(&0);
+                    let outgoing = *outgoing_counts.get(file_id).unwrap_or(&0);
+                    (incoming > 0 && outgoing == 0).then_some(serde_json::json!({
+                        "file_id": file_id,
+                        "path": path,
+                        "incoming_resolved": incoming,
+                        "outgoing_resolved": outgoing,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            items.sort_by(|left, right| {
+                left["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["path"].as_str().unwrap_or_default())
+            });
+            let total = items.len();
+            let items = paginate_json_items(items, args.limit, args.offset);
+            Ok(CommandResult {
+                command: "graph.deadends".to_string(),
+                summary: "graph deadends completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Orphans(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
+            let mut degree = HashMap::<String, usize>::new();
+            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
+                *degree.entry(edge.source_file_id.clone()).or_insert(0) += 1;
+                if let Some(target_id) = &edge.target_file_id {
+                    *degree.entry(target_id.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut items = paths_by_id
+                .iter()
+                .filter_map(|(file_id, path)| {
+                    (*degree.get(file_id).unwrap_or(&0) == 0).then_some(serde_json::json!({
+                        "file_id": file_id,
+                        "path": path,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            items.sort_by(|left, right| {
+                left["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["path"].as_str().unwrap_or_default())
+            });
+            let total = items.len();
+            let items = paginate_json_items(items, args.limit, args.offset);
+            Ok(CommandResult {
+                command: "graph.orphans".to_string(),
+                summary: "graph orphans completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Components(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
+            let mut adjacency = HashMap::<String, Vec<String>>::new();
+            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
+                if let Some(target_id) = &edge.target_file_id {
+                    adjacency
+                        .entry(edge.source_file_id.clone())
+                        .or_default()
+                        .push(target_id.clone());
+                    adjacency
+                        .entry(target_id.clone())
+                        .or_default()
+                        .push(edge.source_file_id.clone());
+                }
+            }
+            let mut visited = HashSet::<String>::new();
+            let mut components = Vec::new();
+            let mut ids = paths_by_id.keys().cloned().collect::<Vec<_>>();
+            ids.sort();
+            for root in ids {
+                if visited.contains(&root) {
+                    continue;
+                }
+                let mut queue = VecDeque::from([root.clone()]);
+                let mut members = Vec::new();
+                visited.insert(root.clone());
+                while let Some(current) = queue.pop_front() {
+                    members.push(current.clone());
+                    for next in adjacency.get(&current).into_iter().flatten() {
+                        if visited.insert(next.clone()) {
+                            queue.push_back(next.clone());
+                        }
+                    }
+                }
+                let mut paths = members
+                    .iter()
+                    .filter_map(|file_id| paths_by_id.get(file_id).cloned())
+                    .collect::<Vec<_>>();
+                paths.sort();
+                components.push(serde_json::json!({
+                    "size": members.len(),
+                    "paths": paths,
+                }));
+            }
+            components.sort_by(|left, right| {
+                right["size"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    .cmp(&left["size"].as_u64().unwrap_or(0))
+            });
+            let total = components.len();
+            let items = paginate_json_items(components, args.limit, args.offset);
+            Ok(CommandResult {
+                command: "graph.components".to_string(),
+                summary: "graph components completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Walk(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
+            let source_by_path = paths_by_id
+                .iter()
+                .map(|(file_id, path)| (path.clone(), file_id.clone()))
+                .collect::<HashMap<_, _>>();
+            let Some(start_id) = source_by_path.get(&args.path) else {
+                return Ok(CommandResult {
+                    command: "graph.walk".to_string(),
+                    summary: "graph walk completed".to_string(),
+                    args: serde_json::json!({
+                        "path": args.path,
+                        "depth": args.depth,
+                        "total": 0,
+                        "items": [],
+                    }),
+                });
+            };
+
+            let mut outgoing = HashMap::<String, Vec<&ResolvedEdge>>::new();
+            let mut incoming = HashMap::<String, Vec<&ResolvedEdge>>::new();
+            for edge in &edges {
+                outgoing
+                    .entry(edge.source_file_id.clone())
+                    .or_default()
+                    .push(edge);
+                if let Some(target_id) = &edge.target_file_id {
+                    incoming.entry(target_id.clone()).or_default().push(edge);
+                }
+            }
+
+            let mut queue = VecDeque::from([(start_id.clone(), 0_u32)]);
+            let mut visited_depth = HashMap::<String, u32>::from([(start_id.clone(), 0)]);
+            let mut traversed = Vec::new();
+            while let Some((node_id, depth)) = queue.pop_front() {
+                if depth >= args.depth {
+                    continue;
+                }
+
+                for edge in outgoing.get(&node_id).into_iter().flatten() {
+                    if edge.is_unresolved && !args.include_unresolved {
+                        continue;
+                    }
+                    let next_id = edge.target_file_id.clone();
+                    traversed.push(serde_json::json!({
+                        "depth": depth + 1,
+                        "direction": "outgoing",
+                        "link_id": edge.link_id,
+                        "source_path": edge.source_path,
+                        "target_path": edge.target_path,
+                        "raw_target": edge.raw_target,
+                        "resolved": !edge.is_unresolved && edge.target_file_id.is_some(),
+                    }));
+                    if let Some(next_id) = next_id {
+                        let next_depth = depth + 1;
+                        let should_visit = visited_depth
+                            .get(&next_id)
+                            .map(|seen_depth| next_depth < *seen_depth)
+                            .unwrap_or(true);
+                        if should_visit {
+                            visited_depth.insert(next_id.clone(), next_depth);
+                            queue.push_back((next_id, next_depth));
+                        }
+                    }
+                    if traversed.len() >= args.limit as usize {
+                        break;
+                    }
+                }
+                if traversed.len() >= args.limit as usize {
+                    break;
+                }
+
+                for edge in incoming.get(&node_id).into_iter().flatten() {
+                    traversed.push(serde_json::json!({
+                        "depth": depth + 1,
+                        "direction": "incoming",
+                        "link_id": edge.link_id,
+                        "source_path": edge.source_path,
+                        "target_path": edge.target_path,
+                        "raw_target": edge.raw_target,
+                        "resolved": !edge.is_unresolved && edge.target_file_id.is_some(),
+                    }));
+                    let next_id = edge.source_file_id.clone();
+                    let next_depth = depth + 1;
+                    let should_visit = visited_depth
+                        .get(&next_id)
+                        .map(|seen_depth| next_depth < *seen_depth)
+                        .unwrap_or(true);
+                    if should_visit {
+                        visited_depth.insert(next_id.clone(), next_depth);
+                        queue.push_back((next_id, next_depth));
+                    }
+                    if traversed.len() >= args.limit as usize {
+                        break;
+                    }
+                }
+                if traversed.len() >= args.limit as usize {
+                    break;
+                }
+            }
+            Ok(CommandResult {
+                command: "graph.walk".to_string(),
+                summary: "graph walk completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "depth": args.depth,
+                    "total": traversed.len(),
+                    "items": traversed,
+                }),
+            })
+        }
+    }
+}
+
+fn handle_meta(command: MetaCommands) -> Result<CommandResult> {
+    match command {
+        MetaCommands::Properties(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT key, COUNT(*) AS total FROM properties GROUP BY key ORDER BY key ASC",
+                )
+                .context("prepare properties aggregate query")?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "key": row.get::<_, String>(0)?,
+                        "total": row.get::<_, u64>(1)?,
+                    }))
+                })
+                .context("query properties aggregate rows")?;
+            let mut items = Vec::new();
+            for row in rows {
+                items.push(row.context("map properties aggregate row")?);
+            }
+            let total = items.len();
+            let items = paginate_json_items(items, args.limit, args.offset);
+            Ok(CommandResult {
+                command: "meta.properties".to_string(),
+                summary: "meta properties completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        MetaCommands::Tags(args) => handle_meta_token_aggregate(args, "tags", "meta.tags"),
+        MetaCommands::Aliases(args) => handle_meta_token_aggregate(args, "aliases", "meta.aliases"),
+        MetaCommands::Tasks(args) => {
+            let result = handle_task(TaskCommands::List(args), false)?;
+            Ok(retag_result(result, "meta.tasks", "meta tasks completed"))
+        }
+    }
+}
+
+fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResult> {
+    match command {
+        TaskCommands::List(args) => {
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
+            let tasks = extract_tasks_from_vault(Path::new(&resolved.vault_root), &connection)?;
+            let mut filtered = tasks
+                .into_iter()
+                .filter(|task| {
+                    let state_matches = args
+                        .state
+                        .as_deref()
+                        .map(|state| task.state.eq_ignore_ascii_case(state))
+                        .unwrap_or(true);
+                    let query_matches = args
+                        .query
+                        .as_deref()
+                        .map(|query| {
+                            let query = query.to_ascii_lowercase();
+                            task.text.to_ascii_lowercase().contains(&query)
+                                || task.path.to_ascii_lowercase().contains(&query)
+                        })
+                        .unwrap_or(true);
+                    state_matches && query_matches
+                })
+                .collect::<Vec<_>>();
+            filtered.sort_by(|left, right| {
+                (left.path.as_str(), left.line).cmp(&(right.path.as_str(), right.line))
+            });
+            let total = filtered.len();
+            let items = paginate_json_items(
+                filtered
+                    .into_iter()
+                    .map(|task| serde_json::to_value(task).unwrap_or(JsonValue::Null))
+                    .collect::<Vec<_>>(),
+                args.limit,
+                args.offset,
+            );
+            Ok(CommandResult {
+                command: "task.list".to_string(),
+                summary: "task list completed".to_string(),
+                args: serde_json::json!({
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        TaskCommands::SetState(args) => {
+            ensure_writes_enabled(allow_writes, "task.set-state")?;
+            let resolved = args.resolve()?;
+            let absolute = Path::new(&resolved.vault_root).join(&args.path);
+            let markdown = fs::read_to_string(&absolute)
+                .with_context(|| format!("read markdown note '{}'", absolute.display()))?;
+            let mut lines = markdown.lines().map(str::to_string).collect::<Vec<_>>();
+            if args.line == 0 || args.line > lines.len() {
+                return Err(anyhow!(
+                    "task line is out of range for '{}': {}",
+                    args.path,
+                    args.line
+                ));
+            }
+            let index = args.line - 1;
+            let updated = update_task_line_state(&lines[index], &args.state)?;
+            lines[index] = updated;
+            let mut rebuilt = lines.join("\n");
+            if markdown.ends_with('\n') {
+                rebuilt.push('\n');
+            }
+            fs::write(&absolute, rebuilt)
+                .with_context(|| format!("write markdown note '{}'", absolute.display()))?;
+
+            let mut connection = open_initialized_connection(&resolved)?;
+            WatchReconcileService::default()
+                .reconcile_once(
+                    Path::new(&resolved.vault_root),
+                    &mut connection,
+                    CasePolicy::Sensitive,
+                )
+                .map_err(|source| anyhow!("reconcile after task state update failed: {source}"))?;
+
+            Ok(CommandResult {
+                command: "task.set-state".to_string(),
+                summary: "task set-state completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "line": args.line,
+                    "state": args.state,
+                }),
+            })
+        }
+    }
+}
+
+fn handle_query(args: QueryArgs) -> Result<CommandResult> {
+    let from = args.from.trim();
+    let limit = args.limit.max(1);
+    if from.eq_ignore_ascii_case("docs") {
+        let resolved = args.resolve()?;
+        let connection = open_initialized_connection(&resolved)?;
+        let page = SearchQueryService
+            .query(
+                Path::new(&resolved.vault_root),
+                &connection,
+                SearchQueryRequest {
+                    query: args.query.clone().unwrap_or_default(),
+                    limit: u64::from(limit),
+                    offset: u64::from(args.offset),
+                },
+            )
+            .map_err(|source| anyhow!("query docs failed: {source}"))?;
+        let rows = page
+            .items
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({
+                    "file_id": item.file_id,
+                    "path": item.path,
+                    "title": item.title,
+                    "matched_in": item.matched_in,
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(CommandResult {
+            command: "query.run".to_string(),
+            summary: "query run completed".to_string(),
+            args: serde_json::json!({
+                "from": "docs",
+                "columns": ["file_id", "path", "title", "matched_in"],
+                "rows": rows,
+                "total": page.total,
+                "limit": page.limit,
+                "offset": page.offset,
+            }),
+        });
+    }
+
+    if let Some(base_id_or_path) = from.strip_prefix("base:") {
+        let view_name = args
+            .view_name
+            .clone()
+            .ok_or_else(|| anyhow!("query base scope requires --view-name"))?;
+        let result = handle_base(BaseCommands::View(BaseViewArgs {
+            vault_root: args.vault_root.clone(),
+            db_path: args.db_path.clone(),
+            path_or_id: base_id_or_path.to_string(),
+            view_name,
+            page: (args.offset / limit) + 1,
+            page_size: limit,
+        }))?;
+        return Ok(retag_result(result, "query.run", "query run completed"));
+    }
+
+    if from.eq_ignore_ascii_case("graph") {
+        let graph_result = if let Some(path) = &args.path {
+            handle_graph(GraphCommands::Outgoing(NotePathArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                path: path.clone(),
+            }))?
+        } else {
+            handle_graph(GraphCommands::Unresolved(GraphWindowArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                limit: args.limit,
+                offset: args.offset,
+            }))?
+        };
+        return Ok(retag_result(
+            graph_result,
+            "query.run",
+            "query run completed",
+        ));
+    }
+
+    if from.eq_ignore_ascii_case("task") {
+        let task_result = handle_task(
+            TaskCommands::List(TaskListArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                state: None,
+                query: args.query.clone(),
+                limit: args.limit,
+                offset: args.offset,
+            }),
+            false,
+        )?;
+        return Ok(retag_result(
+            task_result,
+            "query.run",
+            "query run completed",
+        ));
+    }
+
+    if from.eq_ignore_ascii_case("meta:tags") {
+        let result = handle_meta(MetaCommands::Tags(GraphWindowArgs {
+            vault_root: args.vault_root.clone(),
+            db_path: args.db_path.clone(),
+            limit: args.limit,
+            offset: args.offset,
+        }))?;
+        return Ok(retag_result(result, "query.run", "query run completed"));
+    }
+
+    if from.eq_ignore_ascii_case("meta:aliases") {
+        let result = handle_meta(MetaCommands::Aliases(GraphWindowArgs {
+            vault_root: args.vault_root.clone(),
+            db_path: args.db_path.clone(),
+            limit: args.limit,
+            offset: args.offset,
+        }))?;
+        return Ok(retag_result(result, "query.run", "query run completed"));
+    }
+
+    if from.eq_ignore_ascii_case("meta:properties") {
+        let result = handle_meta(MetaCommands::Properties(GraphWindowArgs {
+            vault_root: args.vault_root,
+            db_path: args.db_path,
+            limit: args.limit,
+            offset: args.offset,
+        }))?;
+        return Ok(retag_result(result, "query.run", "query run completed"));
+    }
+
+    Err(anyhow!(
+        "unsupported query scope '{}'; supported scopes: docs, graph, task, meta:tags, meta:aliases, meta:properties, base:<id-or-path>",
+        from
+    ))
 }
 
 fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
@@ -825,6 +1749,230 @@ fn handle_search(command: SearchCommands) -> Result<CommandResult> {
     }
 }
 
+fn paginate_json_items(items: Vec<JsonValue>, limit: u32, offset: u32) -> Vec<JsonValue> {
+    items
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect()
+}
+
+fn link_edge_to_json(edge: tao_sdk_service::LinkGraphEdge) -> JsonValue {
+    serde_json::json!({
+        "link_id": edge.link_id,
+        "source_file_id": edge.source_file_id,
+        "source_path": edge.source_path,
+        "raw_target": edge.raw_target,
+        "resolved_file_id": edge.resolved_file_id,
+        "resolved_path": edge.resolved_path,
+        "heading_slug": edge.heading_slug,
+        "block_id": edge.block_id,
+        "is_unresolved": edge.is_unresolved,
+    })
+}
+
+fn load_graph_snapshot(
+    connection: &Connection,
+) -> Result<(HashMap<String, String>, Vec<ResolvedEdge>)> {
+    let files = FilesRepository::list_all(connection)
+        .map_err(|source| anyhow!("list files for graph snapshot failed: {source}"))?;
+    let mut paths_by_id = HashMap::new();
+    for file in files.into_iter().filter(|file| file.is_markdown) {
+        paths_by_id.insert(file.file_id, file.normalized_path);
+    }
+
+    let mut statement = connection
+        .prepare(
+            "SELECT l.link_id, l.source_file_id, sf.normalized_path AS source_path, \
+                    l.resolved_file_id, tf.normalized_path AS target_path, \
+                    l.raw_target, l.is_unresolved \
+             FROM links l \
+             JOIN files sf ON sf.file_id = l.source_file_id \
+             LEFT JOIN files tf ON tf.file_id = l.resolved_file_id \
+             ORDER BY l.link_id ASC",
+        )
+        .context("prepare graph snapshot query")?;
+    let rows = statement
+        .query_map([], |row| {
+            let is_unresolved: i64 = row.get("is_unresolved")?;
+            Ok(ResolvedEdge {
+                link_id: row.get("link_id")?,
+                source_file_id: row.get("source_file_id")?,
+                source_path: row.get("source_path")?,
+                target_file_id: row.get("resolved_file_id")?,
+                target_path: row.get("target_path")?,
+                raw_target: row.get("raw_target")?,
+                is_unresolved: is_unresolved != 0,
+            })
+        })
+        .context("query graph snapshot rows")?;
+    let mut edges = Vec::new();
+    for row in rows {
+        edges.push(row.context("map graph snapshot row")?);
+    }
+    Ok((paths_by_id, edges))
+}
+
+fn handle_meta_token_aggregate(
+    args: GraphWindowArgs,
+    property_key: &str,
+    command: &str,
+) -> Result<CommandResult> {
+    let resolved = args.resolve()?;
+    let connection = open_initialized_connection(&resolved)?;
+    let rows = PropertiesRepository::list_by_key_with_paths(&connection, property_key)
+        .map_err(|source| anyhow!("query property key '{}' failed: {source}", property_key))?;
+    let mut counts = HashMap::<String, usize>::new();
+    for row in rows {
+        for token in extract_property_tokens(&row.value_json) {
+            *counts.entry(token).or_insert(0) += 1;
+        }
+    }
+    let mut items = counts
+        .into_iter()
+        .map(|(token, total)| serde_json::json!({ "token": token, "total": total }))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right["total"]
+            .as_u64()
+            .unwrap_or(0)
+            .cmp(&left["total"].as_u64().unwrap_or(0))
+            .then_with(|| {
+                left["token"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["token"].as_str().unwrap_or_default())
+            })
+    });
+    let total = items.len();
+    let items = paginate_json_items(items, args.limit, args.offset);
+    Ok(CommandResult {
+        command: command.to_string(),
+        summary: format!("{command} completed"),
+        args: serde_json::json!({
+            "total": total,
+            "limit": args.limit,
+            "offset": args.offset,
+            "items": items,
+        }),
+    })
+}
+
+fn extract_property_tokens(value_json: &str) -> Vec<String> {
+    let parsed = serde_json::from_str::<JsonValue>(value_json)
+        .unwrap_or_else(|_| JsonValue::String(value_json.to_string()));
+    let mut tokens = Vec::new();
+    collect_json_string_tokens(&parsed, &mut tokens);
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::<String>::new();
+    for token in tokens {
+        let key = token.to_ascii_lowercase();
+        if seen.insert(key) {
+            deduped.push(token);
+        }
+    }
+    deduped
+}
+
+fn collect_json_string_tokens(value: &JsonValue, out: &mut Vec<String>) {
+    match value {
+        JsonValue::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            for token in trimmed
+                .split([',', ' '])
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+            {
+                out.push(token.trim_start_matches('#').to_string());
+            }
+        }
+        JsonValue::Array(values) => {
+            for item in values {
+                collect_json_string_tokens(item, out);
+            }
+        }
+        JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::Object(_) => {}
+    }
+}
+
+fn extract_tasks_from_vault(
+    vault_root: &Path,
+    connection: &Connection,
+) -> Result<Vec<ExtractedTask>> {
+    let files = FilesRepository::list_all(connection)
+        .map_err(|source| anyhow!("list files for task extraction failed: {source}"))?;
+    let mut tasks = Vec::new();
+    for file in files.into_iter().filter(|file| file.is_markdown) {
+        let absolute = vault_root.join(&file.normalized_path);
+        let markdown = match fs::read_to_string(&absolute) {
+            Ok(markdown) => markdown,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(anyhow!(
+                    "read markdown file for task extraction failed '{}': {source}",
+                    absolute.display()
+                ));
+            }
+        };
+        for (index, line) in markdown.lines().enumerate() {
+            if let Some((state, text)) = parse_task_line(line) {
+                tasks.push(ExtractedTask {
+                    path: file.normalized_path.clone(),
+                    line: index + 1,
+                    state: state.to_string(),
+                    text: text.to_string(),
+                });
+            }
+        }
+    }
+    Ok(tasks)
+}
+
+fn parse_task_line(line: &str) -> Option<(&'static str, &str)> {
+    let trimmed = line.trim_start();
+    let (state, remainder) = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        ("open", rest)
+    } else if let Some(rest) = trimmed
+        .strip_prefix("- [x] ")
+        .or_else(|| trimmed.strip_prefix("- [X] "))
+    {
+        ("done", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
+        ("cancelled", rest)
+    } else {
+        return None;
+    };
+    Some((state, remainder.trim()))
+}
+
+fn update_task_line_state(line: &str, state: &str) -> Result<String> {
+    let trimmed = line.trim_start();
+    let indent_len = line.len() - trimmed.len();
+    let indent = &line[..indent_len];
+    let content = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        rest
+    } else if let Some(rest) = trimmed
+        .strip_prefix("- [x] ")
+        .or_else(|| trimmed.strip_prefix("- [X] "))
+    {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
+        rest
+    } else {
+        return Err(anyhow!("line does not contain a markdown checkbox task"));
+    };
+    let marker = match state.to_ascii_lowercase().as_str() {
+        "open" => "[ ]",
+        "done" => "[x]",
+        "cancelled" => "[-]",
+        _ => return Err(anyhow!("unsupported task state '{}'", state)),
+    };
+    Ok(format!("{indent}- {marker} {content}"))
+}
+
 fn resolve_vault_paths(
     vault_root: &str,
     db_path_override: Option<&str>,
@@ -1021,11 +2169,18 @@ mod tests {
         let rendered = String::from_utf8(output).expect("utf8 help");
 
         assert!(rendered.contains("vault"));
+        assert!(rendered.contains("doc"));
+        assert!(rendered.contains("base"));
+        assert!(rendered.contains("graph"));
+        assert!(rendered.contains("meta"));
+        assert!(rendered.contains("task"));
+        assert!(rendered.contains("query"));
         assert!(rendered.contains("note"));
         assert!(rendered.contains("links"));
         assert!(rendered.contains("properties"));
         assert!(rendered.contains("bases"));
         assert!(rendered.contains("search"));
+        assert!(!rendered.contains("hubs"));
     }
 
     #[test]
