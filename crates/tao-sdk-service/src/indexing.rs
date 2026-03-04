@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,8 +22,8 @@ use tao_sdk_storage::{
     PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository,
 };
 use tao_sdk_vault::{
-    CasePolicy, FileFingerprint, FileFingerprintError, FileFingerprintService,
-    PathCanonicalizationError, VaultScanError, VaultScanService,
+    CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
+    VaultScanError, VaultScanService,
 };
 use thiserror::Error;
 
@@ -69,11 +70,6 @@ impl FullIndexService {
             source: Box::new(source),
         })?;
 
-        let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
-            .map_err(|source| FullIndexError::CreateFingerprintService {
-                source: Box::new(source),
-            })?;
-
         let markdown_candidates: Vec<String> = manifest
             .entries
             .iter()
@@ -88,35 +84,48 @@ impl FullIndexService {
         let mut search_records = Vec::new();
 
         for entry in &manifest.entries {
-            let fingerprint =
-                fingerprint_service
-                    .fingerprint(&entry.relative)
-                    .map_err(|source| FullIndexError::Fingerprint {
-                        path: entry.absolute.clone(),
-                        source: Box::new(source),
-                    })?;
+            let metadata =
+                fs::metadata(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
+                    path: entry.absolute.clone(),
+                    source,
+                })?;
+            let modified_unix_ms = metadata
+                .modified()
+                .map_err(|source| FullIndexError::ReadFile {
+                    path: entry.absolute.clone(),
+                    source,
+                })?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|source| FullIndexError::Clock {
+                    source: Box::new(source),
+                })?
+                .as_millis();
 
-            let modified_unix_ms = i64::try_from(fingerprint.modified_unix_ms).map_err(|_| {
-                FullIndexError::TimestampOverflow {
-                    value: fingerprint.modified_unix_ms,
-                }
-            })?;
+            let modified_unix_ms =
+                i64::try_from(modified_unix_ms).map_err(|_| FullIndexError::TimestampOverflow {
+                    value: modified_unix_ms,
+                })?;
+            let hash_blake3 =
+                hash_file_blake3(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
+                    path: entry.absolute.clone(),
+                    source,
+                })?;
 
-            let file_id = deterministic_id("file", &fingerprint.normalized);
-            file_id_by_path.insert(fingerprint.normalized.clone(), file_id.clone());
+            let file_id = deterministic_id("file", &entry.normalized);
+            file_id_by_path.insert(entry.normalized.clone(), file_id.clone());
 
             file_records.push(FileRecordInput {
                 file_id: file_id.clone(),
-                normalized_path: fingerprint.normalized.clone(),
-                match_key: fingerprint.match_key,
-                absolute_path: fingerprint.absolute.to_string_lossy().to_string(),
-                size_bytes: fingerprint.size_bytes,
+                normalized_path: entry.normalized.clone(),
+                match_key: entry.match_key.clone(),
+                absolute_path: entry.absolute.to_string_lossy().to_string(),
+                size_bytes: metadata.len(),
                 modified_unix_ms,
-                hash_blake3: fingerprint.hash_blake3,
-                is_markdown: fingerprint.normalized.ends_with(".md"),
+                hash_blake3,
+                is_markdown: entry.normalized.ends_with(".md"),
             });
 
-            if fingerprint.normalized.ends_with(".md") {
+            if entry.normalized.ends_with(".md") {
                 let markdown = fs::read_to_string(&entry.absolute).map_err(|source| {
                     FullIndexError::ReadFile {
                         path: entry.absolute.clone(),
@@ -127,7 +136,7 @@ impl FullIndexService {
                 let parsed = self
                     .parser
                     .parse(MarkdownParseRequest {
-                        normalized_path: fingerprint.normalized.clone(),
+                        normalized_path: entry.normalized.clone(),
                         raw: markdown.clone(),
                     })
                     .map_err(|source| FullIndexError::ParseMarkdown {
@@ -137,7 +146,7 @@ impl FullIndexService {
 
                 let property_records = build_property_records(
                     &file_id,
-                    &fingerprint.normalized,
+                    &entry.normalized,
                     &markdown,
                     &entry.absolute,
                 )?;
@@ -151,21 +160,20 @@ impl FullIndexService {
                 let block_ids = extract_block_ids(&parsed.body);
                 search_records.push(SearchIndexRecordInput {
                     file_id: file_id.clone(),
-                    normalized_path_lc: fingerprint.normalized.to_ascii_lowercase(),
-                    title_lc: title_from_normalized_path(&fingerprint.normalized)
-                        .to_ascii_lowercase(),
+                    normalized_path_lc: entry.normalized.to_ascii_lowercase(),
+                    title_lc: title_from_normalized_path(&entry.normalized).to_ascii_lowercase(),
                     content_lc: markdown.to_ascii_lowercase(),
                 });
 
                 markdown_docs.push(MarkdownIndexDocument {
                     file_id,
-                    source_path: fingerprint.normalized,
+                    source_path: entry.normalized.clone(),
                     links,
                     heading_slugs,
                     block_ids,
                     properties: property_records,
                 });
-            } else if fingerprint.normalized.ends_with(".base") {
+            } else if entry.normalized.ends_with(".base") {
                 let raw = fs::read_to_string(&entry.absolute).map_err(|source| {
                     FullIndexError::ReadFile {
                         path: entry.absolute.clone(),
@@ -181,7 +189,7 @@ impl FullIndexService {
                     })?;
 
                 base_records.push(BaseRecordInput {
-                    base_id: deterministic_id("base", &fingerprint.normalized),
+                    base_id: deterministic_id("base", &entry.normalized),
                     file_id,
                     config_json,
                 });
@@ -1224,11 +1232,6 @@ impl ReconciliationScannerService {
                 source: Box::new(source),
             })?;
 
-        let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
-            .map_err(|source| ReconciliationScanError::CreateFingerprintService {
-                source: Box::new(source),
-            })?;
-
         let existing = FilesRepository::list_all(connection).map_err(|source| {
             ReconciliationScanError::ListIndexedFiles {
                 source: Box::new(source),
@@ -1247,23 +1250,45 @@ impl ReconciliationScannerService {
         let mut updated_paths = 0_u64;
 
         for entry in &manifest.entries {
-            let fingerprint =
-                fingerprint_service
-                    .fingerprint(&entry.relative)
-                    .map_err(|source| ReconciliationScanError::Fingerprint {
-                        path: entry.absolute.clone(),
-                        source: Box::new(source),
-                    })?;
+            let metadata = fs::metadata(&entry.absolute).map_err(|source| {
+                ReconciliationScanError::Metadata {
+                    path: entry.absolute.clone(),
+                    source,
+                }
+            })?;
+            let modified_unix_ms = metadata
+                .modified()
+                .map_err(|source| ReconciliationScanError::ModifiedTime {
+                    path: entry.absolute.clone(),
+                    source,
+                })?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|source| ReconciliationScanError::InvalidModifiedTime {
+                    path: entry.absolute.clone(),
+                    source,
+                })?
+                .as_millis();
+            let modified_unix_ms = i64::try_from(modified_unix_ms).map_err(|_| {
+                ReconciliationScanError::ModifiedTimeOverflow {
+                    path: entry.absolute.clone(),
+                    value: modified_unix_ms,
+                }
+            })?;
 
-            seen_paths.insert(fingerprint.normalized.clone());
+            seen_paths.insert(entry.normalized.clone());
 
-            if let Some(indexed) = existing_by_path.get(&fingerprint.normalized) {
-                if !indexed_record_matches_fingerprint(indexed, &fingerprint) {
-                    updated_changed_paths.push(PathBuf::from(fingerprint.normalized));
+            if let Some(indexed) = existing_by_path.get(&entry.normalized) {
+                if !indexed_record_matches_manifest_entry(
+                    indexed,
+                    entry,
+                    metadata.len(),
+                    modified_unix_ms,
+                ) {
+                    updated_changed_paths.push(PathBuf::from(&entry.normalized));
                     updated_paths += 1;
                 }
             } else {
-                inserted_changed_paths.push(PathBuf::from(fingerprint.normalized));
+                inserted_changed_paths.push(PathBuf::from(&entry.normalized));
                 inserted_paths += 1;
             }
         }
@@ -1326,20 +1351,17 @@ impl ReconciliationScannerService {
     }
 }
 
-fn indexed_record_matches_fingerprint(
+fn indexed_record_matches_manifest_entry(
     indexed: &tao_sdk_storage::FileRecord,
-    fingerprint: &FileFingerprint,
+    entry: &tao_sdk_vault::VaultManifestEntry,
+    size_bytes: u64,
+    modified_unix_ms: i64,
 ) -> bool {
-    let Ok(modified_unix_ms) = i64::try_from(fingerprint.modified_unix_ms) else {
-        return false;
-    };
-
-    indexed.normalized_path == fingerprint.normalized
-        && indexed.match_key == fingerprint.match_key
-        && indexed.absolute_path == fingerprint.absolute.to_string_lossy()
-        && indexed.size_bytes == fingerprint.size_bytes
+    indexed.normalized_path == entry.normalized
+        && indexed.match_key == entry.match_key
+        && indexed.absolute_path == entry.absolute.to_string_lossy()
+        && indexed.size_bytes == size_bytes
         && indexed.modified_unix_ms == modified_unix_ms
-        && indexed.hash_blake3 == fingerprint.hash_blake3
 }
 
 /// Issue categories emitted by the index consistency checker.
@@ -1915,6 +1937,24 @@ struct MarkdownIndexDocument {
     heading_slugs: Vec<String>,
     block_ids: Vec<String>,
     properties: Vec<PropertyRecordInput>,
+}
+
+fn hash_file_blake3(path: &Path) -> Result<String, std::io::Error> {
+    const HASH_BUFFER_BYTES: usize = 64 * 1024;
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::with_capacity(HASH_BUFFER_BYTES, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; HASH_BUFFER_BYTES];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn title_from_normalized_path(path: &str) -> String {
@@ -2499,21 +2539,40 @@ pub enum ReconciliationScanError {
         #[source]
         source: Box<VaultScanError>,
     },
-    /// Fingerprint service initialization failed.
-    #[error("failed to initialize fingerprint service during reconciliation: {source}")]
-    CreateFingerprintService {
-        /// Fingerprint service path error.
-        #[source]
-        source: Box<PathCanonicalizationError>,
-    },
-    /// Fingerprinting one file failed.
-    #[error("failed to fingerprint file during reconciliation '{path}': {source}")]
-    Fingerprint {
+    /// Reading scanned file metadata failed.
+    #[error("failed to read file metadata during reconciliation for '{path}': {source}")]
+    Metadata {
         /// Absolute file path.
         path: PathBuf,
-        /// Fingerprint error.
+        /// Filesystem error.
         #[source]
-        source: Box<FileFingerprintError>,
+        source: std::io::Error,
+    },
+    /// Reading scanned file modified time failed.
+    #[error("failed to read modified time during reconciliation for '{path}': {source}")]
+    ModifiedTime {
+        /// Absolute file path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Scanned file modified timestamp precedes unix epoch.
+    #[error("modified time for reconciliation path '{path}' is before unix epoch: {source}")]
+    InvalidModifiedTime {
+        /// Absolute file path.
+        path: PathBuf,
+        /// System time conversion error.
+        #[source]
+        source: std::time::SystemTimeError,
+    },
+    /// Scanned file modified timestamp overflows persisted integer range.
+    #[error("modified timestamp for reconciliation path '{path}' overflows i64: {value}")]
+    ModifiedTimeOverflow {
+        /// Absolute file path.
+        path: PathBuf,
+        /// Raw modified timestamp value.
+        value: u128,
     },
     /// Loading current indexed file rows failed.
     #[error("failed to list indexed file rows during reconciliation: {source}")]

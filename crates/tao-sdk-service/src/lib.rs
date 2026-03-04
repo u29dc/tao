@@ -35,7 +35,8 @@ pub use indexing::{
 };
 pub use tracing_hooks::ServiceTraceContext;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
     BaseColumnConfig, BaseDiagnostic, BaseDocument, BaseFilterClause, BaseFilterOp, BaseSortClause,
@@ -1427,28 +1428,80 @@ impl BaseTableExecutorService {
             .map(|(index, row)| (row.file_id.clone(), index))
             .collect::<HashMap<_, _>>();
 
-        for key in &plan.required_property_keys {
-            let rows = PropertiesRepository::list_by_key_with_paths(connection, key).map_err(
-                |source| BaseTableExecutorError::PropertiesRepository {
-                    key: key.clone(),
+        if !plan.required_property_keys.is_empty() {
+            let key_placeholders = (1..=plan.required_property_keys.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source_param = plan.required_property_keys.len() + 1;
+            let like_param = source_param + 1;
+            let query = format!(
+                r#"
+SELECT
+  p.file_id,
+  p.key,
+  p.value_json
+FROM properties p
+INNER JOIN files f ON f.file_id = p.file_id
+WHERE f.is_markdown = 1
+  AND p.key IN ({key_placeholders})
+  AND (
+    ?{source_param} IS NULL
+    OR f.normalized_path = ?{source_param}
+    OR f.normalized_path LIKE ?{like_param}
+  )
+ORDER BY p.file_id ASC, p.key ASC
+"#
+            );
+            let mut parameters = plan
+                .required_property_keys
+                .iter()
+                .map(|key| SqlValue::Text(key.clone()))
+                .collect::<Vec<_>>();
+            if let Some(source_prefix) = plan.source_prefix.as_ref() {
+                parameters.push(SqlValue::Text(source_prefix.clone()));
+                parameters.push(SqlValue::Text(format!("{source_prefix}/%")));
+            } else {
+                parameters.push(SqlValue::Null);
+                parameters.push(SqlValue::Null);
+            }
+
+            let mut statement =
+                connection
+                    .prepare(&query)
+                    .map_err(|source| BaseTableExecutorError::Sql {
+                        operation: "prepare_property_projection",
+                        source,
+                    })?;
+            let rows = statement
+                .query_map(params_from_iter(parameters), |row| {
+                    Ok((
+                        row.get::<_, String>("file_id")?,
+                        row.get::<_, String>("key")?,
+                        row.get::<_, String>("value_json")?,
+                    ))
+                })
+                .map_err(|source| BaseTableExecutorError::Sql {
+                    operation: "query_property_projection",
                     source,
-                },
-            )?;
+                })?;
             for row in rows {
-                let Some(candidate_index) = candidate_indices.get(&row.file_id).copied() else {
+                let (file_id, key, value_json) =
+                    row.map_err(|source| BaseTableExecutorError::Sql {
+                        operation: "map_property_projection_row",
+                        source,
+                    })?;
+                let Some(candidate_index) = candidate_indices.get(&file_id).copied() else {
                     continue;
                 };
-                let value =
-                    serde_json::from_str::<JsonValue>(&row.value_json).map_err(|source| {
-                        BaseTableExecutorError::ParsePropertyValue {
-                            file_id: row.file_id.clone(),
-                            key: key.clone(),
-                            source,
-                        }
-                    })?;
-                candidates[candidate_index]
-                    .properties
-                    .insert(key.clone(), value);
+                let value = serde_json::from_str::<JsonValue>(&value_json).map_err(|source| {
+                    BaseTableExecutorError::ParsePropertyValue {
+                        file_id: file_id.clone(),
+                        key: key.clone(),
+                        source,
+                    }
+                })?;
+                candidates[candidate_index].properties.insert(key, value);
             }
         }
 
@@ -1774,6 +1827,15 @@ pub enum BaseTableExecutorError {
         /// Repository error.
         #[source]
         source: tao_sdk_storage::PropertiesRepositoryError,
+    },
+    /// SQL execution failed during property projection.
+    #[error("base table property projection sql operation '{operation}' failed: {source}")]
+    Sql {
+        /// SQL operation label.
+        operation: &'static str,
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
     },
     /// Stored property JSON payload could not be decoded.
     #[error("failed to parse property json for file '{file_id}' key '{key}': {source}")]

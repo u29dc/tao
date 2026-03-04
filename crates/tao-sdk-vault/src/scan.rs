@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::{CasePolicy, PathCanonicalizationError, PathCanonicalizationService};
@@ -76,19 +77,25 @@ impl VaultScanService {
                 continue;
             }
 
-            let canonical = self
-                .canonicalizer
-                .canonicalize(entry.path())
-                .map_err(|source| VaultScanError::Canonicalize {
-                    path: entry.path().to_path_buf(),
-                    source,
-                })?;
+            let absolute = entry.path().to_path_buf();
+            let relative = absolute
+                .strip_prefix(&root)
+                .map_err(|_| VaultScanError::OutsideRoot {
+                    root: root.clone(),
+                    path: absolute.clone(),
+                })?
+                .to_path_buf();
+            let normalized = normalize_relative_path(&relative)?;
+            let match_key = match self.canonicalizer.case_policy() {
+                CasePolicy::Sensitive => normalized.clone(),
+                CasePolicy::Insensitive => normalized.to_ascii_lowercase(),
+            };
 
             entries.push(VaultManifestEntry {
-                absolute: canonical.absolute,
-                relative: canonical.relative,
-                normalized: canonical.normalized,
-                match_key: canonical.match_key,
+                absolute,
+                relative,
+                normalized,
+                match_key,
             });
         }
 
@@ -100,6 +107,30 @@ impl VaultScanService {
 
         Ok(VaultManifest { root, entries })
     }
+}
+
+fn normalize_relative_path(path: &Path) -> Result<String, VaultScanError> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| VaultScanError::NonUtf8Component {
+                        path: path.to_path_buf(),
+                    })?;
+                segments.push(value.nfc().collect::<String>());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(VaultScanError::InvalidPathComponent {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+    }
+
+    Ok(segments.join("/"))
 }
 
 fn should_descend(path: &Path, root: &Path) -> bool {
@@ -140,6 +171,26 @@ pub enum VaultScanError {
         /// Canonicalization error.
         #[source]
         source: PathCanonicalizationError,
+    },
+    /// Walk entry path resolved outside canonical vault root.
+    #[error("scanned path '{path}' resolved outside vault root '{root}'")]
+    OutsideRoot {
+        /// Canonical root path.
+        root: PathBuf,
+        /// Walk entry path.
+        path: PathBuf,
+    },
+    /// Path contains non-utf8 component.
+    #[error("scanned path '{path}' contains a non-utf8 path component")]
+    NonUtf8Component {
+        /// Relative path that failed normalization.
+        path: PathBuf,
+    },
+    /// Path contains unsupported component after root-stripping.
+    #[error("scanned path '{path}' contains unsupported path components")]
+    InvalidPathComponent {
+        /// Relative path that failed normalization.
+        path: PathBuf,
     },
 }
 

@@ -14,8 +14,8 @@ use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_properties::TypedPropertyValue;
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
-    BaseTableExecutorService, FullIndexService, HealthSnapshotService, PropertyUpdateService,
-    SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
+    BaseTableExecutorService, HealthSnapshotService, PropertyUpdateService, SdkConfigLoader,
+    SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
@@ -78,7 +78,7 @@ enum VaultCommands {
     Stats(VaultPathArgs),
     /// Validate migration state/checksums before startup migration apply.
     Preflight(VaultPathArgs),
-    /// Rebuild full index.
+    /// Run smart reindex (reconcile drift and refresh index totals).
     Reindex(VaultPathArgs),
     /// Apply incremental reconcile pass.
     Reconcile(VaultPathArgs),
@@ -405,23 +405,29 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
         VaultCommands::Reindex(args) => {
             let resolved = args.resolve()?;
             let mut connection = open_initialized_connection(&resolved)?;
-            let result = FullIndexService::default()
-                .rebuild(
+            let reconcile = WatchReconcileService::default()
+                .reconcile_once(
                     Path::new(&resolved.vault_root),
                     &mut connection,
                     CasePolicy::Sensitive,
                 )
                 .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+            let totals = query_index_totals(&connection)
+                .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
             Ok(CommandResult {
                 command: "vault.reindex".to_string(),
                 summary: "vault reindex completed".to_string(),
                 args: serde_json::json!({
-                    "indexed_files": result.indexed_files,
-                    "markdown_files": result.markdown_files,
-                    "links_total": result.links_total,
-                    "unresolved_links": result.unresolved_links,
-                    "properties_total": result.properties_total,
-                    "bases_total": result.bases_total,
+                    "indexed_files": totals.indexed_files,
+                    "markdown_files": totals.markdown_files,
+                    "links_total": totals.links_total,
+                    "unresolved_links": totals.unresolved_links,
+                    "properties_total": totals.properties_total,
+                    "bases_total": totals.bases_total,
+                    "drift_paths": reconcile.drift_paths,
+                    "batches_applied": reconcile.batches_applied,
+                    "upserted_files": reconcile.upserted_files,
+                    "removed_files": reconcile.removed_files,
                 }),
             })
         }
@@ -950,6 +956,48 @@ fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connectio
         .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
     run_migrations(&mut connection).map_err(|source| anyhow!("run migrations failed: {source}"))?;
     Ok(connection)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IndexTotals {
+    indexed_files: u64,
+    markdown_files: u64,
+    links_total: u64,
+    unresolved_links: u64,
+    properties_total: u64,
+    bases_total: u64,
+}
+
+fn query_index_totals(connection: &Connection) -> Result<IndexTotals> {
+    let (indexed_files, markdown_files): (u64, u64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_markdown = 1 THEN 1 ELSE 0 END), 0) FROM files",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("query files totals")?;
+    let (links_total, unresolved_links): (u64, u64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_unresolved = 1 THEN 1 ELSE 0 END), 0) FROM links",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("query links totals")?;
+    let properties_total: u64 = connection
+        .query_row("SELECT COUNT(*) FROM properties", [], |row| row.get(0))
+        .context("query properties total")?;
+    let bases_total: u64 = connection
+        .query_row("SELECT COUNT(*) FROM bases", [], |row| row.get(0))
+        .context("query bases total")?;
+
+    Ok(IndexTotals {
+        indexed_files,
+        markdown_files,
+        links_total,
+        unresolved_links,
+        properties_total,
+        bases_total,
+    })
 }
 
 #[cfg(test)]
