@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
@@ -17,6 +18,10 @@ pub struct VaultManifestEntry {
     pub normalized: String,
     /// Case-policy-aware comparison key.
     pub match_key: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Last modified unix timestamp milliseconds.
+    pub modified_unix_ms: i64,
 }
 
 /// Deterministic snapshot of files currently present in a vault.
@@ -90,12 +95,38 @@ impl VaultScanService {
                 CasePolicy::Sensitive => normalized.clone(),
                 CasePolicy::Insensitive => normalized.to_ascii_lowercase(),
             };
+            let metadata = entry
+                .metadata()
+                .map_err(|source| VaultScanError::Metadata {
+                    path: absolute.clone(),
+                    source,
+                })?;
+            let modified_unix_ms = metadata
+                .modified()
+                .map_err(|source| VaultScanError::ModifiedTime {
+                    path: absolute.clone(),
+                    source,
+                })?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|source| VaultScanError::InvalidModifiedTime {
+                    path: absolute.clone(),
+                    source,
+                })?
+                .as_millis();
+            let modified_unix_ms = i64::try_from(modified_unix_ms).map_err(|_| {
+                VaultScanError::ModifiedTimeOverflow {
+                    path: absolute.clone(),
+                    value: modified_unix_ms,
+                }
+            })?;
 
             entries.push(VaultManifestEntry {
                 absolute,
                 relative,
                 normalized,
                 match_key,
+                size_bytes: metadata.len(),
+                modified_unix_ms,
             });
         }
 
@@ -162,6 +193,41 @@ pub enum VaultScanError {
         /// Walk error with filesystem context.
         #[source]
         source: walkdir::Error,
+    },
+    /// Reading file metadata failed while scanning.
+    #[error("failed to read metadata for scanned path '{path}': {source}")]
+    Metadata {
+        /// Path seen during scan.
+        path: PathBuf,
+        /// Filesystem walk metadata error.
+        #[source]
+        source: walkdir::Error,
+    },
+    /// Reading modified time from metadata failed.
+    #[error("failed to read modified time for scanned path '{path}': {source}")]
+    ModifiedTime {
+        /// Path seen during scan.
+        path: PathBuf,
+        /// IO error from modified time read.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Modified time preceded unix epoch.
+    #[error("modified time for scanned path '{path}' is before unix epoch: {source}")]
+    InvalidModifiedTime {
+        /// Path seen during scan.
+        path: PathBuf,
+        /// System time conversion error.
+        #[source]
+        source: std::time::SystemTimeError,
+    },
+    /// Modified time milliseconds exceeded `i64`.
+    #[error("modified unix timestamp overflow for scanned path '{path}': {value}")]
+    ModifiedTimeOverflow {
+        /// Path seen during scan.
+        path: PathBuf,
+        /// Overflow source value.
+        value: u128,
     },
     /// File canonicalization failed.
     #[error("failed to canonicalize scanned path '{path}': {source}")]
@@ -252,6 +318,8 @@ mod tests {
         assert_eq!(manifest.entries.len(), 1);
         assert_eq!(manifest.entries[0].relative, PathBuf::from("note.md"));
         assert_eq!(manifest.entries[0].normalized, "note.md");
+        assert_eq!(manifest.entries[0].size_bytes, 5);
+        assert!(manifest.entries[0].modified_unix_ms > 0);
         assert_eq!(
             manifest.entries[0].absolute,
             fs::canonicalize(note).expect("canonical note")

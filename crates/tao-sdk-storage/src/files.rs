@@ -24,6 +24,21 @@ pub struct FileRecord {
     pub indexed_at: String,
 }
 
+/// Lightweight metadata row used by drift-reconciliation scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReconcileRecord {
+    /// Canonical normalized path in vault.
+    pub normalized_path: String,
+    /// Case policy aware lookup key.
+    pub match_key: String,
+    /// Canonical absolute path.
+    pub absolute_path: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Last modified unix timestamp milliseconds.
+    pub modified_unix_ms: i64,
+}
+
 /// Input payload for inserting or updating file records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRecordInput {
@@ -264,6 +279,44 @@ ORDER BY normalized_path ASC
         .collect()
     }
 
+    /// List lightweight file metadata rows in deterministic reconcile order.
+    pub fn list_reconcile(
+        connection: &Connection,
+    ) -> Result<Vec<FileReconcileRecord>, FilesRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms
+FROM files
+ORDER BY match_key ASC, normalized_path ASC
+"#,
+            )
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "prepare_list_reconcile",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map([], row_to_file_reconcile_record)
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "list_reconcile",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| FilesRepositoryError::Sql {
+                operation: "list_reconcile_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// Upsert multiple file rows within one transaction.
     pub fn bulk_upsert(
         connection: &mut Connection,
@@ -355,6 +408,16 @@ fn row_to_file_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRecord> {
         hash_blake3: row.get("hash_blake3")?,
         is_markdown: is_markdown != 0,
         indexed_at: row.get("indexed_at")?,
+    })
+}
+
+fn row_to_file_reconcile_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileReconcileRecord> {
+    Ok(FileReconcileRecord {
+        normalized_path: row.get("normalized_path")?,
+        match_key: row.get("match_key")?,
+        absolute_path: row.get("absolute_path")?,
+        size_bytes: row.get("size_bytes")?,
+        modified_unix_ms: row.get("modified_unix_ms")?,
     })
 }
 
@@ -455,5 +518,22 @@ mod tests {
             .expect("updated row exists");
         assert_eq!(fetched.size_bytes, 999);
         assert_eq!(fetched.hash_blake3, "h1-updated");
+    }
+
+    #[test]
+    fn files_repository_lists_reconcile_rows_in_match_key_order() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let records = vec![
+            sample_record("f1", "Notes/Z.md", 10, "h1"),
+            sample_record("f2", "notes/a.md", 20, "h2"),
+            sample_record("f3", "notes/B.md", 30, "h3"),
+        ];
+        FilesRepository::bulk_upsert(&mut connection, &records).expect("bulk insert");
+
+        let listed = FilesRepository::list_reconcile(&connection).expect("list reconcile");
+        let ordered: Vec<&str> = listed.iter().map(|row| row.match_key.as_str()).collect();
+        assert_eq!(ordered, vec!["notes/a.md", "notes/b.md", "notes/z.md"]);
     }
 }

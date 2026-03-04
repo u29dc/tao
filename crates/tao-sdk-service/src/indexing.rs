@@ -1296,76 +1296,65 @@ impl ReconciliationScannerService {
                 source: Box::new(source),
             })?;
 
-        let existing = FilesRepository::list_all(connection).map_err(|source| {
+        let existing = FilesRepository::list_reconcile(connection).map_err(|source| {
             ReconciliationScanError::ListIndexedFiles {
                 source: Box::new(source),
             }
         })?;
-        let mut existing_by_path = HashMap::new();
-        for record in existing {
-            existing_by_path.insert(record.normalized_path.clone(), record);
-        }
-
-        let mut seen_paths = std::collections::HashSet::new();
         let mut inserted_changed_paths = Vec::new();
         let mut updated_changed_paths = Vec::new();
         let mut removed_changed_paths = Vec::new();
         let mut inserted_paths = 0_u64;
         let mut updated_paths = 0_u64;
-
-        for entry in &manifest.entries {
-            let metadata = fs::metadata(&entry.absolute).map_err(|source| {
-                ReconciliationScanError::Metadata {
-                    path: entry.absolute.clone(),
-                    source,
-                }
-            })?;
-            let modified_unix_ms = metadata
-                .modified()
-                .map_err(|source| ReconciliationScanError::ModifiedTime {
-                    path: entry.absolute.clone(),
-                    source,
-                })?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|source| ReconciliationScanError::InvalidModifiedTime {
-                    path: entry.absolute.clone(),
-                    source,
-                })?
-                .as_millis();
-            let modified_unix_ms = i64::try_from(modified_unix_ms).map_err(|_| {
-                ReconciliationScanError::ModifiedTimeOverflow {
-                    path: entry.absolute.clone(),
-                    value: modified_unix_ms,
-                }
-            })?;
-
-            seen_paths.insert(entry.normalized.clone());
-
-            if let Some(indexed) = existing_by_path.get(&entry.normalized) {
-                if !indexed_record_matches_manifest_entry(
-                    indexed,
-                    entry,
-                    metadata.len(),
-                    modified_unix_ms,
-                ) {
-                    updated_changed_paths.push(PathBuf::from(&entry.normalized));
-                    updated_paths += 1;
-                }
-            } else {
-                inserted_changed_paths.push(PathBuf::from(&entry.normalized));
-                inserted_paths += 1;
-            }
-        }
-
         let mut removed_paths = 0_u64;
-        for normalized_path in existing_by_path.keys() {
-            if !seen_paths.contains(normalized_path) {
-                removed_changed_paths.push(PathBuf::from(normalized_path));
-                removed_paths += 1;
+        let mut scan_index = 0_usize;
+        let mut existing_index = 0_usize;
+
+        while scan_index < manifest.entries.len() && existing_index < existing.len() {
+            let scanned = &manifest.entries[scan_index];
+            let indexed = &existing[existing_index];
+            let order = scanned
+                .match_key
+                .cmp(&indexed.match_key)
+                .then(scanned.normalized.cmp(&indexed.normalized_path));
+
+            match order {
+                std::cmp::Ordering::Less => {
+                    inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
+                    inserted_paths += 1;
+                    scan_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
+                    removed_paths += 1;
+                    existing_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    if !indexed_record_matches_manifest_entry(indexed, scanned) {
+                        updated_changed_paths.push(PathBuf::from(&scanned.normalized));
+                        updated_paths += 1;
+                    }
+                    scan_index += 1;
+                    existing_index += 1;
+                }
             }
         }
 
-        let mut changed_paths = Vec::new();
+        for scanned in &manifest.entries[scan_index..] {
+            inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
+            inserted_paths += 1;
+        }
+
+        for indexed in &existing[existing_index..] {
+            removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
+            removed_paths += 1;
+        }
+
+        let mut changed_paths = Vec::with_capacity(
+            inserted_changed_paths.len()
+                + updated_changed_paths.len()
+                + removed_changed_paths.len(),
+        );
         changed_paths.extend(inserted_changed_paths);
         changed_paths.extend(updated_changed_paths);
         changed_paths.extend(removed_changed_paths);
@@ -1416,16 +1405,17 @@ impl ReconciliationScannerService {
 }
 
 fn indexed_record_matches_manifest_entry(
-    indexed: &tao_sdk_storage::FileRecord,
+    indexed: &tao_sdk_storage::FileReconcileRecord,
     entry: &tao_sdk_vault::VaultManifestEntry,
-    size_bytes: u64,
-    modified_unix_ms: i64,
 ) -> bool {
     indexed.normalized_path == entry.normalized
         && indexed.match_key == entry.match_key
-        && indexed.absolute_path == entry.absolute.to_string_lossy()
-        && indexed.size_bytes == size_bytes
-        && indexed.modified_unix_ms == modified_unix_ms
+        && entry
+            .absolute
+            .to_str()
+            .is_some_and(|absolute| indexed.absolute_path == absolute)
+        && indexed.size_bytes == entry.size_bytes
+        && indexed.modified_unix_ms == entry.modified_unix_ms
 }
 
 /// Issue categories emitted by the index consistency checker.
@@ -2747,41 +2737,6 @@ pub enum ReconciliationScanError {
         /// Scan error.
         #[source]
         source: Box<VaultScanError>,
-    },
-    /// Reading scanned file metadata failed.
-    #[error("failed to read file metadata during reconciliation for '{path}': {source}")]
-    Metadata {
-        /// Absolute file path.
-        path: PathBuf,
-        /// Filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Reading scanned file modified time failed.
-    #[error("failed to read modified time during reconciliation for '{path}': {source}")]
-    ModifiedTime {
-        /// Absolute file path.
-        path: PathBuf,
-        /// Filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Scanned file modified timestamp precedes unix epoch.
-    #[error("modified time for reconciliation path '{path}' is before unix epoch: {source}")]
-    InvalidModifiedTime {
-        /// Absolute file path.
-        path: PathBuf,
-        /// System time conversion error.
-        #[source]
-        source: std::time::SystemTimeError,
-    },
-    /// Scanned file modified timestamp overflows persisted integer range.
-    #[error("modified timestamp for reconciliation path '{path}' overflows i64: {value}")]
-    ModifiedTimeOverflow {
-        /// Absolute file path.
-        path: PathBuf,
-        /// Raw modified timestamp value.
-        value: u128,
     },
     /// Loading current indexed file rows failed.
     #[error("failed to list indexed file rows during reconciliation: {source}")]

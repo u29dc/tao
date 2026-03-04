@@ -16,7 +16,9 @@ mod tasks;
 mod transaction;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
-pub use files::{FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError};
+pub use files::{
+    FileReconcileRecord, FileRecord, FileRecordInput, FilesRepository, FilesRepositoryError,
+};
 pub use index_state::{
     IndexStateRecord, IndexStateRecordInput, IndexStateRepository, IndexStateRepositoryError,
 };
