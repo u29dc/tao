@@ -1,10 +1,8 @@
 //! Deterministic query service for indexed vault notes.
 
-use std::fs;
 use std::path::Path;
 
-use rusqlite::Connection;
-use tao_sdk_storage::FilesRepository;
+use rusqlite::{Connection, params};
 use thiserror::Error;
 
 /// Search query input parameters.
@@ -56,7 +54,7 @@ impl SearchQueryService {
     /// Execute one deterministic search query over title/path/content surfaces.
     pub fn query(
         &self,
-        vault_root: &Path,
+        _vault_root: &Path,
         connection: &Connection,
         request: SearchQueryRequest,
     ) -> Result<SearchQueryPage, SearchQueryError> {
@@ -69,70 +67,92 @@ impl SearchQueryService {
                 value: request.limit,
             });
         }
+        let limit_i64 =
+            i64::try_from(request.limit).map_err(|_| SearchQueryError::InvalidLimit {
+                value: request.limit,
+            })?;
+        let offset_i64 =
+            i64::try_from(request.offset).map_err(|_| SearchQueryError::InvalidOffset {
+                value: request.offset,
+            })?;
 
         let needle = query.to_ascii_lowercase();
-        let mut scored = Vec::new();
-        let files = FilesRepository::list_all(connection)
-            .map_err(|source| SearchQueryError::ListIndexedFiles { source })?;
+        let total: u64 = connection
+            .query_row(
+                r#"
+SELECT COUNT(*)
+FROM search_index si
+INNER JOIN files f ON f.file_id = si.file_id
+WHERE f.is_markdown = 1
+  AND (
+    instr(si.title_lc, ?1) > 0
+    OR instr(si.normalized_path_lc, ?1) > 0
+    OR instr(si.content_lc, ?1) > 0
+  )
+"#,
+                params![needle],
+                |row| row.get(0),
+            )
+            .map_err(|source| SearchQueryError::CountMatches { source })?;
 
-        for file in files.into_iter().filter(|file| file.is_markdown) {
-            let title = title_from_path(&file.normalized_path);
-            let mut matched_in = Vec::new();
-            let path_lc = file.normalized_path.to_ascii_lowercase();
-            let title_lc = title.to_ascii_lowercase();
-            let mut score = 0_u8;
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  f.file_id,
+  f.normalized_path,
+  f.indexed_at,
+  CASE WHEN instr(si.title_lc, ?1) > 0 THEN 1 ELSE 0 END AS title_match,
+  CASE WHEN instr(si.normalized_path_lc, ?1) > 0 THEN 1 ELSE 0 END AS path_match,
+  CASE WHEN instr(si.content_lc, ?1) > 0 THEN 1 ELSE 0 END AS content_match,
+  (
+    CASE WHEN instr(si.title_lc, ?1) > 0 THEN 3 ELSE 0 END
+    + CASE WHEN instr(si.normalized_path_lc, ?1) > 0 THEN 2 ELSE 0 END
+    + CASE WHEN instr(si.content_lc, ?1) > 0 THEN 1 ELSE 0 END
+  ) AS score
+FROM search_index si
+INNER JOIN files f ON f.file_id = si.file_id
+WHERE f.is_markdown = 1
+  AND (
+    instr(si.title_lc, ?1) > 0
+    OR instr(si.normalized_path_lc, ?1) > 0
+    OR instr(si.content_lc, ?1) > 0
+  )
+ORDER BY score DESC, f.normalized_path ASC
+LIMIT ?2
+OFFSET ?3
+"#,
+            )
+            .map_err(|source| SearchQueryError::PrepareQuery { source })?;
 
-            if title_lc.contains(&needle) {
-                matched_in.push("title".to_string());
-                score = score.saturating_add(3);
-            }
-            if path_lc.contains(&needle) {
-                matched_in.push("path".to_string());
-                score = score.saturating_add(2);
-            }
-
-            if matched_in.is_empty() {
-                let absolute_path = vault_root.join(&file.normalized_path);
-                if let Ok(content) = fs::read_to_string(&absolute_path)
-                    && content.to_ascii_lowercase().contains(&needle)
-                {
-                    matched_in.push("content".to_string());
-                    score = score.saturating_add(1);
+        let rows = statement
+            .query_map(params![needle, limit_i64, offset_i64], |row| {
+                let path: String = row.get("normalized_path")?;
+                let title_match: i64 = row.get("title_match")?;
+                let path_match: i64 = row.get("path_match")?;
+                let content_match: i64 = row.get("content_match")?;
+                let mut matched_in = Vec::new();
+                if title_match != 0 {
+                    matched_in.push("title".to_string());
                 }
-            }
-
-            if matched_in.is_empty() {
-                continue;
-            }
-
-            scored.push((
-                score,
-                SearchQueryItem {
-                    file_id: file.file_id,
-                    path: file.normalized_path,
-                    title,
-                    indexed_at: file.indexed_at,
+                if path_match != 0 {
+                    matched_in.push("path".to_string());
+                }
+                if matched_in.is_empty() && content_match != 0 {
+                    matched_in.push("content".to_string());
+                }
+                Ok(SearchQueryItem {
+                    file_id: row.get("file_id")?,
+                    title: title_from_path(&path),
+                    path,
+                    indexed_at: row.get("indexed_at")?,
                     matched_in,
-                },
-            ));
-        }
-
-        scored.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.path.cmp(&right.1.path))
-        });
-
-        let total = scored.len() as u64;
-        let offset = usize::try_from(request.offset).unwrap_or(usize::MAX);
-        let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
-        let items = scored
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(_, row)| row)
-            .collect::<Vec<_>>();
+                })
+            })
+            .map_err(|source| SearchQueryError::RunQuery { source })?;
+        let items = rows
+            .map(|row| row.map_err(|source| SearchQueryError::MapQueryRow { source }))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SearchQueryPage {
             query: query.to_string(),
@@ -161,12 +181,36 @@ pub enum SearchQueryError {
     /// Limit was outside valid range.
     #[error("search query limit must be between 1 and 1000 (got {value})")]
     InvalidLimit { value: u64 },
-    /// Reading indexed file rows failed.
-    #[error("failed to list indexed files for search: {source}")]
-    ListIndexedFiles {
-        /// Files repository failure.
+    /// Offset value overflows supported sqlite integer range.
+    #[error("search query offset exceeds sqlite integer range (got {value})")]
+    InvalidOffset { value: u64 },
+    /// Counting matched rows failed.
+    #[error("failed to count search query matches: {source}")]
+    CountMatches {
+        /// SQLite error.
         #[source]
-        source: tao_sdk_storage::FilesRepositoryError,
+        source: rusqlite::Error,
+    },
+    /// Preparing paged query failed.
+    #[error("failed to prepare paged search query: {source}")]
+    PrepareQuery {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Running paged query failed.
+    #[error("failed to execute paged search query: {source}")]
+    RunQuery {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Mapping one query row failed.
+    #[error("failed to map one paged search row: {source}")]
+    MapQueryRow {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
     },
 }
 

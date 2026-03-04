@@ -2728,7 +2728,8 @@ mod tests {
     use tao_sdk_properties::TypedPropertyValue;
     use tao_sdk_storage::{
         BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, LinkRecordInput,
-        LinksRepository, PropertiesRepository, PropertyRecordInput, run_migrations,
+        LinksRepository, PropertiesRepository, PropertyRecordInput, known_migrations,
+        run_migrations,
     };
     use tempfile::tempdir;
 
@@ -3438,7 +3439,7 @@ mod tests {
             .expect("build health snapshot");
 
         assert!(snapshot.db_healthy);
-        assert_eq!(snapshot.db_migrations, 1);
+        assert_eq!(snapshot.db_migrations, known_migrations().len() as u64);
         assert_eq!(snapshot.index_lag, 3);
         assert_eq!(snapshot.watcher_status, "running");
         assert_eq!(snapshot.files_total, 3);

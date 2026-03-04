@@ -11,6 +11,7 @@ mod index_state;
 mod links;
 mod properties;
 mod render_cache;
+mod search_index;
 mod transaction;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
@@ -28,12 +29,19 @@ pub use properties::{
 pub use render_cache::{
     RenderCacheRecord, RenderCacheRecordInput, RenderCacheRepository, RenderCacheRepositoryError,
 };
+pub use search_index::{
+    SearchIndexRecord, SearchIndexRecordInput, SearchIndexRepository, SearchIndexRepositoryError,
+};
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
 /// Initial schema migration identifier.
 pub const MIGRATION_0001_ID: &str = "0001_init";
 /// Initial schema SQL payload.
 pub const MIGRATION_0001_SQL: &str = include_str!("../migrations/0001_init.sql");
+/// Search index schema migration identifier.
+pub const MIGRATION_0002_ID: &str = "0002_search_index";
+/// Search index schema SQL payload.
+pub const MIGRATION_0002_SQL: &str = include_str!("../migrations/0002_search_index.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -52,10 +60,16 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 1] = [Migration {
-    id: MIGRATION_0001_ID,
-    sql: MIGRATION_0001_SQL,
-}];
+const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        id: MIGRATION_0001_ID,
+        sql: MIGRATION_0001_SQL,
+    },
+    Migration {
+        id: MIGRATION_0002_ID,
+        sql: MIGRATION_0002_SQL,
+    },
+];
 
 const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
     "PRAGMA foreign_keys = ON;",
@@ -67,14 +81,18 @@ const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
     "PRAGMA busy_timeout = 5000;",
 ];
 
-/// Apply initial schema migration SQL directly to an active connection.
+/// Apply known schema migration SQL directly to an active connection.
 pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchemaError> {
-    connection
-        .execute_batch(MIGRATION_0001_SQL)
-        .map_err(|source| StorageSchemaError::ApplyMigration {
-            migration_id: MIGRATION_0001_ID,
-            source,
-        })
+    for migration in known_migrations() {
+        connection.execute_batch(migration.sql).map_err(|source| {
+            StorageSchemaError::ApplyMigration {
+                migration_id: migration.id,
+                source,
+            }
+        })?;
+    }
+
+    Ok(())
 }
 
 /// Return ordered migration definitions.
@@ -380,8 +398,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MIGRATION_0001_ID, MigrationRunnerError, apply_initial_schema, migration_checksum,
-        preflight_migrations, run_migrations,
+        MIGRATION_0001_ID, MIGRATION_0002_ID, MigrationRunnerError, apply_initial_schema,
+        known_migrations, migration_checksum, preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -406,6 +424,7 @@ mod tests {
             "bases",
             "render_cache",
             "index_state",
+            "search_index",
         ];
 
         for table in expected {
@@ -426,7 +445,10 @@ mod tests {
         let mut connection = Connection::open_in_memory().expect("open in-memory database");
         let report = run_migrations(&mut connection).expect("run migrations");
 
-        assert_eq!(report.applied, vec![MIGRATION_0001_ID.to_string()]);
+        assert_eq!(
+            report.applied,
+            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+        );
         assert!(report.skipped.is_empty());
 
         let recorded_checksum: Option<String> = connection
@@ -448,11 +470,12 @@ mod tests {
     fn preflight_reports_pending_migrations_before_first_apply() {
         let connection = Connection::open_in_memory().expect("open in-memory database");
         let report = preflight_migrations(&connection).expect("preflight migrations");
+        let known_total = known_migrations().len() as u64;
 
         assert!(!report.migrations_table_exists);
-        assert_eq!(report.known_migrations, 1);
+        assert_eq!(report.known_migrations, known_total);
         assert_eq!(report.applied_migrations, 0);
-        assert_eq!(report.pending_migrations, 1);
+        assert_eq!(report.pending_migrations, known_total);
     }
 
     #[test]
@@ -506,10 +529,16 @@ mod tests {
         let first = run_migrations(&mut connection).expect("run first migration pass");
         let second = run_migrations(&mut connection).expect("run second migration pass");
 
-        assert_eq!(first.applied, vec![MIGRATION_0001_ID.to_string()]);
+        assert_eq!(
+            first.applied,
+            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+        );
         assert!(first.skipped.is_empty());
         assert!(second.applied.is_empty());
-        assert_eq!(second.skipped, vec![MIGRATION_0001_ID.to_string()]);
+        assert_eq!(
+            second.skipped,
+            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+        );
     }
 
     #[test]

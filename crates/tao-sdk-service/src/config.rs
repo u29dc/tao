@@ -536,6 +536,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use tao_sdk_storage::known_migrations;
     use tempfile::tempdir;
 
     use super::{
@@ -799,9 +800,9 @@ db_path = ".vault.sqlite"
         .expect("sdk bootstrap");
 
         assert!(snapshot.db_ready);
-        assert_eq!(snapshot.known_migrations, 1);
+        assert_eq!(snapshot.known_migrations, known_migrations().len() as u64);
         assert_eq!(snapshot.pending_migrations, 0);
-        assert_eq!(snapshot.applied_migrations, 1);
+        assert_eq!(snapshot.applied_migrations, known_migrations().len() as u64);
         assert_eq!(snapshot.db_path, snapshot.config.db_path);
         assert!(snapshot.root_config_path.exists());
         assert!(snapshot.vault_config_path.exists());

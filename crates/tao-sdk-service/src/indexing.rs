@@ -18,7 +18,7 @@ use tao_sdk_properties::{
 use tao_sdk_storage::{
     BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
     IndexStateRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
-    PropertyRecordInput,
+    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository,
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprint, FileFingerprintError, FileFingerprintService,
@@ -85,6 +85,7 @@ impl FullIndexService {
         let mut file_id_by_path = HashMap::new();
         let mut markdown_docs = Vec::new();
         let mut base_records = Vec::new();
+        let mut search_records = Vec::new();
 
         for entry in &manifest.entries {
             let fingerprint =
@@ -148,6 +149,13 @@ impl FullIndexService {
                     .filter(|slug| !slug.is_empty())
                     .collect::<Vec<_>>();
                 let block_ids = extract_block_ids(&parsed.body);
+                search_records.push(SearchIndexRecordInput {
+                    file_id: file_id.clone(),
+                    normalized_path_lc: fingerprint.normalized.to_ascii_lowercase(),
+                    title_lc: title_from_normalized_path(&fingerprint.normalized)
+                        .to_ascii_lowercase(),
+                    content_lc: markdown.to_ascii_lowercase(),
+                });
 
                 markdown_docs.push(MarkdownIndexDocument {
                     file_id,
@@ -264,6 +272,7 @@ impl FullIndexService {
                  DELETE FROM properties;\
                  DELETE FROM bases;\
                  DELETE FROM render_cache;\
+                 DELETE FROM search_index;\
                  DELETE FROM files;",
             )
             .map_err(|source| FullIndexError::ClearTables {
@@ -297,6 +306,14 @@ impl FullIndexService {
         for base in &base_records {
             BasesRepository::upsert(&transaction, base).map_err(|source| {
                 FullIndexError::UpsertBase {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+
+        for record in &search_records {
+            SearchIndexRepository::upsert(&transaction, record).map_err(|source| {
+                FullIndexError::UpsertSearchIndex {
                     source: Box::new(source),
                 }
             })?;
@@ -495,6 +512,11 @@ impl IncrementalIndexService {
                         operation: "delete_bases_for_file",
                         source: Box::new(source),
                     })?;
+                SearchIndexRepository::delete_by_file_id(&transaction, &file_id).map_err(
+                    |source| FullIndexError::UpsertSearchIndex {
+                        source: Box::new(source),
+                    },
+                )?;
 
                 if normalized.ends_with(".md") {
                     let markdown = fs::read_to_string(&absolute).map_err(|source| {
@@ -524,6 +546,19 @@ impl IncrementalIndexService {
                             }
                         })?;
                     }
+
+                    SearchIndexRepository::upsert(
+                        &transaction,
+                        &SearchIndexRecordInput {
+                            file_id: file_id.clone(),
+                            normalized_path_lc: normalized.to_ascii_lowercase(),
+                            title_lc: title_from_normalized_path(&normalized).to_ascii_lowercase(),
+                            content_lc: markdown.to_ascii_lowercase(),
+                        },
+                    )
+                    .map_err(|source| FullIndexError::UpsertSearchIndex {
+                        source: Box::new(source),
+                    })?;
 
                     let candidates = FilesRepository::list_all(&transaction)
                         .map_err(|source| FullIndexError::UpsertFileMetadata {
@@ -1882,6 +1917,14 @@ struct MarkdownIndexDocument {
     properties: Vec<PropertyRecordInput>,
 }
 
+fn title_from_normalized_path(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| path.to_string())
+}
+
 fn build_property_records(
     file_id: &str,
     source_path: &str,
@@ -2234,6 +2277,13 @@ pub enum FullIndexError {
         /// Repository error.
         #[source]
         source: Box<tao_sdk_storage::BasesRepositoryError>,
+    },
+    /// Upserting search index rows failed.
+    #[error("failed to upsert search index rows during indexing: {source}")]
+    UpsertSearchIndex {
+        /// Repository error.
+        #[source]
+        source: Box<tao_sdk_storage::SearchIndexRepositoryError>,
     },
     /// Upserting index state failed.
     #[error("failed to upsert index state during full index: {source}")]
