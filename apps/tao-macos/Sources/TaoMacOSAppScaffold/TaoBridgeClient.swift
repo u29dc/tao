@@ -145,6 +145,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
     case notePutUpdateFailed(BridgeErrorDTO)
+    case notePutIndexFailed(BridgeErrorDTO)
     case notePutEventLogFailed(BridgeErrorDTO)
     case eventsPollInvalidLimit(BridgeErrorDTO)
     case eventsPollFailed(BridgeErrorDTO)
@@ -199,6 +200,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .notePutCreateFailed(error)
         case "bridge.note_put.update_failed":
             return .notePutUpdateFailed(error)
+        case "bridge.note_put.index_failed":
+            return .notePutIndexFailed(error)
         case "bridge.note_put.event_log_failed":
             return .notePutEventLogFailed(error)
         case "bridge.events_poll.invalid_limit":
@@ -272,6 +275,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "note put create failed: \(error.message)"
         case .notePutUpdateFailed(let error):
             return "note put update failed: \(error.message)"
+        case .notePutIndexFailed(let error):
+            return "note put index failed: \(error.message)"
         case .notePutEventLogFailed(let error):
             return "note put event log failed: \(error.message)"
         case .eventsPollInvalidLimit(let error):
@@ -310,6 +315,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
             .notePutUpdateFailed(let error),
+            .notePutIndexFailed(let error),
             .notePutEventLogFailed(let error),
             .eventsPollInvalidLimit(let error),
             .eventsPollFailed(let error),

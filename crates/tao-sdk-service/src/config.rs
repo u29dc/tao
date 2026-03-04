@@ -187,6 +187,10 @@ impl SdkConfigLoader {
 }
 
 fn load_root_config_or_defaults(root_dir: &Path) -> Result<TaoConfig, SdkConfigError> {
+    if should_skip_root_bootstrap(root_dir) {
+        return Ok(TaoConfig::defaults());
+    }
+
     match load_or_bootstrap(root_dir) {
         Ok(config) => Ok(config),
         Err(source @ tao_sdk_config::TaoConfigError::CreateParent { .. })
@@ -214,6 +218,15 @@ fn load_root_config_or_defaults(root_dir: &Path) -> Result<TaoConfig, SdkConfigE
 
 fn root_config_fallback(_source: &tao_sdk_config::TaoConfigError) -> TaoConfig {
     TaoConfig::defaults()
+}
+
+fn should_skip_root_bootstrap(root_dir: &Path) -> bool {
+    if root_dir.join("config.toml").exists() {
+        return false;
+    }
+
+    // App bundles launched from Finder can run with cwd `/`; never bootstrap `/config.toml`.
+    root_dir.parent().is_none()
 }
 
 /// Bootstrap snapshot returned after config resolution and migration readiness checks.
@@ -521,6 +534,7 @@ pub enum SdkBootstrapError {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -740,6 +754,29 @@ db_path = ".vault.sqlite"
         assert_eq!(loaded.feature_flags, vec!["vault-flag".to_string()]);
         assert_eq!(loaded.data_dir, canonical_vault.join(".vault-data"));
         assert_eq!(loaded.db_path, canonical_vault.join(".vault.sqlite"));
+    }
+
+    #[test]
+    fn load_from_map_skips_root_bootstrap_when_cwd_is_filesystem_root() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, Path::new("/"))
+                .expect("load config");
+
+        assert_eq!(
+            loaded.vault_root,
+            fs::canonicalize(vault).expect("canonical vault")
+        );
+        assert!(loaded.db_path.ends_with("index.sqlite"));
     }
 
     #[test]

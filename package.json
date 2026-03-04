@@ -24,7 +24,7 @@
 		"util:types": "cargo check --workspace --release",
 		"util:test": "cargo test --workspace --release",
 		"util:audit": "cargo audit",
-		"util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build",
+		"util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && swift test --configuration release --package-path apps/tao-macos && bun run util:audit && bun run build",
 		"bench -------------------------------------------": "",
 		"bench:bridge": "./target/release/tao-bench --scenario bridge --iterations 200 --json-out .benchmarks/reports/bridge-call-budgets.json",
 		"bench:ffi": "./target/release/tao-bench --scenario ffi --iterations 200 --json-out .benchmarks/reports/ffi-call-budgets.json"

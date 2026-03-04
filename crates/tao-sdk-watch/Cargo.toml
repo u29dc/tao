@@ -12,3 +12,11 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+tao-sdk-service = { path = "../tao-sdk-service" }
+tao-sdk-vault = { path = "../tao-sdk-vault" }
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tao-sdk-storage = { path = "../tao-sdk-storage" }
+tempfile = "3.23.0"

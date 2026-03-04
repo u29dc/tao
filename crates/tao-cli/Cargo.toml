@@ -18,9 +18,11 @@ clap.workspace = true
 tao-sdk-bases = { path = "../tao-sdk-bases" }
 tao-sdk-bridge = { path = "../tao-sdk-bridge" }
 tao-sdk-properties = { path = "../tao-sdk-properties" }
+tao-sdk-search = { path = "../tao-sdk-search" }
 tao-sdk-storage = { path = "../tao-sdk-storage" }
 tao-sdk-service = { path = "../tao-sdk-service" }
 tao-sdk-vault = { path = "../tao-sdk-vault" }
+tao-sdk-watch = { path = "../tao-sdk-watch" }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true

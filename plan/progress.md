@@ -1722,3 +1722,93 @@ Append-only execution log for autonomous runs.
   - commands: [write tao transition release notes and migration guidance]
   - outcomes: [published release notes for rename migration, ffi runtime, config bootstrap, and operational guidance]
 - residual_risk: none
+
+- timestamp: 2026-03-04T12:20:00Z
+- session: session-2026-03-04-remediation-a
+- ticket: SEC-001
+- action: start
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [update phase12 remediation contract and manifest]
+  - outcomes: [phase12 tickets added and run-state moved to in_progress]
+- residual_risk: remediation code changes pending
+
+- timestamp: 2026-03-04T11:31:00Z
+- session: session-2026-03-04-remediation-a
+- ticket: SEC-001
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-bridge/src/lib.rs]
+  - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json note get --vault-root <vault> --path /etc/hosts]
+  - outcomes: [bridge note_get now rejects absolute/parent traversal paths with bridge.note_get.invalid_path]
+- residual_risk: symlink-based path escape checks are enforced for readable existing note targets at read time
+
+- timestamp: 2026-03-04T11:31:30Z
+- session: session-2026-03-04-remediation-a
+- ticket: IDX-009
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-bridge/src/lib.rs, apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+  - commands: [cargo test -p tao-sdk-bridge --release, ./target/release/tao --json links outgoing --vault-root <vault> --path notes/source.md]
+  - outcomes: [note_put now runs IncrementalIndexService and outgoing links update immediately without manual reindex]
+- residual_risk: index refresh failures now surface as bridge.note_put.index_failed and require explicit recover action
+
+- timestamp: 2026-03-04T11:32:00Z
+- session: session-2026-03-04-remediation-a
+- ticket: CFG-005
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/config.rs]
+  - commands: [cargo test -p tao-sdk-service --release, (cd / && /Users/han/Git/obs/target/release/tao --json vault open --vault-root <vault>)]
+  - outcomes: [root config bootstrap now skips filesystem-root cwd and avoids /config.toml write failures]
+- residual_risk: non-root unwritable cwd paths still rely on existing write/read fallback handling
+
+- timestamp: 2026-03-04T11:32:20Z
+- session: session-2026-03-04-remediation-a
+- ticket: REL-008
+- action: done
+- evidence:
+  - files: [scripts/release_mac.sh, apps/tao-macos/Package.swift]
+  - commands: [bun run release:mac, otool -L dist/TaoMacOSApp.app/Contents/MacOS/TaoMacOSApp, otool -D dist/TaoMacOSApp.app/Contents/Frameworks/libtao_sdk_bridge.dylib]
+  - outcomes: [dist app now embeds bridge dylib in Frameworks and links via @rpath instead of absolute build-machine path]
+- residual_risk: notarization and Developer ID signing remain out-of-scope for this local ad-hoc packaging flow
+
+- timestamp: 2026-03-04T11:32:40Z
+- session: session-2026-03-04-remediation-a
+- ticket: SEARCH-001
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-search/Cargo.toml, crates/tao-sdk-search/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
+  - commands: [cargo test -p tao-sdk-search -p tao-cli --release, ./target/release/tao --json search query --vault-root <vault> --query hello]
+  - outcomes: [sdk-search now provides deterministic title/path/content search service and CLI search delegates to it with matched_in metadata]
+- residual_risk: search is currently lexical and file-content scanned, not SQLite FTS-accelerated
+
+- timestamp: 2026-03-04T11:32:50Z
+- session: session-2026-03-04-remediation-a
+- ticket: WATCH-001
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-watch/Cargo.toml, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-cli/Cargo.toml]
+  - commands: [cargo test -p tao-sdk-watch -p tao-cli --release]
+  - outcomes: [sdk-watch now exposes typed reconciliation adapter and CLI vault.reconcile is wired through watch crate]
+- residual_risk: filesystem event streaming remains reconciliation-driven, not persistent OS watcher subscription
+
+- timestamp: 2026-03-04T11:33:00Z
+- session: session-2026-03-04-remediation-a
+- ticket: QA-011
+- action: done
+- evidence:
+  - files: [package.json]
+  - commands: [bun run util:check]
+  - outcomes: [util:check now includes swift test --configuration release --package-path apps/tao-macos]
+- residual_risk: none
+
+- timestamp: 2026-03-04T11:33:20Z
+- session: session-2026-03-04-remediation-a
+- ticket: QA-012
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json, scripts/release_mac.sh, crates/tao-sdk-bridge/src/lib.rs, crates/tao-sdk-search/src/lib.rs, crates/tao-sdk-watch/src/lib.rs, crates/tao-cli/src/main.rs, crates/tao-sdk-service/src/config.rs, package.json]
+  - commands: [cargo test -p tao-sdk-bridge -p tao-sdk-service -p tao-sdk-search -p tao-sdk-watch -p tao-cli --release, bun run util:check, ./scripts/budgets.sh]
+  - outcomes: [all phase12 remediation tickets validated with release-quality gates and budgets passing]
+- residual_risk: none

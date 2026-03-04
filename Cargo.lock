@@ -771,9 +771,11 @@ dependencies = [
  "tao-sdk-bases",
  "tao-sdk-bridge",
  "tao-sdk-properties",
+ "tao-sdk-search",
  "tao-sdk-service",
  "tao-sdk-storage",
  "tao-sdk-vault",
+ "tao-sdk-watch",
  "tempfile",
 ]
 
@@ -847,6 +849,14 @@ dependencies = [
 [[package]]
 name = "tao-sdk-search"
 version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tao-sdk-service",
+ "tao-sdk-storage",
+ "tao-sdk-vault",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "tao-sdk-service"
@@ -895,6 +905,14 @@ dependencies = [
 [[package]]
 name = "tao-sdk-watch"
 version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "tao-sdk-service",
+ "tao-sdk-storage",
+ "tao-sdk-vault",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "tao-tui"

@@ -12,8 +12,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use tao_sdk_bases::{BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest};
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_service::{
-    BaseTableExecutorService, FullIndexService, HealthSnapshotService, NoteCrudService,
-    WatcherStatus,
+    BaseTableExecutorService, FullIndexService, HealthSnapshotService, IncrementalIndexService,
+    NoteCrudService, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, run_migrations,
@@ -77,6 +77,8 @@ pub const BRIDGE_ERROR_NOTE_PUT_LOOKUP_FAILED: &str = "bridge.note_put.lookup_fa
 pub const BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED: &str = "bridge.note_put.create_failed";
 /// Bridge error code when note-put update fails.
 pub const BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED: &str = "bridge.note_put.update_failed";
+/// Bridge error code when note-put index refresh fails.
+pub const BRIDGE_ERROR_NOTE_PUT_INDEX_FAILED: &str = "bridge.note_put.index_failed";
 /// Bridge error code when note-put event persistence fails.
 pub const BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED: &str = "bridge.note_put.event_log_failed";
 /// Bridge error code when events-poll limit is invalid.
@@ -493,17 +495,10 @@ impl BridgeKernel {
     #[must_use]
     pub fn note_get(&self, normalized_path: &str) -> BridgeEnvelope<BridgeNoteView> {
         let normalized_path = normalized_path.trim();
-        if normalized_path.is_empty() {
-            return BridgeEnvelope::failure(
-                BridgeError::with_code(
-                    BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
-                    "normalized path must not be empty",
-                )
-                .with_hint("provide a vault-relative markdown path"),
-            );
-        }
-
-        let absolute_path = self.vault_root.join(normalized_path);
+        let absolute_path = match resolve_bridge_note_read_path(&self.vault_root, normalized_path) {
+            Ok(path) => path,
+            Err(error) => return BridgeEnvelope::failure(error),
+        };
         let raw = match fs::read_to_string(&absolute_path) {
             Ok(raw) => raw,
             Err(source) => {
@@ -921,6 +916,13 @@ impl BridgeKernel {
                 .with_hint("provide a vault-relative markdown path"),
             );
         }
+        if let Err(error) = validate_bridge_relative_note_path(
+            normalized_path,
+            BRIDGE_ERROR_NOTE_PUT_INVALID_PATH,
+            "provide a vault-relative markdown path",
+        ) {
+            return BridgeEnvelope::failure(error);
+        }
 
         let note_service = NoteCrudService::default();
         let relative = Path::new(normalized_path);
@@ -946,28 +948,7 @@ impl BridgeKernel {
                 relative,
                 content,
             ) {
-                Ok(result) => match append_bridge_note_changed_event(
-                    &self.connection,
-                    &result.file_id,
-                    &result.normalized_path,
-                    "updated",
-                ) {
-                    Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
-                        path: result.normalized_path,
-                        file_id: result.file_id,
-                        action: "updated".to_string(),
-                    }),
-                    Err(source) => BridgeEnvelope::failure(
-                        BridgeError::with_code(
-                            BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED,
-                            source.to_string(),
-                        )
-                        .with_hint("note write succeeded but event logging failed")
-                        .with_context("path", JsonValue::String(result.normalized_path))
-                        .with_context("file_id", JsonValue::String(result.file_id))
-                        .with_context("action", JsonValue::String("updated".to_string())),
-                    ),
-                },
+                Ok(result) => complete_note_put(self, result, "updated"),
                 Err(source) => BridgeEnvelope::failure(
                     BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_UPDATE_FAILED, source.to_string())
                         .with_hint("fix note payload or path and retry"),
@@ -982,28 +963,7 @@ impl BridgeKernel {
                 relative,
                 content,
             ) {
-                Ok(result) => match append_bridge_note_changed_event(
-                    &self.connection,
-                    &result.file_id,
-                    &result.normalized_path,
-                    "created",
-                ) {
-                    Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
-                        path: result.normalized_path,
-                        file_id: result.file_id,
-                        action: "created".to_string(),
-                    }),
-                    Err(source) => BridgeEnvelope::failure(
-                        BridgeError::with_code(
-                            BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED,
-                            source.to_string(),
-                        )
-                        .with_hint("note write succeeded but event logging failed")
-                        .with_context("path", JsonValue::String(result.normalized_path))
-                        .with_context("file_id", JsonValue::String(result.file_id))
-                        .with_context("action", JsonValue::String("created".to_string())),
-                    ),
-                },
+                Ok(result) => complete_note_put(self, result, "created"),
                 Err(source) => BridgeEnvelope::failure(
                     BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_CREATE_FAILED, source.to_string())
                         .with_hint("ensure vault path exists and target note path is valid"),
@@ -1084,6 +1044,125 @@ fn query_note_summaries_page(
     };
 
     Ok(BridgeNoteListPage { items, next_cursor })
+}
+
+fn complete_note_put(
+    kernel: &mut BridgeKernel,
+    result: tao_sdk_service::NoteCrudResult,
+    action: &str,
+) -> BridgeEnvelope<BridgeWriteAck> {
+    if let Err(source) = IncrementalIndexService::default().apply_changes(
+        &kernel.vault_root,
+        &mut kernel.connection,
+        &[PathBuf::from(result.normalized_path.clone())],
+        CasePolicy::Sensitive,
+    ) {
+        return BridgeEnvelope::failure(
+            BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_INDEX_FAILED, source.to_string())
+                .with_hint("run `vault reindex` to recover index state and retry")
+                .with_context("path", JsonValue::String(result.normalized_path))
+                .with_context("file_id", JsonValue::String(result.file_id))
+                .with_context("action", JsonValue::String(action.to_string())),
+        );
+    }
+
+    match append_bridge_note_changed_event(
+        &kernel.connection,
+        &result.file_id,
+        &result.normalized_path,
+        action,
+    ) {
+        Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
+            path: result.normalized_path,
+            file_id: result.file_id,
+            action: action.to_string(),
+        }),
+        Err(source) => BridgeEnvelope::failure(
+            BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED, source.to_string())
+                .with_hint("note write succeeded but event logging failed")
+                .with_context("path", JsonValue::String(result.normalized_path))
+                .with_context("file_id", JsonValue::String(result.file_id))
+                .with_context("action", JsonValue::String(action.to_string())),
+        ),
+    }
+}
+
+fn resolve_bridge_note_read_path(
+    vault_root: &Path,
+    normalized_path: &str,
+) -> Result<PathBuf, BridgeError> {
+    validate_bridge_relative_note_path(
+        normalized_path,
+        BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
+        "provide a vault-relative markdown path",
+    )?;
+
+    let joined = vault_root.join(normalized_path);
+    if !joined.exists() {
+        return Ok(joined);
+    }
+
+    let canonical_vault = fs::canonicalize(vault_root).map_err(|source| {
+        BridgeError::with_code(
+            BRIDGE_ERROR_NOTE_GET_READ_FAILED,
+            format!("failed to canonicalize vault root: {source}"),
+        )
+        .with_hint("ensure vault root is readable")
+        .with_context(
+            "vault_root",
+            JsonValue::String(vault_root.to_string_lossy().to_string()),
+        )
+    })?;
+    let canonical_note = fs::canonicalize(&joined).map_err(|source| {
+        BridgeError::with_code(
+            BRIDGE_ERROR_NOTE_GET_READ_FAILED,
+            format!("failed to canonicalize note path: {source}"),
+        )
+        .with_hint("ensure note path is readable")
+        .with_context(
+            "path",
+            JsonValue::String(joined.to_string_lossy().to_string()),
+        )
+    })?;
+
+    if !canonical_note.starts_with(&canonical_vault) {
+        return Err(BridgeError::with_code(
+            BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
+            "normalized path resolves outside vault root",
+        )
+        .with_hint("provide a vault-relative markdown path inside the selected vault")
+        .with_context("path", JsonValue::String(normalized_path.to_string())));
+    }
+
+    Ok(joined)
+}
+
+fn validate_bridge_relative_note_path(
+    normalized_path: &str,
+    code: &'static str,
+    hint: &'static str,
+) -> Result<(), BridgeError> {
+    let trimmed = normalized_path.trim();
+    if trimmed.is_empty() {
+        return Err(
+            BridgeError::with_code(code, "normalized path must not be empty").with_hint(hint),
+        );
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(
+            BridgeError::with_code(code, "normalized path must be vault-relative")
+                .with_hint(hint)
+                .with_context("path", JsonValue::String(trimmed.to_string())),
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1306,8 +1385,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel, BridgePing, BridgeSchemaVersion,
-        is_bridge_schema_compatible, parse_bridge_schema_version,
+        BRIDGE_ERROR_NOTE_GET_INVALID_PATH, BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel,
+        BridgePing, BridgeSchemaVersion, is_bridge_schema_compatible, parse_bridge_schema_version,
     };
 
     #[test]
@@ -1413,6 +1492,26 @@ mod tests {
     }
 
     #[test]
+    fn bridge_kernel_note_get_rejects_absolute_and_parent_paths() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(vault_root.join("notes/a.md"), "# A").expect("write markdown");
+        let db_path = temp.path().join("tao.db");
+
+        let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let absolute = kernel.note_get("/etc/hosts");
+        assert!(!absolute.ok);
+        let absolute_error = absolute.error.expect("absolute path error");
+        assert_eq!(absolute_error.code, BRIDGE_ERROR_NOTE_GET_INVALID_PATH);
+
+        let parent = kernel.note_get("../notes/a.md");
+        assert!(!parent.ok);
+        let parent_error = parent.error.expect("parent path error");
+        assert_eq!(parent_error.code, BRIDGE_ERROR_NOTE_GET_INVALID_PATH);
+    }
+
+    #[test]
     fn bridge_kernel_notes_list_pages_markdown_results() {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
@@ -1475,6 +1574,38 @@ mod tests {
                 .body
                 .contains("second")
         );
+    }
+
+    #[test]
+    fn bridge_kernel_note_put_refreshes_link_index_for_updated_content() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("tao.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        assert!(kernel.note_put("notes/target.md", "# Target").ok);
+        assert!(kernel.note_put("notes/source.md", "# Source").ok);
+
+        let initial_links = kernel.note_links("notes/source.md");
+        assert!(initial_links.ok);
+        assert!(
+            initial_links
+                .value
+                .expect("initial links")
+                .outgoing
+                .is_empty()
+        );
+
+        let updated = kernel.note_put("notes/source.md", "# Source\n[[target]]");
+        assert!(updated.ok);
+
+        let refreshed_links = kernel.note_links("notes/source.md");
+        assert!(refreshed_links.ok);
+        let outgoing = refreshed_links.value.expect("refreshed links").outgoing;
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].target_path.as_deref(), Some("notes/target.md"));
+        assert!(outgoing[0].resolved);
     }
 
     #[test]

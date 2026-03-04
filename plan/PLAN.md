@@ -1084,3 +1084,39 @@ Canonical control file paths are now:
 - `plan/blockers.md`
 
 Any automation referencing root-level control files must be updated to these paths before execution.
+
+## 22) Phase 12 Post-Audit Remediation Extension
+
+### 22.1 Objective
+
+- Resolve high-severity audit findings that block production readiness.
+- Remove release/runtime regressions discovered during manual macOS smoke.
+- Close implementation drift between planned and shipped search/watch layers.
+
+### 22.2 Ticket Families (Phase 12)
+
+- Security hardening: `SEC-001`
+- Index coherency: `IDX-009`
+- Config/runtime fallback hardening: `CFG-005`
+- macOS release packaging reliability: `REL-008`
+- Search/watch implementation parity: `SEARCH-001`, `WATCH-001`
+- Quality gate and closure validation: `QA-011`, `QA-012`
+
+### 22.3 Phase 12 Execution Order
+
+- `SEC-001`
+- `IDX-009`
+- `CFG-005`
+- `REL-008`
+- `SEARCH-001`
+- `WATCH-001`
+- `QA-011`
+- `QA-012`
+
+Exit condition:
+
+- Note read/write paths are vault-boundary safe.
+- Note write operations keep links/properties/search surfaces coherent without manual reindex.
+- macOS `.app` is self-contained and launchable without absolute local dylib paths.
+- `util:check` enforces Rust + Swift release-quality gates.
+- Search/watch crates are non-placeholder and actively used by CLI/runtime flows.

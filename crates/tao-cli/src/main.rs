@@ -12,14 +12,16 @@ use tao_sdk_bases::{
 };
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_properties::TypedPropertyValue;
+use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, PropertyUpdateService,
-    ReconcileService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
+    SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::CasePolicy;
+use tao_sdk_watch::WatchReconcileService;
 
 #[derive(Debug, Parser)]
 #[command(name = "tao", version, about = "tao cli")]
@@ -423,8 +425,8 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
         VaultCommands::Reconcile(args) => {
             let resolved = args.resolve()?;
             let mut connection = open_initialized_connection(&resolved)?;
-            let result = ReconcileService
-                .reconcile_vault(
+            let result = WatchReconcileService::default()
+                .reconcile_once(
                     Path::new(&resolved.vault_root),
                     &mut connection,
                     CasePolicy::Sensitive,
@@ -435,10 +437,15 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
                 summary: "vault reconcile completed".to_string(),
                 args: serde_json::json!({
                     "scanned_files": result.scanned_files,
-                    "inserted_files": result.inserted_files,
-                    "updated_files": result.updated_files,
+                    "inserted_paths": result.inserted_paths,
+                    "updated_paths": result.updated_paths,
                     "removed_files": result.removed_files,
-                    "unchanged_files": result.unchanged_files,
+                    "drift_paths": result.drift_paths,
+                    "batches_applied": result.batches_applied,
+                    "upserted_files": result.upserted_files,
+                    "links_reindexed": result.links_reindexed,
+                    "properties_reindexed": result.properties_reindexed,
+                    "bases_reindexed": result.bases_reindexed,
                 }),
             })
         }
@@ -754,54 +761,40 @@ fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
 fn handle_search(command: SearchCommands) -> Result<CommandResult> {
     match command {
         SearchCommands::Query(args) => {
-            let query = args.query.trim();
-            if query.is_empty() {
-                return Err(anyhow!("search query must not be empty"));
-            }
-
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-
-            let query_lc = query.to_ascii_lowercase();
-            let matches = FilesRepository::list_all(&connection)
-                .map_err(|source| anyhow!("query indexed files for search failed: {source}"))?
+            let page = SearchQueryService
+                .query(
+                    Path::new(&resolved.vault_root),
+                    &connection,
+                    SearchQueryRequest {
+                        query: args.query.clone(),
+                        limit: u64::from(args.limit),
+                        offset: u64::from(args.offset),
+                    },
+                )
+                .map_err(|source| anyhow!("search query failed: {source}"))?;
+            let items = page
+                .items
                 .into_iter()
-                .filter(|file| file.is_markdown)
-                .filter(|file| {
-                    let path_lc = file.normalized_path.to_ascii_lowercase();
-                    if path_lc.contains(&query_lc) {
-                        return true;
-                    }
-                    search_title_from_path(&file.normalized_path)
-                        .to_ascii_lowercase()
-                        .contains(&query_lc)
-                })
-                .map(|file| {
+                .map(|item| {
                     serde_json::json!({
-                        "file_id": file.file_id,
-                        "path": file.normalized_path,
-                        "title": search_title_from_path(&file.normalized_path),
-                        "indexed_at": file.indexed_at,
+                        "file_id": item.file_id,
+                        "path": item.path,
+                        "title": item.title,
+                        "indexed_at": item.indexed_at,
+                        "matched_in": item.matched_in,
                     })
                 })
-                .collect::<Vec<_>>();
-
-            let total = matches.len();
-            let offset = args.offset as usize;
-            let limit = args.limit as usize;
-            let items = matches
-                .into_iter()
-                .skip(offset)
-                .take(limit)
                 .collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "search.query".to_string(),
                 summary: "search query completed".to_string(),
                 args: serde_json::json!({
-                    "query": query,
-                    "limit": args.limit,
-                    "offset": args.offset,
-                    "total": total,
+                    "query": page.query,
+                    "limit": page.limit,
+                    "offset": page.offset,
+                    "total": page.total,
                     "items": items,
                 }),
             })
@@ -907,14 +900,6 @@ fn typed_property_value_to_json(value: &TypedPropertyValue) -> JsonValue {
         }
         TypedPropertyValue::Null => JsonValue::Null,
     }
-}
-
-fn search_title_from_path(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn decode_base_document(config_json: &str) -> Result<BaseDocument> {

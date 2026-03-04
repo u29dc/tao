@@ -17,7 +17,11 @@ let package = Package(
             name: "TaoMacOSAppScaffold",
             dependencies: ["tao_sdk_bridgeFFI"],
             linkerSettings: [
-                .unsafeFlags(["-L", "../../target/release"]),
+                .unsafeFlags([
+                    "-L", "../../target/release",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ]),
                 .linkedLibrary("tao_sdk_bridge")
             ]
         ),
