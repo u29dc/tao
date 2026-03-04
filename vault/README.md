@@ -23,3 +23,8 @@ Deterministic fixture vault used by QA integration tests.
 
 - Paths are lower-case and stable for deterministic snapshots.
 - Asset files are included so scanners/indexers exercise non-markdown handling.
+
+## Synthetic Vaults
+
+- Run `./scripts/fixtures.sh` to generate deterministic large vaults under `vault/generated/`.
+- Generated synthetic vaults are excluded from git history to keep repository size stable.

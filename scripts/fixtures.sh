@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="${1:-bench/fixtures}"
+ROOT="${1:-vault/generated}"
 mkdir -p "$ROOT"
 
 make_vault () {

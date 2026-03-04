@@ -15,7 +15,7 @@ use tao_sdk_vault::CasePolicy;
 
 fn fixture_vault_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../qa/fixtures/conformance-vault")
+        .join("../../vault")
         .canonicalize()
         .expect("canonicalize conformance fixture vault")
 }
