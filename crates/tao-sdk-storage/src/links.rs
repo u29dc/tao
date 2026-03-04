@@ -277,6 +277,71 @@ ORDER BY sf.normalized_path ASC, l.link_id ASC
         })
         .collect()
     }
+
+    /// Count unresolved links across vault.
+    pub fn count_unresolved(connection: &Connection) -> Result<u64, LinksRepositoryError> {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE is_unresolved = 1",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "count_unresolved",
+                source,
+            })
+    }
+
+    /// List one unresolved links window with joined source/target paths.
+    pub fn list_unresolved_with_paths_window(
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+WHERE l.is_unresolved = 1
+ORDER BY l.link_id ASC
+LIMIT ?1 OFFSET ?2
+"#,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "prepare_list_unresolved_with_paths_window",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map(
+                params![i64::from(limit), i64::from(offset)],
+                row_to_link_with_paths,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_unresolved_with_paths_window",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_unresolved_with_paths_window_row",
+                source,
+            })
+        })
+        .collect()
+    }
 }
 
 fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
@@ -438,8 +503,16 @@ mod tests {
 
         let unresolved =
             LinksRepository::list_unresolved_with_paths(&connection).expect("list unresolved");
+        let unresolved_total =
+            LinksRepository::count_unresolved(&connection).expect("count unresolved");
+        let unresolved_window =
+            LinksRepository::list_unresolved_with_paths_window(&connection, 1, 1)
+                .expect("list unresolved window");
 
         assert_eq!(unresolved.len(), 2);
+        assert_eq!(unresolved_total, 2);
+        assert_eq!(unresolved_window.len(), 1);
+        assert_eq!(unresolved_window[0].link_id, "l-unresolved-b");
         assert_eq!(unresolved[0].source_path, "notes/a.md");
         assert_eq!(unresolved[0].link_id, "l-unresolved-a");
         assert_eq!(unresolved[1].source_path, "notes/b.md");

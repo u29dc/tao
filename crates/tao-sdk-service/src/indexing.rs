@@ -19,7 +19,8 @@ use tao_sdk_properties::{
 use tao_sdk_storage::{
     BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
     IndexStateRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
-    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository,
+    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput,
+    TasksRepository,
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
@@ -150,6 +151,7 @@ impl FullIndexService {
                     &markdown,
                     &entry.absolute,
                 )?;
+                let task_records = build_task_records(&file_id, &entry.normalized, &markdown);
                 let links = extract_index_links(&markdown, &parsed.body);
                 let heading_slugs = parsed
                     .headings
@@ -172,6 +174,7 @@ impl FullIndexService {
                     heading_slugs,
                     block_ids,
                     properties: property_records,
+                    tasks: task_records,
                 });
             } else if entry.normalized.ends_with(".base") {
                 let raw = fs::read_to_string(&entry.absolute).map_err(|source| {
@@ -199,6 +202,7 @@ impl FullIndexService {
         let mut link_records = Vec::new();
         let mut unresolved_links = 0_u64;
         let mut property_records = Vec::new();
+        let mut task_records = Vec::new();
         let heading_index = markdown_docs
             .iter()
             .map(|document| (document.source_path.clone(), document.heading_slugs.clone()))
@@ -210,6 +214,7 @@ impl FullIndexService {
 
         for markdown_doc in markdown_docs {
             property_records.extend(markdown_doc.properties.clone());
+            task_records.extend(markdown_doc.tasks.clone());
 
             for (index, indexed_link) in markdown_doc.links.iter().enumerate() {
                 let link = &indexed_link.link;
@@ -285,6 +290,7 @@ impl FullIndexService {
                  DELETE FROM bases;\
                  DELETE FROM render_cache;\
                  DELETE FROM search_index;\
+                 DELETE FROM tasks;\
                  DELETE FROM files;",
             )
             .map_err(|source| FullIndexError::ClearTables {
@@ -302,6 +308,14 @@ impl FullIndexService {
         for property in &property_records {
             PropertiesRepository::upsert(&transaction, property).map_err(|source| {
                 FullIndexError::UpsertProperty {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+
+        for task in &task_records {
+            TasksRepository::upsert(&transaction, task).map_err(|source| {
+                FullIndexError::UpsertTask {
                     source: Box::new(source),
                 }
             })?;
@@ -350,6 +364,7 @@ impl FullIndexService {
             "links_total": link_records.len(),
             "unresolved_links": unresolved_links,
             "properties_total": property_records.len(),
+            "tasks_total": task_records.len(),
             "bases_total": base_records.len(),
             "completed_unix_ms": now_unix_ms,
         }))
@@ -532,6 +547,11 @@ impl IncrementalIndexService {
                         operation: "delete_properties_for_file",
                         source: Box::new(source),
                     })?;
+                TasksRepository::delete_by_file_id(&transaction, &file_id).map_err(|source| {
+                    FullIndexError::UpsertTask {
+                        source: Box::new(source),
+                    }
+                })?;
                 transaction
                     .execute("DELETE FROM bases WHERE file_id = ?1", params![file_id])
                     .map_err(|source| FullIndexError::ExecuteSql {
@@ -585,6 +605,13 @@ impl IncrementalIndexService {
                     .map_err(|source| FullIndexError::UpsertSearchIndex {
                         source: Box::new(source),
                     })?;
+                    for task in build_task_records(&file_id, &normalized, &markdown) {
+                        TasksRepository::upsert(&transaction, &task).map_err(|source| {
+                            FullIndexError::UpsertTask {
+                                source: Box::new(source),
+                            }
+                        })?;
+                    }
 
                     if !markdown_candidates.iter().any(|path| path == &normalized) {
                         markdown_candidates.push(normalized.clone());
@@ -1972,6 +1999,7 @@ struct MarkdownIndexDocument {
     heading_slugs: Vec<String>,
     block_ids: Vec<String>,
     properties: Vec<PropertyRecordInput>,
+    tasks: Vec<TaskRecordInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -2045,6 +2073,45 @@ fn build_property_records(
     }
 
     Ok(records)
+}
+
+fn build_task_records(file_id: &str, source_path: &str, markdown: &str) -> Vec<TaskRecordInput> {
+    markdown
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (state, text) = parse_task_line(line)?;
+            let line_number = (index + 1) as i64;
+            Some(TaskRecordInput {
+                task_id: deterministic_id("task", &format!("{file_id}:{line_number}")),
+                file_id: file_id.to_string(),
+                file_path: source_path.to_string(),
+                file_path_lc: source_path.to_ascii_lowercase(),
+                line_number,
+                state: state.to_string(),
+                text: text.to_string(),
+                text_lc: text.to_ascii_lowercase(),
+            })
+        })
+        .collect()
+}
+
+fn parse_task_line(line: &str) -> Option<(&'static str, &str)> {
+    let trimmed = line.trim_start();
+    let (state, remainder) = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        ("open", rest)
+    } else if let Some(rest) = trimmed
+        .strip_prefix("- [x] ")
+        .or_else(|| trimmed.strip_prefix("- [X] "))
+    {
+        ("done", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
+        ("cancelled", rest)
+    } else {
+        return None;
+    };
+
+    Some((state, remainder.trim()))
 }
 
 fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
@@ -2436,6 +2503,13 @@ pub enum FullIndexError {
         /// Repository error.
         #[source]
         source: Box<tao_sdk_storage::PropertiesRepositoryError>,
+    },
+    /// Upserting task rows failed.
+    #[error("failed to upsert tasks during full index: {source}")]
+    UpsertTask {
+        /// Repository error.
+        #[source]
+        source: Box<tao_sdk_storage::TasksRepositoryError>,
     },
     /// Inserting links rows failed.
     #[error("failed to insert links during full index: {source}")]

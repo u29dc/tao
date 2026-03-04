@@ -2691,6 +2691,20 @@ impl BacklinkGraphService {
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
         Ok(map_link_edges(rows))
     }
+
+    /// List one unresolved edges window across vault.
+    pub fn unresolved_links_page(
+        &self,
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(u64, Vec<LinkGraphEdge>), LinkGraphServiceError> {
+        let total = LinksRepository::count_unresolved(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let rows = LinksRepository::list_unresolved_with_paths_window(connection, limit, offset)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok((total, map_link_edges(rows)))
+    }
 }
 
 fn map_link_edges(rows: Vec<tao_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdge> {
@@ -3272,7 +3286,13 @@ mod tests {
         let unresolved = BacklinkGraphService
             .unresolved_links(&connection)
             .expect("query unresolved");
+        let (unresolved_total, unresolved_page) = BacklinkGraphService
+            .unresolved_links_page(&connection, 1, 0)
+            .expect("query unresolved page");
         assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved_total, 1);
+        assert_eq!(unresolved_page.len(), 1);
+        assert_eq!(unresolved_page[0].link_id, "l-unresolved");
         assert_eq!(unresolved[0].link_id, "l-unresolved");
         assert!(unresolved[0].is_unresolved);
     }

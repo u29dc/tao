@@ -19,7 +19,8 @@ use tao_sdk_service::{
     SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
-    BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
+    BasesRepository, FilesRepository, PropertiesRepository, TasksRepository, preflight_migrations,
+    run_migrations,
 };
 use tao_sdk_vault::CasePolicy;
 use tao_sdk_watch::WatchReconcileService;
@@ -687,15 +688,10 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         GraphCommands::Unresolved(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let rows = BacklinkGraphService
-                .unresolved_links(&connection)
+            let (total, rows) = BacklinkGraphService
+                .unresolved_links_page(&connection, args.limit, args.offset)
                 .map_err(|source| anyhow!("query unresolved links failed: {source}"))?;
-            let total = rows.len();
-            let items = paginate_json_items(
-                rows.into_iter().map(link_edge_to_json).collect::<Vec<_>>(),
-                args.limit,
-                args.offset,
-            );
+            let items = rows.into_iter().map(link_edge_to_json).collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "graph.unresolved".to_string(),
                 summary: "graph unresolved completed".to_string(),
@@ -1022,39 +1018,40 @@ fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResul
         TaskCommands::List(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let tasks = extract_tasks_from_vault(Path::new(&resolved.vault_root), &connection)?;
-            let mut filtered = tasks
-                .into_iter()
-                .filter(|task| {
-                    let state_matches = args
-                        .state
-                        .as_deref()
-                        .map(|state| task.state.eq_ignore_ascii_case(state))
-                        .unwrap_or(true);
-                    let query_matches = args
-                        .query
-                        .as_deref()
-                        .map(|query| {
-                            let query = query.to_ascii_lowercase();
-                            task.text.to_ascii_lowercase().contains(&query)
-                                || task.path.to_ascii_lowercase().contains(&query)
-                        })
-                        .unwrap_or(true);
-                    state_matches && query_matches
-                })
-                .collect::<Vec<_>>();
-            filtered.sort_by(|left, right| {
-                (left.path.as_str(), left.line).cmp(&(right.path.as_str(), right.line))
-            });
-            let total = filtered.len();
-            let items = paginate_json_items(
-                filtered
-                    .into_iter()
-                    .map(|task| serde_json::to_value(task).unwrap_or(JsonValue::Null))
-                    .collect::<Vec<_>>(),
+            let state = args
+                .state
+                .as_deref()
+                .map(str::trim)
+                .filter(|state| !state.is_empty());
+            let query = args
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|query| !query.is_empty());
+            let total = TasksRepository::count_with_paths(&connection, state, query, None)
+                .map_err(|source| anyhow!("count tasks failed: {source}"))?;
+            let rows = TasksRepository::list_with_paths(
+                &connection,
+                state,
+                query,
+                None,
                 args.limit,
                 args.offset,
-            );
+            )
+            .map_err(|source| anyhow!("list tasks failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    let line = usize::try_from(row.line_number).unwrap_or(0);
+                    serde_json::to_value(ExtractedTask {
+                        path: row.file_path,
+                        line,
+                        state: row.state,
+                        text: row.text,
+                    })
+                    .unwrap_or(JsonValue::Null)
+                })
+                .collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "task.list".to_string(),
                 summary: "task list completed".to_string(),
@@ -1896,56 +1893,6 @@ fn collect_json_string_tokens(value: &JsonValue, out: &mut Vec<String>) {
         }
         JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::Object(_) => {}
     }
-}
-
-fn extract_tasks_from_vault(
-    vault_root: &Path,
-    connection: &Connection,
-) -> Result<Vec<ExtractedTask>> {
-    let files = FilesRepository::list_all(connection)
-        .map_err(|source| anyhow!("list files for task extraction failed: {source}"))?;
-    let mut tasks = Vec::new();
-    for file in files.into_iter().filter(|file| file.is_markdown) {
-        let absolute = vault_root.join(&file.normalized_path);
-        let markdown = match fs::read_to_string(&absolute) {
-            Ok(markdown) => markdown,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(anyhow!(
-                    "read markdown file for task extraction failed '{}': {source}",
-                    absolute.display()
-                ));
-            }
-        };
-        for (index, line) in markdown.lines().enumerate() {
-            if let Some((state, text)) = parse_task_line(line) {
-                tasks.push(ExtractedTask {
-                    path: file.normalized_path.clone(),
-                    line: index + 1,
-                    state: state.to_string(),
-                    text: text.to_string(),
-                });
-            }
-        }
-    }
-    Ok(tasks)
-}
-
-fn parse_task_line(line: &str) -> Option<(&'static str, &str)> {
-    let trimmed = line.trim_start();
-    let (state, remainder) = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-        ("open", rest)
-    } else if let Some(rest) = trimmed
-        .strip_prefix("- [x] ")
-        .or_else(|| trimmed.strip_prefix("- [X] "))
-    {
-        ("done", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
-        ("cancelled", rest)
-    } else {
-        return None;
-    };
-    Some((state, remainder.trim()))
 }
 
 fn update_task_line_state(line: &str, state: &str) -> Result<String> {

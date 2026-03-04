@@ -12,6 +12,7 @@ mod links;
 mod properties;
 mod render_cache;
 mod search_index;
+mod tasks;
 mod transaction;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
@@ -32,6 +33,7 @@ pub use render_cache::{
 pub use search_index::{
     SearchIndexRecord, SearchIndexRecordInput, SearchIndexRepository, SearchIndexRepositoryError,
 };
+pub use tasks::{TaskRecord, TaskRecordInput, TaskWithPath, TasksRepository, TasksRepositoryError};
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
 /// Initial schema migration identifier.
@@ -42,6 +44,14 @@ pub const MIGRATION_0001_SQL: &str = include_str!("../migrations/0001_init.sql")
 pub const MIGRATION_0002_ID: &str = "0002_search_index";
 /// Search index schema SQL payload.
 pub const MIGRATION_0002_SQL: &str = include_str!("../migrations/0002_search_index.sql");
+/// Tasks index schema migration identifier.
+pub const MIGRATION_0003_ID: &str = "0003_tasks";
+/// Tasks index schema SQL payload.
+pub const MIGRATION_0003_SQL: &str = include_str!("../migrations/0003_tasks.sql");
+/// Link query performance migration identifier.
+pub const MIGRATION_0004_ID: &str = "0004_links_perf";
+/// Link query performance SQL payload.
+pub const MIGRATION_0004_SQL: &str = include_str!("../migrations/0004_links_perf.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -60,7 +70,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 2] = [
+const MIGRATIONS: [Migration; 4] = [
     Migration {
         id: MIGRATION_0001_ID,
         sql: MIGRATION_0001_SQL,
@@ -68,6 +78,14 @@ const MIGRATIONS: [Migration; 2] = [
     Migration {
         id: MIGRATION_0002_ID,
         sql: MIGRATION_0002_SQL,
+    },
+    Migration {
+        id: MIGRATION_0003_ID,
+        sql: MIGRATION_0003_SQL,
+    },
+    Migration {
+        id: MIGRATION_0004_ID,
+        sql: MIGRATION_0004_SQL,
     },
 ];
 
@@ -398,8 +416,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MIGRATION_0001_ID, MIGRATION_0002_ID, MigrationRunnerError, apply_initial_schema,
-        known_migrations, migration_checksum, preflight_migrations, run_migrations,
+        MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
+        MigrationRunnerError, apply_initial_schema, known_migrations, migration_checksum,
+        preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -425,6 +444,7 @@ mod tests {
             "render_cache",
             "index_state",
             "search_index",
+            "tasks",
         ];
 
         for table in expected {
@@ -447,7 +467,12 @@ mod tests {
 
         assert_eq!(
             report.applied,
-            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+            vec![
+                MIGRATION_0001_ID.to_string(),
+                MIGRATION_0002_ID.to_string(),
+                MIGRATION_0003_ID.to_string(),
+                MIGRATION_0004_ID.to_string()
+            ]
         );
         assert!(report.skipped.is_empty());
 
@@ -531,13 +556,23 @@ mod tests {
 
         assert_eq!(
             first.applied,
-            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+            vec![
+                MIGRATION_0001_ID.to_string(),
+                MIGRATION_0002_ID.to_string(),
+                MIGRATION_0003_ID.to_string(),
+                MIGRATION_0004_ID.to_string()
+            ]
         );
         assert!(first.skipped.is_empty());
         assert!(second.applied.is_empty());
         assert_eq!(
             second.skipped,
-            vec![MIGRATION_0001_ID.to_string(), MIGRATION_0002_ID.to_string()]
+            vec![
+                MIGRATION_0001_ID.to_string(),
+                MIGRATION_0002_ID.to_string(),
+                MIGRATION_0003_ID.to_string(),
+                MIGRATION_0004_ID.to_string()
+            ]
         );
     }
 
