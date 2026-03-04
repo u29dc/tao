@@ -6,6 +6,8 @@ use thiserror::Error;
 pub struct SearchIndexRecord {
     /// Stable file identifier.
     pub file_id: String,
+    /// Normalized path projection preserving original path casing.
+    pub normalized_path: String,
     /// Lower-cased normalized path projection.
     pub normalized_path_lc: String,
     /// Lower-cased title projection.
@@ -21,6 +23,8 @@ pub struct SearchIndexRecord {
 pub struct SearchIndexRecordInput {
     /// Stable file identifier.
     pub file_id: String,
+    /// Normalized path projection preserving original path casing.
+    pub normalized_path: String,
     /// Lower-cased normalized path projection.
     pub normalized_path_lc: String,
     /// Lower-cased title projection.
@@ -44,13 +48,15 @@ impl SearchIndexRepository {
                 r#"
 INSERT INTO search_index (
   file_id,
+  normalized_path,
   normalized_path_lc,
   title_lc,
   content_lc
 )
-VALUES (?1, ?2, ?3, ?4)
+VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT(file_id)
 DO UPDATE SET
+  normalized_path = excluded.normalized_path,
   normalized_path_lc = excluded.normalized_path_lc,
   title_lc = excluded.title_lc,
   content_lc = excluded.content_lc,
@@ -58,6 +64,7 @@ DO UPDATE SET
 "#,
                 params![
                     record.file_id,
+                    record.normalized_path,
                     record.normalized_path_lc,
                     record.title_lc,
                     record.content_lc
@@ -81,6 +88,7 @@ DO UPDATE SET
                 r#"
 SELECT
   file_id,
+  normalized_path,
   normalized_path_lc,
   title_lc,
   content_lc,
@@ -129,6 +137,7 @@ WHERE file_id = ?1
                 r#"
 SELECT
   file_id,
+  normalized_path,
   normalized_path_lc,
   title_lc,
   content_lc,
@@ -162,6 +171,7 @@ ORDER BY file_id ASC
 fn row_to_search_index_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchIndexRecord> {
     Ok(SearchIndexRecord {
         file_id: row.get("file_id")?,
+        normalized_path: row.get("normalized_path")?,
         normalized_path_lc: row.get("normalized_path_lc")?,
         title_lc: row.get("title_lc")?,
         content_lc: row.get("content_lc")?,
@@ -217,6 +227,7 @@ mod tests {
             &connection,
             &SearchIndexRecordInput {
                 file_id: "f1".to_string(),
+                normalized_path: "notes/alpha.md".to_string(),
                 normalized_path_lc: "notes/alpha.md".to_string(),
                 title_lc: "alpha".to_string(),
                 content_lc: "hello world".to_string(),
@@ -255,6 +266,7 @@ mod tests {
             &connection,
             &SearchIndexRecordInput {
                 file_id: "f1".to_string(),
+                normalized_path: "notes/alpha.md".to_string(),
                 normalized_path_lc: "notes/alpha.md".to_string(),
                 title_lc: "alpha".to_string(),
                 content_lc: "hello world".to_string(),

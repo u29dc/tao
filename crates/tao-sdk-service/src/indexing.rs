@@ -162,6 +162,7 @@ impl FullIndexService {
                 let block_ids = extract_block_ids(&parsed.body);
                 search_records.push(SearchIndexRecordInput {
                     file_id: file_id.clone(),
+                    normalized_path: entry.normalized.clone(),
                     normalized_path_lc: entry.normalized.to_ascii_lowercase(),
                     title_lc: title_from_normalized_path(&entry.normalized).to_ascii_lowercase(),
                     content_lc: markdown.to_ascii_lowercase(),
@@ -597,6 +598,7 @@ impl IncrementalIndexService {
                         &transaction,
                         &SearchIndexRecordInput {
                             file_id: file_id.clone(),
+                            normalized_path: normalized.clone(),
                             normalized_path_lc: normalized.to_ascii_lowercase(),
                             title_lc: title_from_normalized_path(&normalized).to_ascii_lowercase(),
                             content_lc: markdown.to_ascii_lowercase(),

@@ -80,28 +80,33 @@ impl SearchQueryService {
         let mut statement = connection
             .prepare(
                 r#"
+WITH matches AS (
+  SELECT
+    si.file_id,
+    COALESCE(si.normalized_path, si.normalized_path_lc) AS normalized_path,
+    si.updated_at AS indexed_at,
+    si.normalized_path_lc,
+    instr(si.title_lc, ?1) AS title_pos,
+    instr(si.normalized_path_lc, ?1) AS path_pos,
+    instr(si.content_lc, ?1) AS content_pos
+  FROM search_index si
+)
 SELECT
-  f.file_id,
-  f.normalized_path,
-  f.indexed_at,
-  CASE WHEN instr(si.title_lc, ?1) > 0 THEN 1 ELSE 0 END AS title_match,
-  CASE WHEN instr(si.normalized_path_lc, ?1) > 0 THEN 1 ELSE 0 END AS path_match,
-  CASE WHEN instr(si.content_lc, ?1) > 0 THEN 1 ELSE 0 END AS content_match,
+  file_id,
+  normalized_path,
+  indexed_at,
+  CASE WHEN title_pos > 0 THEN 1 ELSE 0 END AS title_match,
+  CASE WHEN path_pos > 0 THEN 1 ELSE 0 END AS path_match,
+  CASE WHEN content_pos > 0 THEN 1 ELSE 0 END AS content_match,
   (
-    CASE WHEN instr(si.title_lc, ?1) > 0 THEN 3 ELSE 0 END
-    + CASE WHEN instr(si.normalized_path_lc, ?1) > 0 THEN 2 ELSE 0 END
-    + CASE WHEN instr(si.content_lc, ?1) > 0 THEN 1 ELSE 0 END
+    CASE WHEN title_pos > 0 THEN 3 ELSE 0 END
+    + CASE WHEN path_pos > 0 THEN 2 ELSE 0 END
+    + CASE WHEN content_pos > 0 THEN 1 ELSE 0 END
   ) AS score,
   COUNT(*) OVER() AS total_count
-FROM search_index si
-INNER JOIN files f ON f.file_id = si.file_id
-WHERE f.is_markdown = 1
-  AND (
-    instr(si.title_lc, ?1) > 0
-    OR instr(si.normalized_path_lc, ?1) > 0
-    OR instr(si.content_lc, ?1) > 0
-  )
-ORDER BY score DESC, f.normalized_path ASC
+FROM matches
+WHERE title_pos > 0 OR path_pos > 0 OR content_pos > 0
+ORDER BY score DESC, normalized_path_lc ASC
 LIMIT ?2
 OFFSET ?3
 "#,

@@ -52,6 +52,10 @@ pub const MIGRATION_0003_SQL: &str = include_str!("../migrations/0003_tasks.sql"
 pub const MIGRATION_0004_ID: &str = "0004_links_perf";
 /// Link query performance SQL payload.
 pub const MIGRATION_0004_SQL: &str = include_str!("../migrations/0004_links_perf.sql");
+/// Search index path projection migration identifier.
+pub const MIGRATION_0005_ID: &str = "0005_search_index_path";
+/// Search index path projection SQL payload.
+pub const MIGRATION_0005_SQL: &str = include_str!("../migrations/0005_search_index_path.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -70,7 +74,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 4] = [
+const MIGRATIONS: [Migration; 5] = [
     Migration {
         id: MIGRATION_0001_ID,
         sql: MIGRATION_0001_SQL,
@@ -87,6 +91,10 @@ const MIGRATIONS: [Migration; 4] = [
         id: MIGRATION_0004_ID,
         sql: MIGRATION_0004_SQL,
     },
+    Migration {
+        id: MIGRATION_0005_ID,
+        sql: MIGRATION_0005_SQL,
+    },
 ];
 
 const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
@@ -102,15 +110,29 @@ const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
 /// Apply known schema migration SQL directly to an active connection.
 pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchemaError> {
     for migration in known_migrations() {
-        connection.execute_batch(migration.sql).map_err(|source| {
-            StorageSchemaError::ApplyMigration {
+        if let Err(source) = connection.execute_batch(migration.sql) {
+            if migration.id == MIGRATION_0005_ID
+                && is_duplicate_column_error(&source, "normalized_path")
+            {
+                continue;
+            }
+            return Err(StorageSchemaError::ApplyMigration {
                 migration_id: migration.id,
                 source,
-            }
-        })?;
+            });
+        }
     }
 
     Ok(())
+}
+
+fn is_duplicate_column_error(source: &rusqlite::Error, column: &str) -> bool {
+    match source {
+        rusqlite::Error::SqliteFailure(_, Some(message)) => {
+            message.contains("duplicate column name") && message.contains(column)
+        }
+        _ => false,
+    }
 }
 
 /// Return ordered migration definitions.
@@ -417,8 +439,8 @@ mod tests {
 
     use super::{
         MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
-        MigrationRunnerError, apply_initial_schema, known_migrations, migration_checksum,
-        preflight_migrations, run_migrations,
+        MIGRATION_0005_ID, MigrationRunnerError, apply_initial_schema, known_migrations,
+        migration_checksum, preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -471,7 +493,8 @@ mod tests {
                 MIGRATION_0001_ID.to_string(),
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string()
+                MIGRATION_0004_ID.to_string(),
+                MIGRATION_0005_ID.to_string()
             ]
         );
         assert!(report.skipped.is_empty());
@@ -560,7 +583,8 @@ mod tests {
                 MIGRATION_0001_ID.to_string(),
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string()
+                MIGRATION_0004_ID.to_string(),
+                MIGRATION_0005_ID.to_string()
             ]
         );
         assert!(first.skipped.is_empty());
@@ -571,7 +595,8 @@ mod tests {
                 MIGRATION_0001_ID.to_string(),
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string()
+                MIGRATION_0004_ID.to_string(),
+                MIGRATION_0005_ID.to_string()
             ]
         );
     }
