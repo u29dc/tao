@@ -1,5 +1,7 @@
 //! Swift bridge adapter shell over SDK services.
 
+mod runtime;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,10 @@ use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, run_migrations,
 };
 use thiserror::Error;
+
+pub use runtime::{BridgeStartupBundle, TaoBridgeRuntime, TaoBridgeRuntimeError};
+
+uniffi::setup_scaffolding!();
 
 /// Current bridge DTO schema version.
 pub const BRIDGE_SCHEMA_VERSION: &str = "v1.0";

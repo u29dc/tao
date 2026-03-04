@@ -9,7 +9,18 @@ let package = Package(
         .executable(name: "TaoMacOSApp", targets: ["TaoMacOSApp"])
     ],
     targets: [
-        .target(name: "TaoMacOSAppScaffold"),
+        .systemLibrary(
+            name: "tao_sdk_bridgeFFI",
+            path: "Sources/TaoMacOSAppScaffold/Generated"
+        ),
+        .target(
+            name: "TaoMacOSAppScaffold",
+            dependencies: ["tao_sdk_bridgeFFI"],
+            linkerSettings: [
+                .unsafeFlags(["-L", "../../target/release"]),
+                .linkedLibrary("tao_sdk_bridge")
+            ]
+        ),
         .executableTarget(
             name: "TaoMacOSApp",
             dependencies: ["TaoMacOSAppScaffold"]

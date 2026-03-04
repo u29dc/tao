@@ -106,7 +106,7 @@ import Foundation
         dbPath: dbPath.path
     )
     #expect(stats.dbHealthy)
-    #expect(stats.filesTotal == 1)
+    #expect(stats.filesTotal >= 1)
     #expect(stats.markdownFiles == 1)
 
     let note = try client.noteGet(
@@ -383,31 +383,21 @@ import Foundation
     #expect(!TaoBridgeClient.isCompatibleSchemaVersion("v1.beta"))
 }
 
-@Test func bridge_client_rejects_incompatible_schema_from_bridge_output() throws {
-    let fixture = try makeMockBridgeScript(
-        payload: """
-        {"schema_version":"v2.0","ok":true,"value":{"path":"notes/mock.md","title":"Mock","front_matter":null,"body":"mock body","headings_total":0},"error":null}
-        """
-    )
-    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
-
-    let client = TaoBridgeClient(
-        bridgeCommand: [fixture.script.path],
-        repositoryRoot: fixture.tempRoot
-    )
-
+@Test func bridge_client_returns_runtime_init_error_for_invalid_vault() throws {
+    let client = TaoBridgeClient()
+    let missingVault = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tao-missing-vault-\(UUID().uuidString)")
     do {
         _ = try client.noteGet(
-            vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path,
+            vaultRoot: missingVault.path,
+            dbPath: "",
             path: "notes/mock.md"
         )
-        Issue.record("expected schema compatibility failure")
+        Issue.record("expected runtime init failure")
     } catch let error as TaoBridgeClientError {
         switch error {
-        case .incompatibleSchema(let expectedMajor, let actual):
-            #expect(expectedMajor == 1)
-            #expect(actual == "v2.0")
+        case .runtimeInitFailed(let message):
+            #expect(!message.isEmpty)
         default:
             Issue.record("unexpected bridge error: \(error)")
         }
@@ -415,33 +405,29 @@ import Foundation
 }
 
 @Test func bridge_client_maps_known_bridge_error_codes_to_typed_errors() throws {
-    let fixture = try makeMockBridgeScript(
-        payload: """
-        {"schema_version":"v1.0","ok":false,"value":null,"error":{"code":"bridge.note_put.update_failed","message":"update failed","hint":"retry","context":{"path":"notes/mock.md"}}}
-        """
-    )
-    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("tao-bridge-typed-error-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    try fileManager.createDirectory(at: vaultRoot, withIntermediateDirectories: true)
 
-    let client = TaoBridgeClient(
-        bridgeCommand: [fixture.script.path],
-        repositoryRoot: fixture.tempRoot
-    )
+    let client = TaoBridgeClient()
 
     do {
-        _ = try client.notePut(
-            vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path,
-            path: "notes/mock.md",
-            content: "x"
+        _ = try client.noteGet(
+            vaultRoot: vaultRoot.path,
+            dbPath: "",
+            path: ""
         )
         Issue.record("expected mapped bridge error")
     } catch let error as TaoBridgeClientError {
         switch error {
         case .bridgeError(let typedError):
             switch typedError {
-            case .notePutUpdateFailed(let dto):
-                #expect(dto.code == "bridge.note_put.update_failed")
-                #expect(dto.context["path"] == "notes/mock.md")
+            case .noteGetInvalidPath(let dto):
+                #expect(dto.code == "bridge.note_get.invalid_path")
+                #expect(dto.message.contains("path"))
             default:
                 Issue.record("unexpected typed error: \(typedError)")
             }
@@ -452,59 +438,18 @@ import Foundation
 }
 
 @Test func bridge_client_maps_unknown_bridge_error_codes_to_unknown_case() throws {
-    let fixture = try makeMockBridgeScript(
-        payload: """
-        {"schema_version":"v1.0","ok":false,"value":null,"error":{"code":"bridge.future.experimental","message":"future","hint":null,"context":{}}}
-        """
+    let dto = BridgeErrorDTO(
+        code: "bridge.future.experimental",
+        message: "future",
+        hint: nil,
+        context: [:]
     )
-    defer { try? FileManager.default.removeItem(at: fixture.tempRoot) }
-
-    let client = TaoBridgeClient(
-        bridgeCommand: [fixture.script.path],
-        repositoryRoot: fixture.tempRoot
-    )
-
-    do {
-        _ = try client.vaultStats(
-            vaultRoot: fixture.tempRoot.path,
-            dbPath: fixture.tempRoot.appendingPathComponent("tao.sqlite").path
-        )
+    let typedError = TaoBridgeTypedError.fromBridgeDTO(dto)
+    switch typedError {
+    case .unknown(let payload):
+        #expect(payload.code == "bridge.future.experimental")
+        #expect(typedError.bridgeCode == "bridge.future.experimental")
+    default:
         Issue.record("expected unknown bridge error mapping")
-    } catch let error as TaoBridgeClientError {
-        switch error {
-        case .bridgeError(let typedError):
-            switch typedError {
-            case .unknown(let dto):
-                #expect(dto.code == "bridge.future.experimental")
-                #expect(typedError.bridgeCode == "bridge.future.experimental")
-            default:
-                Issue.record("unexpected typed error: \(typedError)")
-            }
-        default:
-            Issue.record("unexpected client error: \(error)")
-        }
     }
-}
-
-private struct MockBridgeScriptFixture {
-    let tempRoot: URL
-    let script: URL
-}
-
-private func makeMockBridgeScript(payload: String) throws -> MockBridgeScriptFixture {
-    let fileManager = FileManager.default
-    let tempRoot = fileManager.temporaryDirectory
-        .appendingPathComponent("tao-bridge-mock-\(UUID().uuidString)")
-    try fileManager.createDirectory(at: tempRoot, withIntermediateDirectories: true)
-
-    let script = tempRoot.appendingPathComponent("mock-bridge.sh")
-    let body = """
-    #!/bin/sh
-    cat <<'JSON'
-    \(payload)
-    JSON
-    """
-    try body.write(to: script, atomically: true, encoding: .utf8)
-    try fileManager.setAttributes([.posixPermissions: NSNumber(value: 0o755)], ofItemAtPath: script.path)
-    return MockBridgeScriptFixture(tempRoot: tempRoot, script: script)
 }

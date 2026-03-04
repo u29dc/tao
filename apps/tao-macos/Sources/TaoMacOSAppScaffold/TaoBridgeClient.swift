@@ -116,6 +116,11 @@ public struct BridgeBaseTablePage: Decodable {
     public let rows: [BridgeBaseTableRow]
 }
 
+public struct BridgeStartupBundle: Decodable {
+    public let stats: BridgeVaultStats
+    public let notes: BridgeNoteListPage
+}
+
 public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case initFailed(BridgeErrorDTO)
     case vaultStatsFailed(BridgeErrorDTO)
@@ -316,8 +321,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
 }
 
 public enum TaoBridgeClientError: Error, CustomStringConvertible {
-    case launchFailed(String)
-    case processFailed(Int32, String)
+    case runtimeInitFailed(String)
+    case runtimeCallFailed(String)
     case decodeFailed(String)
     case incompatibleSchema(expectedMajor: Int, actual: String)
     case bridgeError(TaoBridgeTypedError)
@@ -325,10 +330,10 @@ public enum TaoBridgeClientError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .launchFailed(let message):
-            return "launch failed: \(message)"
-        case .processFailed(let code, let stderr):
-            return "process failed (\(code)): \(stderr)"
+        case .runtimeInitFailed(let message):
+            return "runtime init failed: \(message)"
+        case .runtimeCallFailed(let message):
+            return "runtime call failed: \(message)"
         case .decodeFailed(let message):
             return "decode failed: \(message)"
         case .incompatibleSchema(let expectedMajor, let actual):
@@ -343,37 +348,25 @@ public enum TaoBridgeClientError: Error, CustomStringConvertible {
 
 public struct TaoBridgeClient {
     private static let supportedSchemaMajor = 1
-    private let bridgeCommand: [String]
-    private let repositoryRoot: URL
 
     public init(
-        bridgeCommand: [String]? = nil,
-        repositoryRoot: URL? = nil
+        bridgeCommand _: [String]? = nil,
+        repositoryRoot _: URL? = nil
     ) {
-        let resolvedRepositoryRoot = repositoryRoot ?? Self.defaultRepositoryRoot()
-        self.repositoryRoot = resolvedRepositoryRoot
-        self.bridgeCommand = bridgeCommand ?? Self.defaultBridgeCommand(repositoryRoot: resolvedRepositoryRoot)
     }
 
     public func vaultStats(vaultRoot: String, dbPath: String) throws -> BridgeVaultStats {
-        try invoke(
-            subcommand: [
-                "vault-stats",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.vaultStatsJson() },
             as: BridgeVaultStats.self
         )
     }
 
     public func noteGet(vaultRoot: String, dbPath: String, path: String) throws -> BridgeNoteView {
-        try invoke(
-            subcommand: [
-                "note-get",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--path", path
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.noteGetJson(normalizedPath: path) },
             as: BridgeNoteView.self
         )
     }
@@ -383,13 +376,9 @@ public struct TaoBridgeClient {
         dbPath: String,
         path: String
     ) throws -> BridgeNoteContext {
-        try invoke(
-            subcommand: [
-                "note-context",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--path", path
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.noteContextJson(normalizedPath: path) },
             as: BridgeNoteContext.self
         )
     }
@@ -400,14 +389,9 @@ public struct TaoBridgeClient {
         path: String,
         content: String
     ) throws -> BridgeWriteAck {
-        try invoke(
-            subcommand: [
-                "note-put",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--path", path,
-                "--content", content
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.notePutJson(normalizedPath: path, content: content) },
             as: BridgeWriteAck.self
         )
     }
@@ -418,16 +402,11 @@ public struct TaoBridgeClient {
         afterPath: String? = nil,
         limit: UInt64 = 128
     ) throws -> BridgeNoteListPage {
-        var subcommand: [String] = [
-            "notes-list",
-            "--vault-root", vaultRoot,
-            "--db-path", dbPath,
-            "--limit", String(limit)
-        ]
-        if let afterPath {
-            subcommand.append(contentsOf: ["--after-path", afterPath])
-        }
-        return try invoke(subcommand: subcommand, as: BridgeNoteListPage.self)
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.notesWindowJson(afterPath: afterPath, limit: limit) },
+            as: BridgeNoteListPage.self
+        )
     }
 
     public func noteLinks(
@@ -435,24 +414,17 @@ public struct TaoBridgeClient {
         dbPath: String,
         path: String
     ) throws -> BridgeLinkPanels {
-        try invoke(
-            subcommand: [
-                "note-links",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--path", path
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.noteLinksJson(normalizedPath: path) },
             as: BridgeLinkPanels.self
         )
     }
 
     public func basesList(vaultRoot: String, dbPath: String) throws -> [BridgeBaseRef] {
-        try invoke(
-            subcommand: [
-                "bases-list",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.basesListJson() },
             as: [BridgeBaseRef].self
         )
     }
@@ -465,16 +437,16 @@ public struct TaoBridgeClient {
         page: UInt32 = 1,
         pageSize: UInt32 = 50
     ) throws -> BridgeBaseTablePage {
-        try invoke(
-            subcommand: [
-                "bases-view",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--path-or-id", pathOrId,
-                "--view-name", viewName,
-                "--page", String(page),
-                "--page-size", String(pageSize)
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: {
+                try runtime.basesViewJson(
+                    pathOrId: pathOrId,
+                    viewName: viewName,
+                    page: page,
+                    pageSize: pageSize
+                )
+            },
             as: BridgeBaseTablePage.self
         )
     }
@@ -485,26 +457,51 @@ public struct TaoBridgeClient {
         afterId: UInt64 = 0,
         limit: UInt64 = 128
     ) throws -> BridgeEventBatch {
-        try invoke(
-            subcommand: [
-                "events-poll",
-                "--vault-root", vaultRoot,
-                "--db-path", dbPath,
-                "--after-id", String(afterId),
-                "--limit", String(limit)
-            ],
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        return try invoke(
+            runtimeCall: { try runtime.eventsPollJson(afterId: afterId, limit: limit) },
             as: BridgeEventBatch.self
         )
     }
 
-    private func invoke<Value: Decodable>(subcommand: [String], as type: Value.Type) throws -> Value {
-        let payload = try runProcess(arguments: bridgeCommand + subcommand)
+    public func startupBundle(
+        vaultRoot: String,
+        dbPath: String,
+        limit: UInt64 = 128
+    ) throws -> BridgeStartupBundle {
+        let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        do {
+            return try decoder.decode(
+                BridgeStartupBundle.self,
+                from: Data(try runtime.startupBundleJson(limit: limit).utf8)
+            )
+        } catch {
+            throw TaoBridgeClientError.decodeFailed(error.localizedDescription)
+        }
+    }
+
+    private func invoke<Value: Decodable>(
+        runtimeCall: () throws -> String,
+        as type: Value.Type
+    ) throws -> Value {
+        let payload: String
+        do {
+            payload = try runtimeCall()
+        } catch let error as TaoBridgeRuntimeError {
+            throw TaoBridgeClientError.runtimeCallFailed(Self.runtimeErrorMessage(error))
+        } catch {
+            throw TaoBridgeClientError.runtimeCallFailed(error.localizedDescription)
+        }
+
+        let data = Data(payload.utf8)
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
 
         let envelope: BridgeEnvelope<Value>
         do {
-            envelope = try decoder.decode(BridgeEnvelope<Value>.self, from: payload)
+            envelope = try decoder.decode(BridgeEnvelope<Value>.self, from: data)
         } catch {
             throw TaoBridgeClientError.decodeFailed(error.localizedDescription)
         }
@@ -529,38 +526,20 @@ public struct TaoBridgeClient {
         throw TaoBridgeClientError.missingValue
     }
 
-    private func runProcess(arguments: [String]) throws -> Data {
-        if let missingExecutable = missingExecutablePath(for: arguments.first) {
-            throw TaoBridgeClientError.launchFailed(
-                "bridge executable not found at \(missingExecutable); run `bun run build` or set TAO_BRIDGE_BIN"
-            )
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = arguments
-        process.currentDirectoryURL = repositoryRoot
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
+    private func bridgeRuntime(vaultRoot: String, dbPath: String) throws -> TaoBridgeRuntime {
+        let normalizedVault = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDbPath = dbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dbPathOverride = normalizedDbPath.isEmpty ? nil : normalizedDbPath
         do {
-            try process.run()
+            return try TaoBridgeRuntimeCache.runtime(
+                vaultRoot: normalizedVault,
+                dbPath: dbPathOverride
+            )
+        } catch let error as TaoBridgeRuntimeError {
+            throw TaoBridgeClientError.runtimeInitFailed(Self.runtimeErrorMessage(error))
         } catch {
-            throw TaoBridgeClientError.launchFailed(error.localizedDescription)
+            throw TaoBridgeClientError.runtimeInitFailed(error.localizedDescription)
         }
-
-        process.waitUntilExit()
-        let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            throw TaoBridgeClientError.processFailed(process.terminationStatus, stderr)
-        }
-        return stdout
     }
 
     static func isCompatibleSchemaVersion(_ schemaVersion: String) -> Bool {
@@ -578,57 +557,42 @@ public struct TaoBridgeClient {
 
         let numeric = String(trimmed.dropFirst())
         let parts = numeric.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 1 || parts.count == 2 else {
-            return nil
-        }
-
-        guard let major = Int(parts[0]) else {
-            return nil
-        }
-
-        if parts.count == 1 {
-            return (major: major, minor: 0)
-        }
-
-        guard let minor = Int(parts[1]) else {
-            return nil
-        }
+        guard parts.count == 1 || parts.count == 2 else { return nil }
+        guard let major = Int(parts[0]) else { return nil }
+        if parts.count == 1 { return (major: major, minor: 0) }
+        guard let minor = Int(parts[1]) else { return nil }
         return (major: major, minor: minor)
     }
 
-    private static func defaultRepositoryRoot() -> URL {
-        var root = URL(fileURLWithPath: #filePath)
-        for _ in 0..<5 {
-            root.deleteLastPathComponent()
+    private static func runtimeErrorMessage(_ error: TaoBridgeRuntimeError) -> String {
+        switch error {
+        case .Runtime(let message):
+            return message
         }
-        return root
+    }
+}
+
+private enum TaoBridgeRuntimeCache {
+    private static let lock = NSLock()
+    private static var runtimes: [String: TaoBridgeRuntime] = [:]
+
+    static func runtime(vaultRoot: String, dbPath: String?) throws -> TaoBridgeRuntime {
+        let key = "\(vaultRoot)\n\(dbPath ?? "")"
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let existing = runtimes[key] {
+            return existing
+        }
+
+        let runtime = try TaoBridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
+        runtimes[key] = runtime
+        return runtime
     }
 
-    private static func defaultBridgeCommand(repositoryRoot: URL) -> [String] {
-        let env = ProcessInfo.processInfo.environment
-        if let configured = env["TAO_BRIDGE_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !configured.isEmpty
-        {
-            return [configured]
-        }
-
-        let bridgePath = repositoryRoot
-            .appendingPathComponent("target")
-            .appendingPathComponent("release")
-            .appendingPathComponent("tao-sdk-bridge")
-            .path
-        return [bridgePath]
-    }
-
-    private func missingExecutablePath(for command: String?) -> String? {
-        guard let command else {
-            return "<empty command>"
-        }
-
-        if command.contains("/") {
-            return FileManager.default.isExecutableFile(atPath: command) ? nil : command
-        }
-
-        return nil
+    static func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        runtimes.removeAll()
     }
 }

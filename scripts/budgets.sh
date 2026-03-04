@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPORT_DIR="bench/reports"
+REPORT_DIR=".benchmarks/reports"
 BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
+FFI_REPORT="${REPORT_DIR}/ffi-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 BENCH_BIN="target/release/tao-bench"
 
@@ -21,6 +22,15 @@ echo "Running bridge latency budget gate..."
   --max-p50-ms 50 \
   --max-p95-ms 120 \
   --json-out "${BRIDGE_REPORT}"
+
+echo "Running ffi latency budget gate..."
+"${BENCH_BIN}" \
+  --scenario ffi \
+  --iterations 200 \
+  --enforce-budgets \
+  --max-p50-ms 20 \
+  --max-p95-ms 60 \
+  --json-out "${FFI_REPORT}"
 
 echo "Running startup latency budget gate..."
 "${BENCH_BIN}" \

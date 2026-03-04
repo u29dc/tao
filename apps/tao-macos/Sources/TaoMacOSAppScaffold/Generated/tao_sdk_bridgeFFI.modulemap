@@ -1,0 +1,7 @@
+module tao_sdk_bridgeFFI {
+    header "tao_sdk_bridgeFFI.h"
+    export *
+    use "Darwin"
+    use "_Builtin_stdbool"
+    use "_Builtin_stdint"
+}
