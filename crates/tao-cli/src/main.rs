@@ -952,8 +952,10 @@ fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connectio
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{Cli, dispatch, render_output};
     use clap::{CommandFactory, Parser};
@@ -978,271 +980,275 @@ mod tests {
 
     #[test]
     fn json_output_is_one_envelope_object() {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().to_path_buf();
-        let cli = Cli::parse_from([
-            "tao".to_string(),
-            "--json".to_string(),
-            "vault".to_string(),
-            "open".to_string(),
-            "--vault-root".to_string(),
-            vault_root.to_string_lossy().to_string(),
-        ]);
-        let result = dispatch(cli.command).expect("dispatch");
-        let output = render_output(cli.json, &result).expect("render output");
-        let value: serde_json::Value = serde_json::from_str(&output).expect("parse output");
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().to_path_buf();
+            let cli = Cli::parse_from([
+                "tao".to_string(),
+                "--json".to_string(),
+                "vault".to_string(),
+                "open".to_string(),
+                "--vault-root".to_string(),
+                vault_root.to_string_lossy().to_string(),
+            ]);
+            let result = dispatch(cli.command).expect("dispatch");
+            let output = render_output(cli.json, &result).expect("render output");
+            let value: serde_json::Value = serde_json::from_str(&output).expect("parse output");
 
-        assert_eq!(
-            value.get("ok").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            value
-                .get("value")
-                .and_then(|raw| raw.get("command"))
-                .and_then(serde_json::Value::as_str),
-            Some("vault.open")
-        );
-        assert!(value.get("error").is_some_and(serde_json::Value::is_null));
+            assert_eq!(
+                value.get("ok").and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                value
+                    .get("value")
+                    .and_then(|raw| raw.get("command"))
+                    .and_then(serde_json::Value::as_str),
+                Some("vault.open")
+            );
+            assert!(value.get("error").is_some_and(serde_json::Value::is_null));
+        });
     }
 
     #[test]
     fn json_contract_is_stable_for_all_grouped_json_commands() {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        let notes_dir = vault_root.join("notes");
-        let projects_dir = notes_dir.join("projects");
-        let views_dir = vault_root.join("views");
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            let notes_dir = vault_root.join("notes");
+            let projects_dir = notes_dir.join("projects");
+            let views_dir = vault_root.join("views");
 
-        fs::create_dir_all(&projects_dir).expect("create projects dir");
-        fs::create_dir_all(&views_dir).expect("create views dir");
-        fs::write(
-            projects_dir.join("project-a.md"),
-            "---\nstatus: active\npriority: 4\n---\n# Project A\n",
-        )
-        .expect("write project-a note");
-        fs::write(
-            projects_dir.join("project-b.md"),
-            "---\nstatus: paused\npriority: 2\n---\n# Project B\n",
-        )
-        .expect("write project-b note");
-        fs::write(notes_dir.join("alpha.md"), "# Alpha\n[[project-a]]\n")
-            .expect("write alpha note");
-        fs::write(
-            views_dir.join("projects.base"),
-            "views:\n  - name: ActiveProjects\n    type: table\n    source: notes/projects\n    filters:\n      - key: status\n        op: eq\n        value: active\n    sorts:\n      - key: priority\n        direction: desc\n    columns:\n      - title\n      - status\n      - priority\n",
-        )
-        .expect("write projects base");
+            fs::create_dir_all(&projects_dir).expect("create projects dir");
+            fs::create_dir_all(&views_dir).expect("create views dir");
+            fs::write(
+                projects_dir.join("project-a.md"),
+                "---\nstatus: active\npriority: 4\n---\n# Project A\n",
+            )
+            .expect("write project-a note");
+            fs::write(
+                projects_dir.join("project-b.md"),
+                "---\nstatus: paused\npriority: 2\n---\n# Project B\n",
+            )
+            .expect("write project-b note");
+            fs::write(notes_dir.join("alpha.md"), "# Alpha\n[[project-a]]\n")
+                .expect("write alpha note");
+            fs::write(
+                views_dir.join("projects.base"),
+                "views:\n  - name: ActiveProjects\n    type: table\n    source: notes/projects\n    filters:\n      - key: status\n        op: eq\n        value: active\n    sorts:\n      - key: priority\n        direction: desc\n    columns:\n      - title\n      - status\n      - priority\n",
+            )
+            .expect("write projects base");
 
-        let vault_root_string = vault_root.to_string_lossy().to_string();
+            let vault_root_string = vault_root.to_string_lossy().to_string();
 
-        let scenarios = [
-            (
-                "vault.open",
-                vec![
-                    "tao",
-                    "--json",
-                    "vault",
-                    "open",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "vault.stats",
-                vec![
-                    "tao",
-                    "--json",
-                    "vault",
-                    "stats",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "vault.preflight",
-                vec![
-                    "tao",
-                    "--json",
-                    "vault",
-                    "preflight",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "vault.reindex",
-                vec![
-                    "tao",
-                    "--json",
-                    "vault",
-                    "reindex",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "note.get",
-                vec![
-                    "tao",
-                    "--json",
-                    "note",
-                    "get",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/alpha.md",
-                ],
-            ),
-            (
-                "note.list",
-                vec![
-                    "tao",
-                    "--json",
-                    "note",
-                    "list",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "note.put",
-                vec![
-                    "tao",
-                    "--json",
-                    "note",
-                    "put",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/new.md",
-                    "--content",
-                    "# New\nbody",
-                ],
-            ),
-            (
-                "links.outgoing",
-                vec![
-                    "tao",
-                    "--json",
-                    "links",
-                    "outgoing",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/alpha.md",
-                ],
-            ),
-            (
-                "links.backlinks",
-                vec![
-                    "tao",
-                    "--json",
-                    "links",
-                    "backlinks",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/projects/project-a.md",
-                ],
-            ),
-            (
-                "properties.get",
-                vec![
-                    "tao",
-                    "--json",
-                    "properties",
-                    "get",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/projects/project-a.md",
-                ],
-            ),
-            (
-                "properties.set",
-                vec![
-                    "tao",
-                    "--json",
-                    "properties",
-                    "set",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/projects/project-a.md",
-                    "--key",
-                    "status",
-                    "--value",
-                    "active",
-                ],
-            ),
-            (
-                "bases.list",
-                vec![
-                    "tao",
-                    "--json",
-                    "bases",
-                    "list",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-            (
-                "bases.view",
-                vec![
-                    "tao",
-                    "--json",
-                    "bases",
-                    "view",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path-or-id",
-                    "views/projects.base",
-                    "--view-name",
-                    "ActiveProjects",
-                    "--page",
-                    "1",
-                    "--page-size",
-                    "10",
-                ],
-            ),
-            (
-                "search.query",
-                vec![
-                    "tao",
-                    "--json",
-                    "search",
-                    "query",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--query",
-                    "project",
-                    "--limit",
-                    "10",
-                    "--offset",
-                    "0",
-                ],
-            ),
-            (
-                "vault.reconcile",
-                vec![
-                    "tao",
-                    "--json",
-                    "vault",
-                    "reconcile",
-                    "--vault-root",
-                    &vault_root_string,
-                ],
-            ),
-        ];
+            let scenarios = [
+                (
+                    "vault.open",
+                    vec![
+                        "tao",
+                        "--json",
+                        "vault",
+                        "open",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "vault.stats",
+                    vec![
+                        "tao",
+                        "--json",
+                        "vault",
+                        "stats",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "vault.preflight",
+                    vec![
+                        "tao",
+                        "--json",
+                        "vault",
+                        "preflight",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "vault.reindex",
+                    vec![
+                        "tao",
+                        "--json",
+                        "vault",
+                        "reindex",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "note.get",
+                    vec![
+                        "tao",
+                        "--json",
+                        "note",
+                        "get",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/alpha.md",
+                    ],
+                ),
+                (
+                    "note.list",
+                    vec![
+                        "tao",
+                        "--json",
+                        "note",
+                        "list",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "note.put",
+                    vec![
+                        "tao",
+                        "--json",
+                        "note",
+                        "put",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/new.md",
+                        "--content",
+                        "# New\nbody",
+                    ],
+                ),
+                (
+                    "links.outgoing",
+                    vec![
+                        "tao",
+                        "--json",
+                        "links",
+                        "outgoing",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/alpha.md",
+                    ],
+                ),
+                (
+                    "links.backlinks",
+                    vec![
+                        "tao",
+                        "--json",
+                        "links",
+                        "backlinks",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/projects/project-a.md",
+                    ],
+                ),
+                (
+                    "properties.get",
+                    vec![
+                        "tao",
+                        "--json",
+                        "properties",
+                        "get",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/projects/project-a.md",
+                    ],
+                ),
+                (
+                    "properties.set",
+                    vec![
+                        "tao",
+                        "--json",
+                        "properties",
+                        "set",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/projects/project-a.md",
+                        "--key",
+                        "status",
+                        "--value",
+                        "active",
+                    ],
+                ),
+                (
+                    "bases.list",
+                    vec![
+                        "tao",
+                        "--json",
+                        "bases",
+                        "list",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "bases.view",
+                    vec![
+                        "tao",
+                        "--json",
+                        "bases",
+                        "view",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path-or-id",
+                        "views/projects.base",
+                        "--view-name",
+                        "ActiveProjects",
+                        "--page",
+                        "1",
+                        "--page-size",
+                        "10",
+                    ],
+                ),
+                (
+                    "search.query",
+                    vec![
+                        "tao",
+                        "--json",
+                        "search",
+                        "query",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--query",
+                        "project",
+                        "--limit",
+                        "10",
+                        "--offset",
+                        "0",
+                    ],
+                ),
+                (
+                    "vault.reconcile",
+                    vec![
+                        "tao",
+                        "--json",
+                        "vault",
+                        "reconcile",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+            ];
 
-        for (expected_command, args) in scenarios {
-            let cli = Cli::parse_from(args);
-            let result = dispatch(cli.command).expect("dispatch json contract scenario");
-            let output = render_output(cli.json, &result).expect("render json output");
-            let envelope: JsonValue = serde_json::from_str(&output).expect("parse json output");
-            assert_json_contract(&envelope, expected_command);
-        }
+            for (expected_command, args) in scenarios {
+                let cli = Cli::parse_from(args);
+                let result = dispatch(cli.command).expect("dispatch json contract scenario");
+                let output = render_output(cli.json, &result).expect("render json output");
+                let envelope: JsonValue = serde_json::from_str(&output).expect("parse json output");
+                assert_json_contract(&envelope, expected_command);
+            }
+        });
     }
 
     fn assert_json_contract(value: &JsonValue, expected_command: &str) {
@@ -1273,64 +1279,81 @@ mod tests {
 
     #[test]
     fn vault_open_creates_default_db_when_db_path_is_omitted() {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        fs::create_dir_all(&vault_root).expect("create vault dir");
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(&vault_root).expect("create vault dir");
 
-        let cli = Cli::parse_from([
-            "tao",
-            "--json",
-            "vault",
-            "open",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-        ]);
-        let result = dispatch(cli.command).expect("dispatch");
-        let output = render_output(cli.json, &result).expect("render output");
-        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let result = dispatch(cli.command).expect("dispatch");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
-        let db_path = envelope
-            .get("value")
-            .and_then(|raw| raw.get("args"))
-            .and_then(|raw| raw.get("db_path"))
-            .and_then(JsonValue::as_str)
-            .expect("db_path in response");
+            let db_path = envelope
+                .get("value")
+                .and_then(|raw| raw.get("args"))
+                .and_then(|raw| raw.get("db_path"))
+                .and_then(JsonValue::as_str)
+                .expect("db_path in response");
 
-        assert!(
-            Path::new(db_path).exists(),
-            "expected default sqlite file to be created at {db_path}"
-        );
+            assert!(
+                Path::new(db_path).exists(),
+                "expected default sqlite file to be created at {db_path}"
+            );
+        });
     }
 
     #[test]
     fn vault_open_respects_db_path_override() {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        fs::create_dir_all(&vault_root).expect("create vault dir");
-        let custom_db = tempdir.path().join("custom").join("tao.sqlite");
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(&vault_root).expect("create vault dir");
+            let custom_db = tempdir.path().join("custom").join("tao.sqlite");
 
-        let cli = Cli::parse_from([
-            "tao",
-            "--json",
-            "vault",
-            "open",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--db-path",
-            custom_db.to_string_lossy().as_ref(),
-        ]);
-        let result = dispatch(cli.command).expect("dispatch");
-        let output = render_output(cli.json, &result).expect("render output");
-        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--db-path",
+                custom_db.to_string_lossy().as_ref(),
+            ]);
+            let result = dispatch(cli.command).expect("dispatch");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
-        let db_path = envelope
-            .get("value")
-            .and_then(|raw| raw.get("args"))
-            .and_then(|raw| raw.get("db_path"))
-            .and_then(JsonValue::as_str)
-            .expect("db_path in response");
+            let db_path = envelope
+                .get("value")
+                .and_then(|raw| raw.get("args"))
+                .and_then(|raw| raw.get("db_path"))
+                .and_then(JsonValue::as_str)
+                .expect("db_path in response");
 
-        assert_eq!(Path::new(db_path), custom_db.as_path());
-        assert!(custom_db.exists(), "expected override sqlite path to exist");
+            assert_eq!(Path::new(db_path), custom_db.as_path());
+            assert!(custom_db.exists(), "expected override sqlite path to exist");
+        });
+    }
+
+    fn with_temp_cwd<T>(operation: impl FnOnce() -> T) -> T {
+        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = CWD_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("lock cwd mutex");
+
+        let original_dir = env::current_dir().expect("get original cwd");
+        let sandbox = tempfile::tempdir().expect("create cwd sandbox");
+        env::set_current_dir(sandbox.path()).expect("set temp cwd");
+        let result = operation();
+        env::set_current_dir(&original_dir).expect("restore cwd");
+        result
     }
 }
