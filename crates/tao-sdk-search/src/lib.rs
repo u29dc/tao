@@ -77,24 +77,6 @@ impl SearchQueryService {
             })?;
 
         let needle = query.to_ascii_lowercase();
-        let total: u64 = connection
-            .query_row(
-                r#"
-SELECT COUNT(*)
-FROM search_index si
-INNER JOIN files f ON f.file_id = si.file_id
-WHERE f.is_markdown = 1
-  AND (
-    instr(si.title_lc, ?1) > 0
-    OR instr(si.normalized_path_lc, ?1) > 0
-    OR instr(si.content_lc, ?1) > 0
-  )
-"#,
-                params![needle],
-                |row| row.get(0),
-            )
-            .map_err(|source| SearchQueryError::CountMatches { source })?;
-
         let mut statement = connection
             .prepare(
                 r#"
@@ -109,7 +91,8 @@ SELECT
     CASE WHEN instr(si.title_lc, ?1) > 0 THEN 3 ELSE 0 END
     + CASE WHEN instr(si.normalized_path_lc, ?1) > 0 THEN 2 ELSE 0 END
     + CASE WHEN instr(si.content_lc, ?1) > 0 THEN 1 ELSE 0 END
-  ) AS score
+  ) AS score,
+  COUNT(*) OVER() AS total_count
 FROM search_index si
 INNER JOIN files f ON f.file_id = si.file_id
 WHERE f.is_markdown = 1
@@ -131,6 +114,7 @@ OFFSET ?3
                 let title_match: i64 = row.get("title_match")?;
                 let path_match: i64 = row.get("path_match")?;
                 let content_match: i64 = row.get("content_match")?;
+                let total: u64 = row.get("total_count")?;
                 let mut matched_in = Vec::new();
                 if title_match != 0 {
                     matched_in.push("title".to_string());
@@ -148,10 +132,18 @@ OFFSET ?3
                     indexed_at: row.get("indexed_at")?,
                     matched_in,
                 })
+                .map(|item| (item, total))
             })
             .map_err(|source| SearchQueryError::RunQuery { source })?;
+        let mut total = 0_u64;
         let items = rows
             .map(|row| row.map_err(|source| SearchQueryError::MapQueryRow { source }))
+            .map(|row| {
+                row.map(|(item, row_total)| {
+                    total = row_total;
+                    item
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SearchQueryPage {
@@ -184,13 +176,6 @@ pub enum SearchQueryError {
     /// Offset value overflows supported sqlite integer range.
     #[error("search query offset exceeds sqlite integer range (got {value})")]
     InvalidOffset { value: u64 },
-    /// Counting matched rows failed.
-    #[error("failed to count search query matches: {source}")]
-    CountMatches {
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
     /// Preparing paged query failed.
     #[error("failed to prepare paged search query: {source}")]
     PrepareQuery {
