@@ -1079,7 +1079,7 @@ fn complete_note_put(
     result: tao_sdk_service::NoteCrudResult,
     action: &str,
 ) -> BridgeEnvelope<BridgeWriteAck> {
-    if let Err(source) = IncrementalIndexService::default().apply_changes(
+    if let Err(source) = IncrementalIndexService::default().apply_changes_force(
         &kernel.vault_root,
         &mut kernel.connection,
         &[PathBuf::from(result.normalized_path.clone())],

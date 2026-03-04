@@ -1872,3 +1872,23 @@ Append-only execution log for autonomous runs.
   - commands: [append PAR-001..PAR-005 ticket rows, update phase23 execution order]
   - outcomes: [parallelization recommendations are now first-class tracked tickets with explicit pass/fail DoD criteria and active run-state switched to PAR-001]
 - residual_risk: implementation pending for PAR-001..PAR-005
+
+- timestamp: 2026-03-04T21:28:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-001
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-vault/Cargo.toml, crates/tao-sdk-vault/src/scan.rs, crates/tao-sdk-service/src/indexing.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-sdk-vault --release, cargo test -p tao-sdk-service --release incremental_apply_changes_skips_unchanged_paths_using_metadata_prefilter]
+  - outcomes: [vault scan now parallelizes metadata loading; incremental index now performs unchanged prefilter using file metadata before expensive fingerprint+parse; regression test added and passing]
+- residual_risk: none
+
+- timestamp: 2026-03-04T21:28:20Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-002
+- action: start
+- evidence:
+  - files: [crates/tao-sdk-service/src/indexing.rs]
+  - commands: [prepare parallel full-rebuild producer refactor]
+  - outcomes: [next step is parallel markdown parse/property/task/link extraction with deterministic merge order]
+- residual_risk: none

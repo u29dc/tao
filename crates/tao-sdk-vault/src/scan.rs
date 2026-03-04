@@ -1,6 +1,8 @@
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use rayon::prelude::*;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
@@ -63,9 +65,10 @@ impl VaultScanService {
 
     /// Perform a full vault scan and return a deterministic manifest.
     pub fn scan(&self) -> Result<VaultManifest, VaultScanError> {
-        let mut entries = Vec::new();
         let root = self.canonicalizer.root().to_path_buf();
         let root_for_filter = root.clone();
+        let case_policy = self.canonicalizer.case_policy();
+        let mut discovered_files = Vec::new();
 
         for entry in WalkDir::new(&root)
             .follow_links(false)
@@ -82,53 +85,58 @@ impl VaultScanService {
                 continue;
             }
 
-            let absolute = entry.path().to_path_buf();
-            let relative = absolute
-                .strip_prefix(&root)
-                .map_err(|_| VaultScanError::OutsideRoot {
-                    root: root.clone(),
-                    path: absolute.clone(),
-                })?
-                .to_path_buf();
-            let normalized = normalize_relative_path(&relative)?;
-            let match_key = match self.canonicalizer.case_policy() {
-                CasePolicy::Sensitive => normalized.clone(),
-                CasePolicy::Insensitive => normalized.to_ascii_lowercase(),
-            };
-            let metadata = entry
-                .metadata()
-                .map_err(|source| VaultScanError::Metadata {
-                    path: absolute.clone(),
-                    source,
-                })?;
-            let modified_unix_ms = metadata
-                .modified()
-                .map_err(|source| VaultScanError::ModifiedTime {
-                    path: absolute.clone(),
-                    source,
-                })?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|source| VaultScanError::InvalidModifiedTime {
-                    path: absolute.clone(),
-                    source,
-                })?
-                .as_millis();
-            let modified_unix_ms = i64::try_from(modified_unix_ms).map_err(|_| {
-                VaultScanError::ModifiedTimeOverflow {
-                    path: absolute.clone(),
-                    value: modified_unix_ms,
-                }
-            })?;
-
-            entries.push(VaultManifestEntry {
-                absolute,
-                relative,
-                normalized,
-                match_key,
-                size_bytes: metadata.len(),
-                modified_unix_ms,
-            });
+            discovered_files.push(entry.path().to_path_buf());
         }
+
+        let mut entries = discovered_files
+            .into_par_iter()
+            .map(|absolute| {
+                let relative = absolute
+                    .strip_prefix(&root)
+                    .map_err(|_| VaultScanError::OutsideRoot {
+                        root: root.clone(),
+                        path: absolute.clone(),
+                    })?
+                    .to_path_buf();
+                let normalized = normalize_relative_path(&relative)?;
+                let match_key = match case_policy {
+                    CasePolicy::Sensitive => normalized.clone(),
+                    CasePolicy::Insensitive => normalized.to_ascii_lowercase(),
+                };
+                let metadata =
+                    fs::metadata(&absolute).map_err(|source| VaultScanError::Metadata {
+                        path: absolute.clone(),
+                        source,
+                    })?;
+                let modified_unix_ms = metadata
+                    .modified()
+                    .map_err(|source| VaultScanError::ModifiedTime {
+                        path: absolute.clone(),
+                        source,
+                    })?
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|source| VaultScanError::InvalidModifiedTime {
+                        path: absolute.clone(),
+                        source,
+                    })?
+                    .as_millis();
+                let modified_unix_ms = i64::try_from(modified_unix_ms).map_err(|_| {
+                    VaultScanError::ModifiedTimeOverflow {
+                        path: absolute.clone(),
+                        value: modified_unix_ms,
+                    }
+                })?;
+
+                Ok(VaultManifestEntry {
+                    absolute,
+                    relative,
+                    normalized,
+                    match_key,
+                    size_bytes: metadata.len(),
+                    modified_unix_ms,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         entries.sort_unstable_by(|left, right| {
             left.match_key
@@ -199,9 +207,9 @@ pub enum VaultScanError {
     Metadata {
         /// Path seen during scan.
         path: PathBuf,
-        /// Filesystem walk metadata error.
+        /// Filesystem metadata read error.
         #[source]
-        source: walkdir::Error,
+        source: std::io::Error,
     },
     /// Reading modified time from metadata failed.
     #[error("failed to read modified time for scanned path '{path}': {source}")]

@@ -454,6 +454,28 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
+        self.apply_changes_internal(vault_root, connection, changed_paths, case_policy, true)
+    }
+
+    /// Apply incremental indexing updates and always rebuild derived rows for provided paths.
+    pub fn apply_changes_force(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changed_paths: &[PathBuf],
+        case_policy: CasePolicy,
+    ) -> Result<IncrementalIndexResult, FullIndexError> {
+        self.apply_changes_internal(vault_root, connection, changed_paths, case_policy, false)
+    }
+
+    fn apply_changes_internal(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changed_paths: &[PathBuf],
+        case_policy: CasePolicy,
+        prefilter_unchanged: bool,
+    ) -> Result<IncrementalIndexResult, FullIndexError> {
         let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
             .map_err(|source| FullIndexError::CreateFingerprintService {
                 source: Box::new(source),
@@ -489,8 +511,37 @@ impl IncrementalIndexService {
         for changed_path in changed_paths {
             let normalized = normalize_changed_path(changed_path)?;
             let absolute = vault_root.join(changed_path);
+            let existing = FilesRepository::get_by_normalized_path(&transaction, &normalized)
+                .map_err(|source| FullIndexError::UpsertFileMetadata {
+                    source: Box::new(source),
+                })?;
 
             if absolute.exists() {
+                if prefilter_unchanged && let Some(existing_record) = existing.as_ref() {
+                    let metadata =
+                        fs::metadata(&absolute).map_err(|source| FullIndexError::ReadFile {
+                            path: absolute.clone(),
+                            source,
+                        })?;
+                    let modified_unix_ms = metadata_modified_unix_ms(&metadata, &absolute)?;
+                    if existing_record.size_bytes == metadata.len()
+                        && existing_record.modified_unix_ms == modified_unix_ms
+                    {
+                        // Fast unchanged prefilter: only skip when size/mtime/hash all match.
+                        // This preserves correctness for rapid same-size rewrites on filesystems
+                        // with coarse mtime granularity.
+                        let hash_blake3 = hash_file_blake3(&absolute).map_err(|source| {
+                            FullIndexError::ReadFile {
+                                path: absolute.clone(),
+                                source,
+                            }
+                        })?;
+                        if existing_record.hash_blake3 == hash_blake3 {
+                            continue;
+                        }
+                    }
+                }
+
                 let fingerprint =
                     fingerprint_service
                         .fingerprint(changed_path)
@@ -504,11 +555,6 @@ impl IncrementalIndexService {
                             value: fingerprint.modified_unix_ms,
                         }
                     })?;
-
-                let existing = FilesRepository::get_by_normalized_path(&transaction, &normalized)
-                    .map_err(|source| FullIndexError::UpsertFileMetadata {
-                    source: Box::new(source),
-                })?;
                 let file_id = existing
                     .map(|record| record.file_id)
                     .unwrap_or_else(|| deterministic_id("file", &normalized));
@@ -728,13 +774,7 @@ impl IncrementalIndexService {
                 }
 
                 upserted_files += 1;
-            } else if let Some(existing) =
-                FilesRepository::get_by_normalized_path(&transaction, &normalized).map_err(
-                    |source| FullIndexError::UpsertFileMetadata {
-                        source: Box::new(source),
-                    },
-                )?
-            {
+            } else if let Some(existing) = existing {
                 FilesRepository::delete_by_id(&transaction, &existing.file_id).map_err(
                     |source| FullIndexError::UpsertFileMetadata {
                         source: Box::new(source),
@@ -2018,6 +2058,24 @@ fn hash_file_blake3(path: &Path) -> Result<String, std::io::Error> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn metadata_modified_unix_ms(metadata: &fs::Metadata, path: &Path) -> Result<i64, FullIndexError> {
+    let modified_unix_ms = metadata
+        .modified()
+        .map_err(|source| FullIndexError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|source| FullIndexError::Clock {
+            source: Box::new(source),
+        })?
+        .as_millis();
+
+    i64::try_from(modified_unix_ms).map_err(|_| FullIndexError::TimestampOverflow {
+        value: modified_unix_ms,
+    })
+}
+
 fn title_from_normalized_path(path: &str) -> String {
     Path::new(path)
         .file_stem()
@@ -3177,6 +3235,44 @@ mod tests {
                 .expect("list properties");
         assert_eq!(properties.len(), 1);
         assert_eq!(properties[0].key, "status");
+    }
+
+    #[test]
+    fn incremental_apply_changes_skips_unchanged_paths_using_metadata_prefilter() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A\n[[b]]").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let before_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a before")
+            .expect("a exists before");
+
+        let result = IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/a.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental unchanged path");
+
+        assert_eq!(result.processed_paths, 1);
+        assert_eq!(result.upserted_files, 0);
+        assert_eq!(result.links_reindexed, 0);
+        assert_eq!(result.properties_reindexed, 0);
+
+        let after_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a after")
+            .expect("a exists after");
+        assert_eq!(before_a.hash_blake3, after_a.hash_blake3);
+        assert_eq!(before_a.modified_unix_ms, after_a.modified_unix_ms);
     }
 
     #[test]
