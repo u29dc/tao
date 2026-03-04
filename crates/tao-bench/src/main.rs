@@ -401,7 +401,7 @@ fn run_ffi_benchmark(args: &Args) -> Result<()> {
         let content = format!("# Note {idx}\nseed");
         let _: JsonValue = consume_json_envelope(
             runtime
-                .note_put_json(path, content)
+                .note_put_json(path, content, Some(true))
                 .map_err(|source| anyhow::anyhow!("ffi note_put_json failed: {source}"))?,
             "ffi_note_put_seed",
         )?;

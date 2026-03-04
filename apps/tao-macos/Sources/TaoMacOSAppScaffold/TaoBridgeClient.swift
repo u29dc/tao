@@ -142,6 +142,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case basesViewPlanFailed(BridgeErrorDTO)
     case basesViewExecuteFailed(BridgeErrorDTO)
     case notePutInvalidPath(BridgeErrorDTO)
+    case notePutWriteDisabled(BridgeErrorDTO)
     case notePutLookupFailed(BridgeErrorDTO)
     case notePutCreateFailed(BridgeErrorDTO)
     case notePutUpdateFailed(BridgeErrorDTO)
@@ -194,6 +195,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .basesViewExecuteFailed(error)
         case "bridge.note_put.invalid_path":
             return .notePutInvalidPath(error)
+        case "bridge.note_put.write_disabled":
+            return .notePutWriteDisabled(error)
         case "bridge.note_put.lookup_failed":
             return .notePutLookupFailed(error)
         case "bridge.note_put.create_failed":
@@ -269,6 +272,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "bases view execute failed: \(error.message)"
         case .notePutInvalidPath(let error):
             return "note put invalid path: \(error.message)"
+        case .notePutWriteDisabled(let error):
+            return "note put write disabled: \(error.message)"
         case .notePutLookupFailed(let error):
             return "note put lookup failed: \(error.message)"
         case .notePutCreateFailed(let error):
@@ -312,6 +317,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .basesViewPlanFailed(let error),
             .basesViewExecuteFailed(let error),
             .notePutInvalidPath(let error),
+            .notePutWriteDisabled(let error),
             .notePutLookupFailed(let error),
             .notePutCreateFailed(let error),
             .notePutUpdateFailed(let error),
@@ -393,11 +399,18 @@ public struct TaoBridgeClient {
         vaultRoot: String,
         dbPath: String,
         path: String,
-        content: String
+        content: String,
+        allowWrites: Bool = false
     ) throws -> BridgeWriteAck {
         let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
         return try invoke(
-            runtimeCall: { try runtime.notePutJson(normalizedPath: path, content: content) },
+            runtimeCall: {
+                try runtime.notePutJson(
+                    normalizedPath: path,
+                    content: content,
+                    allowWrites: allowWrites
+                )
+            },
             as: BridgeWriteAck.self
         )
     }

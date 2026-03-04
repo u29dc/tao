@@ -12,6 +12,9 @@ use tao_sdk_bridge::{
     about = "Bridge shell for Swift-to-Rust read/write APIs"
 )]
 struct Cli {
+    /// Allow vault content write operations (disabled by default).
+    #[arg(long, global = true, default_value_t = false)]
+    allow_writes: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -144,6 +147,7 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    let allow_writes = cli.allow_writes;
 
     let output = match cli.command {
         Commands::Ping => serialize_output(&BridgeKernelPing::envelope()),
@@ -194,7 +198,7 @@ fn main() {
             path,
             content,
         } => with_kernel(vault_root, db_path, |kernel| {
-            kernel.note_put(&path, &content)
+            kernel.note_put_with_policy(&path, &content, allow_writes)
         }),
         Commands::EventsPoll {
             vault_root,

@@ -29,13 +29,15 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/alpha.md",
-        content: "# Alpha\nlaunch smoke"
+        content: "# Alpha\nlaunch smoke",
+        allowWrites: true
     )
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/beta.md",
-        content: "# Beta\nnavigate smoke"
+        content: "# Beta\nnavigate smoke",
+        allowWrites: true
     )
 
     let opened = try client.noteGet(
@@ -65,7 +67,8 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/beta.md",
-        content: "# Beta Updated\nedit smoke"
+        content: "# Beta Updated\nedit smoke",
+        allowWrites: true
     )
     #expect(edited.action == "updated")
 
@@ -136,13 +139,15 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/target.md",
-        content: "# Target"
+        content: "# Target",
+        allowWrites: true
     )
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/source.md",
-        content: "# Source\n[[target]]"
+        content: "# Source\n[[target]]",
+        allowWrites: true
     )
     _ = try client.vaultStats(
         vaultRoot: vaultRoot.path,
@@ -176,7 +181,8 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/from-swift.md",
-        content: "# Swift Created\none"
+        content: "# Swift Created\none",
+        allowWrites: true
     )
     #expect(created.path == "notes/from-swift.md")
     #expect(created.action == "created")
@@ -192,7 +198,8 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/from-swift.md",
-        content: "# Swift Updated\ntwo"
+        content: "# Swift Updated\ntwo",
+        allowWrites: true
     )
     #expect(updated.action == "updated")
 
@@ -203,6 +210,36 @@ import Foundation
     )
     #expect(secondRead.title == "Swift Updated")
     #expect(secondRead.body.contains("two"))
+}
+
+@Test func bridge_client_note_put_requires_allow_writes() throws {
+    let fileManager = FileManager.default
+    let tempRoot = fileManager.temporaryDirectory
+        .appendingPathComponent("tao-bridge-write-gate-\(UUID().uuidString)")
+    defer { try? fileManager.removeItem(at: tempRoot) }
+
+    let vaultRoot = tempRoot.appendingPathComponent("vault")
+    let notesDir = vaultRoot.appendingPathComponent("notes")
+    let dbPath = tempRoot.appendingPathComponent("tao.sqlite")
+    try fileManager.createDirectory(at: notesDir, withIntermediateDirectories: true)
+
+    let client = TaoBridgeClient()
+    do {
+        _ = try client.notePut(
+            vaultRoot: vaultRoot.path,
+            dbPath: dbPath.path,
+            path: "notes/blocked.md",
+            content: "# blocked"
+        )
+        Issue.record("expected write gate rejection")
+    } catch let TaoBridgeClientError.bridgeError(error) {
+        #expect(error == .notePutWriteDisabled(BridgeErrorDTO(
+            code: "bridge.note_put.write_disabled",
+            message: "bridge note_put is disabled by default",
+            hint: "set allow_writes=true to enable vault content mutations",
+            context: [:]
+        )))
+    }
 }
 
 @Test func bridge_client_notes_list_pages_results() throws {
@@ -221,19 +258,22 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/c.md",
-        content: "# C"
+        content: "# C",
+        allowWrites: true
     )
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/a.md",
-        content: "# A"
+        content: "# A",
+        allowWrites: true
     )
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/b.md",
-        content: "# B"
+        content: "# B",
+        allowWrites: true
     )
 
     let firstPage = try client.notesList(
@@ -273,7 +313,8 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/source.md",
-        content: "# Source"
+        content: "# Source",
+        allowWrites: true
     )
 
     let links = try client.noteLinks(
@@ -345,13 +386,15 @@ import Foundation
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/events.md",
-        content: "# Events\ncreated"
+        content: "# Events\ncreated",
+        allowWrites: true
     )
     _ = try client.notePut(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path,
         path: "notes/events.md",
-        content: "# Events\nupdated"
+        content: "# Events\nupdated",
+        allowWrites: true
     )
 
     let firstBatch = try client.eventsPoll(

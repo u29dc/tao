@@ -432,6 +432,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -489,7 +513,7 @@ public protocol TaoBridgeRuntimeProtocol: AnyObject, Sendable {
     
     func noteLinksJson(normalizedPath: String) throws  -> String
     
-    func notePutJson(normalizedPath: String, content: String) throws  -> String
+    func notePutJson(normalizedPath: String, content: String, allowWrites: Bool?) throws  -> String
     
     func notesWindowJson(afterPath: String?, limit: UInt64?) throws  -> String
     
@@ -621,11 +645,12 @@ open func noteLinksJson(normalizedPath: String)throws  -> String  {
 })
 }
     
-open func notePutJson(normalizedPath: String, content: String)throws  -> String  {
+open func notePutJson(normalizedPath: String, content: String, allowWrites: Bool?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeTaoBridgeRuntimeError_lift) {
     uniffi_tao_sdk_bridge_fn_method_taobridgeruntime_note_put_json(self.uniffiClonePointer(),
         FfiConverterString.lower(normalizedPath),
-        FfiConverterString.lower(content),$0
+        FfiConverterString.lower(content),
+        FfiConverterOptionBool.lower(allowWrites),$0
     )
 })
 }
@@ -850,6 +875,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -907,7 +956,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_note_links_json() != 60681) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_note_put_json() != 51990) {
+    if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_note_put_json() != 63909) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_notes_window_json() != 33568) {

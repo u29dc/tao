@@ -29,6 +29,9 @@ struct Cli {
     /// Emit one JSON envelope to stdout.
     #[arg(long, global = true)]
     json: bool,
+    /// Allow vault content write operations (disabled by default).
+    #[arg(long, global = true, default_value_t = false)]
+    allow_writes: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -296,18 +299,18 @@ impl<T: Serialize> JsonEnvelope<T> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let result = dispatch(cli.command)?;
+    let result = dispatch(cli.command, cli.allow_writes)?;
     let output = render_output(cli.json, &result)?;
     println!("{output}");
     Ok(())
 }
 
-fn dispatch(command: Commands) -> Result<CommandResult> {
+fn dispatch(command: Commands, allow_writes: bool) -> Result<CommandResult> {
     match command {
         Commands::Vault { command } => handle_vault(command),
-        Commands::Note { command } => handle_note(command),
+        Commands::Note { command } => handle_note(command, allow_writes),
         Commands::Links { command } => handle_links(command),
-        Commands::Properties { command } => handle_properties(command),
+        Commands::Properties { command } => handle_properties(command, allow_writes),
         Commands::Bases { command } => handle_bases(command),
         Commands::Search { command } => handle_search(command),
     }
@@ -452,7 +455,7 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
     }
 }
 
-fn handle_note(command: NoteCommands) -> Result<CommandResult> {
+fn handle_note(command: NoteCommands, allow_writes: bool) -> Result<CommandResult> {
     match command {
         NoteCommands::Get(args) => {
             let resolved = args.resolve()?;
@@ -471,9 +474,13 @@ fn handle_note(command: NoteCommands) -> Result<CommandResult> {
             })
         }
         NoteCommands::Put(args) => {
+            ensure_writes_enabled(allow_writes, "note.put")?;
             let resolved = args.resolve()?;
             let mut kernel = open_bridge_kernel(&resolved)?;
-            let ack = expect_bridge_value(kernel.note_put(&args.path, &args.content), "note.put")?;
+            let ack = expect_bridge_value(
+                kernel.note_put_with_policy(&args.path, &args.content, true),
+                "note.put",
+            )?;
             Ok(CommandResult {
                 command: "note.put".to_string(),
                 summary: "note put completed".to_string(),
@@ -582,7 +589,7 @@ fn handle_links(command: LinksCommands) -> Result<CommandResult> {
     }
 }
 
-fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
+fn handle_properties(command: PropertiesCommands, allow_writes: bool) -> Result<CommandResult> {
     match command {
         PropertiesCommands::Get(args) => {
             let resolved = args.resolve()?;
@@ -633,6 +640,7 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
             })
         }
         PropertiesCommands::Set(args) => {
+            ensure_writes_enabled(allow_writes, "properties.set")?;
             let resolved = args.resolve()?;
             let mut connection = open_initialized_connection(&resolved)?;
             let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
@@ -669,6 +677,15 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
             })
         }
     }
+}
+
+fn ensure_writes_enabled(allow_writes: bool, command: &str) -> Result<()> {
+    if allow_writes {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{command} is disabled by default; pass --allow-writes to enable vault content mutations"
+    ))
 }
 
 fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
@@ -976,7 +993,7 @@ mod tests {
                 "--vault-root".to_string(),
                 vault_root.to_string_lossy().to_string(),
             ]);
-            let result = dispatch(cli.command).expect("dispatch");
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
             let output = render_output(cli.json, &result).expect("render output");
             let value: serde_json::Value = serde_json::from_str(&output).expect("parse output");
 
@@ -1100,6 +1117,7 @@ mod tests {
                     vec![
                         "tao",
                         "--json",
+                        "--allow-writes",
                         "note",
                         "put",
                         "--vault-root",
@@ -1154,6 +1172,7 @@ mod tests {
                     vec![
                         "tao",
                         "--json",
+                        "--allow-writes",
                         "properties",
                         "set",
                         "--vault-root",
@@ -1228,7 +1247,8 @@ mod tests {
 
             for (expected_command, args) in scenarios {
                 let cli = Cli::parse_from(args);
-                let result = dispatch(cli.command).expect("dispatch json contract scenario");
+                let result = dispatch(cli.command, cli.allow_writes)
+                    .expect("dispatch json contract scenario");
                 let output = render_output(cli.json, &result).expect("render json output");
                 let envelope: JsonValue = serde_json::from_str(&output).expect("parse json output");
                 assert_json_contract(&envelope, expected_command);
@@ -1263,6 +1283,49 @@ mod tests {
     }
 
     #[test]
+    fn write_commands_are_blocked_without_allow_writes_flag() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(&vault_root).expect("create vault dir");
+
+            let note_put = Cli::parse_from([
+                "tao",
+                "--json",
+                "note",
+                "put",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/blocked.md",
+                "--content",
+                "# blocked",
+            ]);
+            let note_put_error = dispatch(note_put.command, note_put.allow_writes)
+                .expect_err("note.put should require --allow-writes");
+            assert!(note_put_error.to_string().contains("--allow-writes"));
+
+            let properties_set = Cli::parse_from([
+                "tao",
+                "--json",
+                "properties",
+                "set",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/blocked.md",
+                "--key",
+                "status",
+                "--value",
+                "draft",
+            ]);
+            let properties_error = dispatch(properties_set.command, properties_set.allow_writes)
+                .expect_err("properties.set should require --allow-writes");
+            assert!(properties_error.to_string().contains("--allow-writes"));
+        });
+    }
+
+    #[test]
     fn vault_open_creates_default_db_when_db_path_is_omitted() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -1277,7 +1340,7 @@ mod tests {
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
             ]);
-            let result = dispatch(cli.command).expect("dispatch");
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
@@ -1313,7 +1376,7 @@ mod tests {
                 "--db-path",
                 custom_db.to_string_lossy().as_ref(),
             ]);
-            let result = dispatch(cli.command).expect("dispatch");
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 

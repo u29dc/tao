@@ -71,6 +71,8 @@ pub const BRIDGE_ERROR_BASES_VIEW_PLAN_FAILED: &str = "bridge.bases_view.plan_fa
 pub const BRIDGE_ERROR_BASES_VIEW_EXECUTE_FAILED: &str = "bridge.bases_view.execute_failed";
 /// Bridge error code when note-put path is invalid.
 pub const BRIDGE_ERROR_NOTE_PUT_INVALID_PATH: &str = "bridge.note_put.invalid_path";
+/// Bridge error code when note-put is attempted while writes are disabled.
+pub const BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED: &str = "bridge.note_put.write_disabled";
 /// Bridge error code when note-put lookup fails.
 pub const BRIDGE_ERROR_NOTE_PUT_LOOKUP_FAILED: &str = "bridge.note_put.lookup_failed";
 /// Bridge error code when note-put create fails.
@@ -899,13 +901,36 @@ impl BridgeKernel {
         })
     }
 
-    /// Create or update one note safely through SDK write services.
+    /// Create or update one note.
+    ///
+    /// Write operations are disabled by default. Use `note_put_with_policy(..., true)` to enable.
     #[must_use]
     pub fn note_put(
         &mut self,
         normalized_path: &str,
         content: &str,
     ) -> BridgeEnvelope<BridgeWriteAck> {
+        self.note_put_with_policy(normalized_path, content, false)
+    }
+
+    /// Create or update one note with explicit write policy.
+    #[must_use]
+    pub fn note_put_with_policy(
+        &mut self,
+        normalized_path: &str,
+        content: &str,
+        allow_writes: bool,
+    ) -> BridgeEnvelope<BridgeWriteAck> {
+        if !allow_writes {
+            return BridgeEnvelope::failure(
+                BridgeError::with_code(
+                    BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED,
+                    "bridge note_put is disabled by default",
+                )
+                .with_hint("set allow_writes=true to enable vault content mutations"),
+            );
+        }
+
         let normalized_path = normalized_path.trim();
         if normalized_path.is_empty() {
             return BridgeEnvelope::failure(
@@ -1385,9 +1410,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BRIDGE_ERROR_NOTE_GET_INVALID_PATH, BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel,
-        BridgePing, BridgeSchemaVersion, is_bridge_schema_compatible, parse_bridge_schema_version,
+        BRIDGE_ERROR_NOTE_GET_INVALID_PATH, BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED,
+        BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel, BridgePing, BridgeSchemaVersion,
+        BridgeWriteAck, is_bridge_schema_compatible, parse_bridge_schema_version,
     };
+
+    fn note_put_allowed(
+        kernel: &mut BridgeKernel,
+        normalized_path: &str,
+        content: &str,
+    ) -> BridgeEnvelope<BridgeWriteAck> {
+        kernel.note_put_with_policy(normalized_path, content, true)
+    }
 
     #[test]
     fn schema_version_parser_and_compatibility_checks_are_stable() {
@@ -1512,6 +1546,20 @@ mod tests {
     }
 
     #[test]
+    fn bridge_kernel_note_put_is_denied_by_default() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let db_path = temp.path().join("tao.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let denied = kernel.note_put("notes/a.md", "# A");
+        assert!(!denied.ok);
+        let error = denied.error.expect("write gate error");
+        assert_eq!(error.code, BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED);
+    }
+
+    #[test]
     fn bridge_kernel_notes_list_pages_markdown_results() {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
@@ -1519,9 +1567,9 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        assert!(kernel.note_put("notes/c.md", "# C").ok);
-        assert!(kernel.note_put("notes/a.md", "# A").ok);
-        assert!(kernel.note_put("notes/b.md", "# B").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/c.md", "# C").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/a.md", "# A").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/b.md", "# B").ok);
 
         let first_page = kernel.notes_list(None, 2);
         assert!(first_page.ok);
@@ -1547,7 +1595,7 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        let created = kernel.note_put("notes/a.md", "# A\nfirst");
+        let created = note_put_allowed(&mut kernel, "notes/a.md", "# A\nfirst");
         assert!(created.ok);
         assert_eq!(created.value.expect("created value").action, "created");
 
@@ -1561,7 +1609,7 @@ mod tests {
                 .contains("first")
         );
 
-        let updated = kernel.note_put("notes/a.md", "# A\nsecond");
+        let updated = note_put_allowed(&mut kernel, "notes/a.md", "# A\nsecond");
         assert!(updated.ok);
         assert_eq!(updated.value.expect("updated value").action, "updated");
 
@@ -1584,8 +1632,8 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        assert!(kernel.note_put("notes/target.md", "# Target").ok);
-        assert!(kernel.note_put("notes/source.md", "# Source").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/target.md", "# Target").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/source.md", "# Source").ok);
 
         let initial_links = kernel.note_links("notes/source.md");
         assert!(initial_links.ok);
@@ -1597,7 +1645,7 @@ mod tests {
                 .is_empty()
         );
 
-        let updated = kernel.note_put("notes/source.md", "# Source\n[[target]]");
+        let updated = note_put_allowed(&mut kernel, "notes/source.md", "# Source\n[[target]]");
         assert!(updated.ok);
 
         let refreshed_links = kernel.note_links("notes/source.md");
@@ -1616,11 +1664,11 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        let source = kernel.note_put("notes/source.md", "# Source");
+        let source = note_put_allowed(&mut kernel, "notes/source.md", "# Source");
         let source_id = source.value.expect("source").file_id;
-        let target = kernel.note_put("notes/target.md", "# Target");
+        let target = note_put_allowed(&mut kernel, "notes/target.md", "# Target");
         let target_id = target.value.expect("target").file_id;
-        let incoming = kernel.note_put("notes/incoming.md", "# Incoming");
+        let incoming = note_put_allowed(&mut kernel, "notes/incoming.md", "# Incoming");
         let incoming_id = incoming.value.expect("incoming").file_id;
 
         LinksRepository::insert(
@@ -1671,9 +1719,9 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        let source = kernel.note_put("notes/source.md", "# Source");
+        let source = note_put_allowed(&mut kernel, "notes/source.md", "# Source");
         let source_id = source.value.expect("source").file_id;
-        let target = kernel.note_put("notes/target.md", "# Target");
+        let target = note_put_allowed(&mut kernel, "notes/target.md", "# Target");
         let target_id = target.value.expect("target").file_id;
 
         LinksRepository::insert(
@@ -1711,9 +1759,9 @@ mod tests {
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        assert!(kernel.note_put("notes/a.md", "# A").ok);
-        assert!(kernel.note_put("notes/b.md", "# B").ok);
-        assert!(kernel.note_put("notes/c.md", "# C").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/a.md", "# A").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/b.md", "# B").ok);
+        assert!(note_put_allowed(&mut kernel, "notes/c.md", "# C").ok);
 
         let base_yaml = r#"
 views:
@@ -1798,9 +1846,9 @@ views:
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        let created = kernel.note_put("notes/events.md", "# Event\ncreated");
+        let created = note_put_allowed(&mut kernel, "notes/events.md", "# Event\ncreated");
         assert!(created.ok);
-        let updated = kernel.note_put("notes/events.md", "# Event\nupdated");
+        let updated = note_put_allowed(&mut kernel, "notes/events.md", "# Event\nupdated");
         assert!(updated.ok);
 
         let first_batch = kernel.events_poll(0, 10);

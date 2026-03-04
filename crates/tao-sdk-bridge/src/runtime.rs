@@ -101,9 +101,14 @@ impl TaoBridgeRuntime {
         &self,
         normalized_path: String,
         content: String,
+        allow_writes: Option<bool>,
     ) -> Result<String, TaoBridgeRuntimeError> {
         with_kernel(&self.kernel, |kernel| {
-            envelope_json(kernel.note_put(&normalized_path, &content))
+            envelope_json(kernel.note_put_with_policy(
+                &normalized_path,
+                &content,
+                allow_writes.unwrap_or(false),
+            ))
         })
     }
 

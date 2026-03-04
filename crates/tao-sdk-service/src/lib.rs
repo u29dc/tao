@@ -275,13 +275,7 @@ impl NoteCrudService {
         content: &str,
     ) -> Result<NoteCrudResult, NoteCrudError> {
         validate_relative_note_path(relative_path)?;
-        let absolute = vault_root.join(relative_path);
-        if let Some(parent) = absolute.parent() {
-            fs::create_dir_all(parent).map_err(|source| NoteCrudError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
+        let absolute = prepare_note_create_path(vault_root, relative_path)?;
 
         let mut file = OpenOptions::new()
             .write(true)
@@ -340,7 +334,7 @@ impl NoteCrudService {
         content: &str,
     ) -> Result<NoteCrudResult, NoteCrudError> {
         validate_relative_note_path(relative_path)?;
-        let absolute = vault_root.join(relative_path);
+        let absolute = ensure_note_path_within_vault(vault_root, &vault_root.join(relative_path))?;
         let previous_content =
             fs::read(&absolute).map_err(|source| NoteCrudError::ReadFileForRollback {
                 path: absolute.clone(),
@@ -400,7 +394,8 @@ impl NoteCrudService {
             return Ok(false);
         };
 
-        let absolute = vault_root.join(&existing.normalized_path);
+        let absolute =
+            ensure_note_path_within_vault(vault_root, &vault_root.join(&existing.normalized_path))?;
         let deleted_file_bytes = if absolute.exists() {
             Some(
                 fs::read(&absolute).map_err(|source| NoteCrudError::ReadFileForRollback {
@@ -475,14 +470,9 @@ impl NoteCrudService {
             });
         };
 
-        let old_absolute = vault_root.join(&existing.normalized_path);
-        let new_absolute = vault_root.join(new_relative_path);
-        if let Some(parent) = new_absolute.parent() {
-            fs::create_dir_all(parent).map_err(|source| NoteCrudError::CreateDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
+        let old_absolute =
+            ensure_note_path_within_vault(vault_root, &vault_root.join(&existing.normalized_path))?;
+        let new_absolute = prepare_note_create_path(vault_root, new_relative_path)?;
 
         fs::rename(&old_absolute, &new_absolute).map_err(|source| NoteCrudError::RenameFile {
             from: old_absolute.clone(),
@@ -642,6 +632,116 @@ fn validate_relative_note_path(relative_path: &Path) -> Result<(), NoteCrudError
     Ok(())
 }
 
+fn prepare_note_create_path(
+    vault_root: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, NoteCrudError> {
+    let absolute = vault_root.join(relative_path);
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| NoteCrudError::InvalidPath {
+            path: relative_path.to_path_buf(),
+        })?;
+
+    validate_parent_ancestor_within_vault(vault_root, parent)?;
+    fs::create_dir_all(parent).map_err(|source| NoteCrudError::CreateDir {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    ensure_note_parent_within_vault(vault_root, &absolute)?;
+    Ok(absolute)
+}
+
+fn validate_parent_ancestor_within_vault(
+    vault_root: &Path,
+    parent: &Path,
+) -> Result<(), NoteCrudError> {
+    let existing_ancestor =
+        nearest_existing_ancestor(parent).ok_or_else(|| NoteCrudError::InvalidPath {
+            path: parent.to_path_buf(),
+        })?;
+    let canonical_vault = canonicalize_vault_root(vault_root)?;
+    let canonical_ancestor =
+        fs::canonicalize(existing_ancestor).map_err(|source| NoteCrudError::CanonicalizePath {
+            path: existing_ancestor.to_path_buf(),
+            source,
+        })?;
+
+    if !canonical_ancestor.starts_with(&canonical_vault) {
+        return Err(NoteCrudError::PathOutsideVault {
+            vault_root: canonical_vault,
+            path: canonical_ancestor,
+        });
+    }
+
+    Ok(())
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        cursor = candidate.parent();
+    }
+    None
+}
+
+fn ensure_note_path_within_vault(
+    vault_root: &Path,
+    absolute: &Path,
+) -> Result<PathBuf, NoteCrudError> {
+    let canonical_vault = canonicalize_vault_root(vault_root)?;
+    let canonical_path =
+        fs::canonicalize(absolute).map_err(|source| NoteCrudError::CanonicalizePath {
+            path: absolute.to_path_buf(),
+            source,
+        })?;
+
+    if !canonical_path.starts_with(&canonical_vault) {
+        return Err(NoteCrudError::PathOutsideVault {
+            vault_root: canonical_vault,
+            path: canonical_path,
+        });
+    }
+
+    Ok(absolute.to_path_buf())
+}
+
+fn ensure_note_parent_within_vault(
+    vault_root: &Path,
+    absolute: &Path,
+) -> Result<(), NoteCrudError> {
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| NoteCrudError::InvalidPath {
+            path: absolute.to_path_buf(),
+        })?;
+    let canonical_vault = canonicalize_vault_root(vault_root)?;
+    let canonical_parent =
+        fs::canonicalize(parent).map_err(|source| NoteCrudError::CanonicalizePath {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+
+    if !canonical_parent.starts_with(&canonical_vault) {
+        return Err(NoteCrudError::PathOutsideVault {
+            vault_root: canonical_vault,
+            path: canonical_parent,
+        });
+    }
+
+    Ok(())
+}
+
+fn canonicalize_vault_root(vault_root: &Path) -> Result<PathBuf, NoteCrudError> {
+    fs::canonicalize(vault_root).map_err(|source| NoteCrudError::CanonicalizeVaultRoot {
+        path: vault_root.to_path_buf(),
+        source,
+    })
+}
+
 fn fingerprint_to_file_record(
     file_id: &str,
     vault_root: &Path,
@@ -732,6 +832,32 @@ pub enum NoteCrudError {
         /// Filesystem error.
         #[source]
         source: std::io::Error,
+    },
+    /// Canonicalizing vault root for boundary checks failed.
+    #[error("failed to canonicalize vault root '{path}': {source}")]
+    CanonicalizeVaultRoot {
+        /// Vault root path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Canonicalizing path for boundary checks failed.
+    #[error("failed to canonicalize note path '{path}': {source}")]
+    CanonicalizePath {
+        /// Path being canonicalized.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Note path resolves outside the configured vault root.
+    #[error("note path '{path}' resolves outside vault root '{vault_root}'")]
+    PathOutsideVault {
+        /// Canonical vault root.
+        vault_root: PathBuf,
+        /// Canonical note path.
+        path: PathBuf,
     },
     /// Building fingerprint service path context failed.
     #[error("failed to initialize fingerprint path service: {source}")]
@@ -2571,6 +2697,9 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use rusqlite::Connection;
     use tao_sdk_bases::{
         BaseColumnConfig, BaseDiagnosticSeverity, BaseDocument, BaseFilterClause, BaseFilterOp,
@@ -2821,6 +2950,39 @@ mod tests {
             .expect_err("path escaping should fail");
 
         assert!(matches!(error, NoteCrudError::InvalidPath { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn note_crud_service_rejects_symlink_parent_escaping_vault_before_write() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        let outside_root = temp.path().join("outside");
+        fs::create_dir_all(&vault_root).expect("create vault root");
+        fs::create_dir_all(&outside_root).expect("create outside root");
+        symlink(&outside_root, vault_root.join("notes")).expect("create notes symlink");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let service = NoteCrudService::default();
+        let error = service
+            .create_note(
+                &vault_root,
+                &mut connection,
+                "f1",
+                Path::new("notes/escape.md"),
+                "# Escape",
+            )
+            .expect_err("symlink escape should fail");
+
+        assert!(matches!(error, NoteCrudError::PathOutsideVault { .. }));
+        assert!(!outside_root.join("escape.md").exists());
+        assert!(
+            FilesRepository::get_by_id(&connection, "f1")
+                .expect("get metadata after failed create")
+                .is_none()
+        );
     }
 
     #[test]
