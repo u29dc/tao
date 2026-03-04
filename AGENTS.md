@@ -1,3 +1,5 @@
+> Tao is a local, Rust-native knowledge engine for markdown vaults, designed for deterministic automation and AI agents, with a thin SwiftUI desktop client
+
 ## 1. Documentation
 - Primary policy: this file is the canonical operational reference for repository architecture, commands, quality gates, and roadmap state.
 - External references for tool behavior and standards:
