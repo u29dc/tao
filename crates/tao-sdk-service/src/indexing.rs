@@ -4,6 +4,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,7 +25,7 @@ use tao_sdk_storage::{
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
-    VaultScanError, VaultScanService,
+    VaultManifestEntry, VaultScanError, VaultScanService,
 };
 use thiserror::Error;
 
@@ -78,132 +79,51 @@ impl FullIndexService {
             .map(|entry| entry.normalized.clone())
             .collect();
 
-        let mut file_records = Vec::new();
-        let mut file_id_by_path = HashMap::new();
+        let prepared_entries = manifest
+            .entries
+            .par_iter()
+            .map(|entry| build_prepared_index_entry(entry, self.parser))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut file_records = Vec::with_capacity(prepared_entries.len());
+        let mut file_id_by_path = HashMap::with_capacity(prepared_entries.len());
         let mut markdown_docs = Vec::new();
         let mut base_records = Vec::new();
         let mut search_records = Vec::new();
 
-        for entry in &manifest.entries {
-            let metadata =
-                fs::metadata(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
-                    path: entry.absolute.clone(),
-                    source,
-                })?;
-            let modified_unix_ms = metadata
-                .modified()
-                .map_err(|source| FullIndexError::ReadFile {
-                    path: entry.absolute.clone(),
-                    source,
-                })?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|source| FullIndexError::Clock {
-                    source: Box::new(source),
-                })?
-                .as_millis();
-
-            let modified_unix_ms =
-                i64::try_from(modified_unix_ms).map_err(|_| FullIndexError::TimestampOverflow {
-                    value: modified_unix_ms,
-                })?;
-            let hash_blake3 =
-                hash_file_blake3(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
-                    path: entry.absolute.clone(),
-                    source,
-                })?;
-
-            let file_id = deterministic_id("file", &entry.normalized);
-            file_id_by_path.insert(entry.normalized.clone(), file_id.clone());
-
-            file_records.push(FileRecordInput {
-                file_id: file_id.clone(),
-                normalized_path: entry.normalized.clone(),
-                match_key: entry.match_key.clone(),
-                absolute_path: entry.absolute.to_string_lossy().to_string(),
-                size_bytes: metadata.len(),
-                modified_unix_ms,
-                hash_blake3,
-                is_markdown: entry.normalized.ends_with(".md"),
-            });
-
-            if entry.normalized.ends_with(".md") {
-                let markdown = fs::read_to_string(&entry.absolute).map_err(|source| {
-                    FullIndexError::ReadFile {
-                        path: entry.absolute.clone(),
-                        source,
-                    }
-                })?;
-
-                let parsed = self
-                    .parser
-                    .parse(MarkdownParseRequest {
-                        normalized_path: entry.normalized.clone(),
-                        raw: markdown.clone(),
-                    })
-                    .map_err(|source| FullIndexError::ParseMarkdown {
-                        path: entry.absolute.clone(),
-                        source: Box::new(source),
-                    })?;
-
-                let property_records = build_property_records(
-                    &file_id,
-                    &entry.normalized,
-                    &markdown,
-                    &entry.absolute,
-                )?;
-                let task_records = build_task_records(&file_id, &entry.normalized, &markdown);
-                let links = extract_index_links(&markdown, &parsed.body);
-                let heading_slugs = parsed
-                    .headings
-                    .iter()
-                    .map(|heading| slugify_heading(&heading.text))
-                    .filter(|slug| !slug.is_empty())
-                    .collect::<Vec<_>>();
-                let block_ids = extract_block_ids(&parsed.body);
-                search_records.push(SearchIndexRecordInput {
-                    file_id: file_id.clone(),
-                    normalized_path: entry.normalized.clone(),
-                    normalized_path_lc: entry.normalized.to_ascii_lowercase(),
-                    title_lc: title_from_normalized_path(&entry.normalized).to_ascii_lowercase(),
-                    content_lc: markdown.to_ascii_lowercase(),
-                });
-
-                markdown_docs.push(MarkdownIndexDocument {
-                    file_id,
-                    source_path: entry.normalized.clone(),
-                    links,
-                    heading_slugs,
-                    block_ids,
-                    properties: property_records,
-                    tasks: task_records,
-                });
-            } else if entry.normalized.ends_with(".base") {
-                let raw = fs::read_to_string(&entry.absolute).map_err(|source| {
-                    FullIndexError::ReadFile {
-                        path: entry.absolute.clone(),
-                        source,
-                    }
-                })?;
-                let config_json =
-                    serde_json::to_string(&json!({ "raw": raw })).map_err(|source| {
-                        FullIndexError::SerializeBaseConfig {
-                            path: entry.absolute.clone(),
-                            source,
-                        }
-                    })?;
-
-                base_records.push(BaseRecordInput {
-                    base_id: deterministic_id("base", &entry.normalized),
-                    file_id,
-                    config_json,
-                });
+        for prepared in prepared_entries {
+            file_id_by_path.insert(
+                prepared.file_record.normalized_path.clone(),
+                prepared.file_record.file_id.clone(),
+            );
+            file_records.push(prepared.file_record);
+            if let Some(markdown_doc) = prepared.markdown_doc {
+                markdown_docs.push(markdown_doc);
+            }
+            if let Some(base_record) = prepared.base_record {
+                base_records.push(base_record);
+            }
+            if let Some(search_record) = prepared.search_record {
+                search_records.push(search_record);
             }
         }
 
-        let mut link_records = Vec::new();
-        let mut unresolved_links = 0_u64;
-        let mut property_records = Vec::new();
-        let mut task_records = Vec::new();
+        markdown_docs.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+        file_records.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
+        base_records.sort_by(|left, right| left.base_id.cmp(&right.base_id));
+        search_records.sort_by(|left, right| left.file_id.cmp(&right.file_id));
+
+        let mut property_records = markdown_docs
+            .iter()
+            .flat_map(|document| document.properties.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut task_records = markdown_docs
+            .iter()
+            .flat_map(|document| document.tasks.iter().cloned())
+            .collect::<Vec<_>>();
+        property_records.sort_by(|left, right| left.property_id.cmp(&right.property_id));
+        task_records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+
         let heading_index = markdown_docs
             .iter()
             .map(|document| (document.source_path.clone(), document.heading_slugs.clone()))
@@ -212,70 +132,26 @@ impl FullIndexService {
             .iter()
             .map(|document| (document.source_path.clone(), document.block_ids.clone()))
             .collect::<HashMap<_, _>>();
-
-        for markdown_doc in markdown_docs {
-            property_records.extend(markdown_doc.properties.clone());
-            task_records.extend(markdown_doc.tasks.clone());
-
-            for (index, indexed_link) in markdown_doc.links.iter().enumerate() {
-                let link = &indexed_link.link;
-                let resolution = resolve_target(
-                    &link.raw,
-                    Some(&markdown_doc.source_path),
+        let mut unresolved_links = 0_u64;
+        let mut link_records = markdown_docs
+            .par_iter()
+            .map(|document| {
+                resolve_document_link_records(
+                    document,
                     &markdown_candidates,
-                );
-
-                let mut resolved_file_id = resolution
-                    .resolved_path
-                    .as_ref()
-                    .and_then(|path| file_id_by_path.get(path).cloned());
-                let mut heading_slug = link.heading.as_deref().map(slugify_heading);
-                let mut block_id = link.block.clone();
-                let heading_resolution = resolve_heading_target(
-                    link.heading.as_deref(),
-                    resolution.resolved_path.as_deref(),
+                    &file_id_by_path,
                     &heading_index,
-                );
-                if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
-                    heading_slug = Some(resolved_heading_slug);
-                }
-                if link.heading.is_some() && !heading_resolution.is_resolved {
-                    resolved_file_id = None;
-                }
-                let block_resolution = resolve_block_target(
-                    link.block.as_deref(),
-                    resolution.resolved_path.as_deref(),
                     &block_index,
-                );
-                if let Some(resolved_block_id) = block_resolution.resolved_block_id {
-                    block_id = Some(resolved_block_id);
-                }
-                if link.block.is_some() && !block_resolution.is_resolved {
-                    resolved_file_id = None;
-                }
-
-                let is_unresolved = resolved_file_id.is_none();
-                if is_unresolved {
-                    unresolved_links += 1;
-                }
-
-                link_records.push(LinkRecordInput {
-                    link_id: deterministic_id(
-                        "link",
-                        &format!(
-                            "{}:{}:{}:{}",
-                            markdown_doc.file_id, index, indexed_link.source, link.raw
-                        ),
-                    ),
-                    source_file_id: markdown_doc.file_id.clone(),
-                    raw_target: link.target.clone(),
-                    resolved_file_id,
-                    heading_slug,
-                    block_id,
-                    is_unresolved,
-                });
-            }
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut link_record_rows = Vec::new();
+        for batch in link_records.drain(..) {
+            unresolved_links += batch.unresolved_total;
+            link_record_rows.extend(batch.records);
         }
+        link_record_rows.sort_by(|left, right| left.link_id.cmp(&right.link_id));
+        let link_records = link_record_rows;
 
         let transaction =
             connection
@@ -298,53 +174,12 @@ impl FullIndexService {
                 source: Box::new(source),
             })?;
 
-        for file in &file_records {
-            FilesRepository::upsert(&transaction, file).map_err(|source| {
-                FullIndexError::UpsertFileMetadata {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-
-        for property in &property_records {
-            PropertiesRepository::upsert(&transaction, property).map_err(|source| {
-                FullIndexError::UpsertProperty {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-
-        for task in &task_records {
-            TasksRepository::upsert(&transaction, task).map_err(|source| {
-                FullIndexError::UpsertTask {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-
-        for link in &link_records {
-            LinksRepository::insert(&transaction, link).map_err(|source| {
-                FullIndexError::InsertLink {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-
-        for base in &base_records {
-            BasesRepository::upsert(&transaction, base).map_err(|source| {
-                FullIndexError::UpsertBase {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-
-        for record in &search_records {
-            SearchIndexRepository::upsert(&transaction, record).map_err(|source| {
-                FullIndexError::UpsertSearchIndex {
-                    source: Box::new(source),
-                }
-            })?;
-        }
+        upsert_files_batch(&transaction, &file_records)?;
+        upsert_properties_batch(&transaction, &property_records)?;
+        upsert_tasks_batch(&transaction, &task_records)?;
+        insert_links_batch(&transaction, &link_records)?;
+        upsert_bases_batch(&transaction, &base_records)?;
+        upsert_search_index_batch(&transaction, &search_records)?;
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -2035,6 +1870,20 @@ struct MarkdownIndexDocument {
 }
 
 #[derive(Debug, Clone)]
+struct PreparedIndexEntry {
+    file_record: FileRecordInput,
+    markdown_doc: Option<MarkdownIndexDocument>,
+    base_record: Option<BaseRecordInput>,
+    search_record: Option<SearchIndexRecordInput>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedLinkBatch {
+    records: Vec<LinkRecordInput>,
+    unresolved_total: u64,
+}
+
+#[derive(Debug, Clone)]
 struct IndexedWikiLink {
     link: WikiLink,
     source: String,
@@ -2074,6 +1923,289 @@ fn metadata_modified_unix_ms(metadata: &fs::Metadata, path: &Path) -> Result<i64
     i64::try_from(modified_unix_ms).map_err(|_| FullIndexError::TimestampOverflow {
         value: modified_unix_ms,
     })
+}
+
+fn upsert_files_batch(
+    connection: &Connection,
+    records: &[FileRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO files (
+  file_id,
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(file_id)
+DO UPDATE SET
+  normalized_path = excluded.normalized_path,
+  match_key = excluded.match_key,
+  absolute_path = excluded.absolute_path,
+  size_bytes = excluded.size_bytes,
+  modified_unix_ms = excluded.modified_unix_ms,
+  hash_blake3 = excluded.hash_blake3,
+  is_markdown = excluded.is_markdown,
+  indexed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_upsert_files",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![
+                record.file_id,
+                record.normalized_path,
+                record.match_key,
+                record.absolute_path,
+                record.size_bytes,
+                record.modified_unix_ms,
+                record.hash_blake3,
+                i64::from(record.is_markdown)
+            ])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_upsert_files",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn upsert_properties_batch(
+    connection: &Connection,
+    records: &[PropertyRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO properties (
+  property_id,
+  file_id,
+  key,
+  value_type,
+  value_json
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(file_id, key)
+DO UPDATE SET
+  value_type = excluded.value_type,
+  value_json = excluded.value_json,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_upsert_properties",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![
+                record.property_id,
+                record.file_id,
+                record.key,
+                record.value_type,
+                record.value_json
+            ])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_upsert_properties",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn upsert_tasks_batch(
+    connection: &Connection,
+    records: &[TaskRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO tasks (
+  task_id,
+  file_id,
+  file_path,
+  file_path_lc,
+  line_number,
+  state,
+  text,
+  text_lc
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+ON CONFLICT(file_id, line_number)
+DO UPDATE SET
+  file_path = excluded.file_path,
+  file_path_lc = excluded.file_path_lc,
+  state = excluded.state,
+  text = excluded.text,
+  text_lc = excluded.text_lc,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_upsert_tasks",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![
+                record.task_id,
+                record.file_id,
+                record.file_path,
+                record.file_path_lc,
+                record.line_number,
+                record.state,
+                record.text,
+                record.text_lc
+            ])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_upsert_tasks",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn insert_links_batch(
+    connection: &Connection,
+    records: &[LinkRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO links (
+  link_id,
+  source_file_id,
+  raw_target,
+  resolved_file_id,
+  heading_slug,
+  block_id,
+  is_unresolved
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_insert_links",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![
+                record.link_id,
+                record.source_file_id,
+                record.raw_target,
+                record.resolved_file_id,
+                record.heading_slug,
+                record.block_id,
+                i64::from(record.is_unresolved)
+            ])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_insert_links",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn upsert_bases_batch(
+    connection: &Connection,
+    records: &[BaseRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO bases (
+  base_id,
+  file_id,
+  config_json
+)
+VALUES (?1, ?2, ?3)
+ON CONFLICT(base_id)
+DO UPDATE SET
+  file_id = excluded.file_id,
+  config_json = excluded.config_json,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_upsert_bases",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![record.base_id, record.file_id, record.config_json])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_upsert_bases",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
+}
+
+fn upsert_search_index_batch(
+    connection: &Connection,
+    records: &[SearchIndexRecordInput],
+) -> Result<(), FullIndexError> {
+    let mut statement = connection
+        .prepare_cached(
+            r#"
+INSERT INTO search_index (
+  file_id,
+  normalized_path,
+  normalized_path_lc,
+  title_lc,
+  content_lc
+)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(file_id)
+DO UPDATE SET
+  normalized_path = excluded.normalized_path,
+  normalized_path_lc = excluded.normalized_path_lc,
+  title_lc = excluded.title_lc,
+  content_lc = excluded.content_lc,
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"#,
+        )
+        .map_err(|source| FullIndexError::ExecuteSql {
+            operation: "prepare_bulk_upsert_search_index",
+            source: Box::new(source),
+        })?;
+
+    for record in records {
+        statement
+            .execute(params![
+                record.file_id,
+                record.normalized_path,
+                record.normalized_path_lc,
+                record.title_lc,
+                record.content_lc
+            ])
+            .map_err(|source| FullIndexError::ExecuteSql {
+                operation: "bulk_upsert_search_index",
+                source: Box::new(source),
+            })?;
+    }
+
+    Ok(())
 }
 
 fn title_from_normalized_path(path: &str) -> String {
@@ -2253,6 +2385,187 @@ fn collect_frontmatter_links(
             collect_frontmatter_links(&tagged.value, path, links);
         }
         serde_yaml::Value::Null | serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {}
+    }
+}
+
+fn build_prepared_index_entry(
+    entry: &VaultManifestEntry,
+    parser: MarkdownParser,
+) -> Result<PreparedIndexEntry, FullIndexError> {
+    let hash_blake3 =
+        hash_file_blake3(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
+            path: entry.absolute.clone(),
+            source,
+        })?;
+
+    let file_id = deterministic_id("file", &entry.normalized);
+    let file_record = FileRecordInput {
+        file_id: file_id.clone(),
+        normalized_path: entry.normalized.clone(),
+        match_key: entry.match_key.clone(),
+        absolute_path: entry.absolute.to_string_lossy().to_string(),
+        size_bytes: entry.size_bytes,
+        modified_unix_ms: entry.modified_unix_ms,
+        hash_blake3,
+        is_markdown: entry.normalized.ends_with(".md"),
+    };
+
+    if entry.normalized.ends_with(".md") {
+        let markdown =
+            fs::read_to_string(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
+                path: entry.absolute.clone(),
+                source,
+            })?;
+
+        let parsed = parser
+            .parse(MarkdownParseRequest {
+                normalized_path: entry.normalized.clone(),
+                raw: markdown.clone(),
+            })
+            .map_err(|source| FullIndexError::ParseMarkdown {
+                path: entry.absolute.clone(),
+                source: Box::new(source),
+            })?;
+
+        let property_records =
+            build_property_records(&file_id, &entry.normalized, &markdown, &entry.absolute)?;
+        let task_records = build_task_records(&file_id, &entry.normalized, &markdown);
+        let links = extract_index_links(&markdown, &parsed.body);
+        let mut heading_slugs = parsed
+            .headings
+            .iter()
+            .map(|heading| slugify_heading(&heading.text))
+            .filter(|slug| !slug.is_empty())
+            .collect::<Vec<_>>();
+        heading_slugs.sort();
+        heading_slugs.dedup();
+        let block_ids = extract_block_ids(&parsed.body);
+        let search_record = SearchIndexRecordInput {
+            file_id: file_id.clone(),
+            normalized_path: entry.normalized.clone(),
+            normalized_path_lc: entry.normalized.to_ascii_lowercase(),
+            title_lc: title_from_normalized_path(&entry.normalized).to_ascii_lowercase(),
+            content_lc: markdown.to_ascii_lowercase(),
+        };
+        let markdown_doc = MarkdownIndexDocument {
+            file_id,
+            source_path: entry.normalized.clone(),
+            links,
+            heading_slugs,
+            block_ids,
+            properties: property_records,
+            tasks: task_records,
+        };
+
+        return Ok(PreparedIndexEntry {
+            file_record,
+            markdown_doc: Some(markdown_doc),
+            base_record: None,
+            search_record: Some(search_record),
+        });
+    }
+
+    if entry.normalized.ends_with(".base") {
+        let raw =
+            fs::read_to_string(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
+                path: entry.absolute.clone(),
+                source,
+            })?;
+        let config_json = serde_json::to_string(&json!({ "raw": raw })).map_err(|source| {
+            FullIndexError::SerializeBaseConfig {
+                path: entry.absolute.clone(),
+                source,
+            }
+        })?;
+
+        return Ok(PreparedIndexEntry {
+            file_record,
+            markdown_doc: None,
+            base_record: Some(BaseRecordInput {
+                base_id: deterministic_id("base", &entry.normalized),
+                file_id,
+                config_json,
+            }),
+            search_record: None,
+        });
+    }
+
+    Ok(PreparedIndexEntry {
+        file_record,
+        markdown_doc: None,
+        base_record: None,
+        search_record: None,
+    })
+}
+
+fn resolve_document_link_records(
+    document: &MarkdownIndexDocument,
+    markdown_candidates: &[String],
+    file_id_by_path: &HashMap<String, String>,
+    heading_index: &HashMap<String, Vec<String>>,
+    block_index: &HashMap<String, Vec<String>>,
+) -> ResolvedLinkBatch {
+    let mut records = Vec::with_capacity(document.links.len());
+    let mut unresolved_total = 0_u64;
+
+    for (index, indexed_link) in document.links.iter().enumerate() {
+        let link = &indexed_link.link;
+        let resolution =
+            resolve_target(&link.raw, Some(&document.source_path), markdown_candidates);
+
+        let mut resolved_file_id = resolution
+            .resolved_path
+            .as_ref()
+            .and_then(|path| file_id_by_path.get(path).cloned());
+        let mut heading_slug = link.heading.as_deref().map(slugify_heading);
+        let mut block_id = link.block.clone();
+        let heading_resolution = resolve_heading_target(
+            link.heading.as_deref(),
+            resolution.resolved_path.as_deref(),
+            heading_index,
+        );
+        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
+            heading_slug = Some(resolved_heading_slug);
+        }
+        if link.heading.is_some() && !heading_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+        let block_resolution = resolve_block_target(
+            link.block.as_deref(),
+            resolution.resolved_path.as_deref(),
+            block_index,
+        );
+        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
+            block_id = Some(resolved_block_id);
+        }
+        if link.block.is_some() && !block_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+
+        let is_unresolved = resolved_file_id.is_none();
+        if is_unresolved {
+            unresolved_total += 1;
+        }
+        records.push(LinkRecordInput {
+            link_id: deterministic_id(
+                "link",
+                &format!(
+                    "{}:{}:{}:{}",
+                    document.file_id, index, indexed_link.source, link.raw
+                ),
+            ),
+            source_file_id: document.file_id.clone(),
+            raw_target: link.target.clone(),
+            resolved_file_id,
+            heading_slug,
+            block_id,
+            is_unresolved,
+        });
+    }
+
+    ResolvedLinkBatch {
+        records,
+        unresolved_total,
     }
 }
 
@@ -2978,6 +3291,49 @@ mod tests {
                 .expect("get summary state")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn rebuild_produces_deterministic_link_rows_across_repeated_runs() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes/projects")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nrelated: [\"[[projects/b]]\", \"[[projects/c]]\"]\n---\n# A\n[[projects/b]]\n[[missing]]",
+        )
+        .expect("write a");
+        fs::write(
+            temp.path().join("notes/projects/b.md"),
+            "# B\n[[../a]]\n[[c]]",
+        )
+        .expect("write b");
+        fs::write(temp.path().join("notes/projects/c.md"), "# C").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        let mut expected_link_ids: Option<Vec<String>> = None;
+        for _ in 0..5 {
+            FullIndexService::default()
+                .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+                .expect("full rebuild");
+
+            let mut statement = connection
+                .prepare("SELECT link_id FROM links ORDER BY link_id ASC")
+                .expect("prepare link id query");
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query link ids");
+            let link_ids = rows
+                .map(|row| row.expect("map link id row"))
+                .collect::<Vec<_>>();
+            match expected_link_ids.as_ref() {
+                Some(expected) => assert_eq!(&link_ids, expected),
+                None => {
+                    expected_link_ids = Some(link_ids);
+                }
+            }
+        }
     }
 
     #[test]

@@ -197,7 +197,7 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
         let path = format!("notes/note-{idx:05}.md");
         let content = format!("# Note {idx}\nstartup seed");
         consume_envelope(
-            seed_kernel.note_put(&path, &content),
+            seed_kernel.note_put_with_policy(&path, &content, true),
             "startup_seed_note_put",
         )?;
     }
@@ -265,7 +265,10 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     for idx in 0..notes_total {
         let path = format!("notes/note-{idx:05}.md");
         let content = format!("# Note {idx}\nseed");
-        consume_envelope(kernel.note_put(&path, &content), "seed_note_put")?;
+        consume_envelope(
+            kernel.note_put_with_policy(&path, &content, true),
+            "seed_note_put",
+        )?;
     }
 
     let mut note_get_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
@@ -288,7 +291,10 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
 
         let content = format!("# Note {idx}\niteration {iteration}");
         let note_put_start = Instant::now();
-        consume_envelope(kernel.note_put(&path, &content), "note_put")?;
+        consume_envelope(
+            kernel.note_put_with_policy(&path, &content, true),
+            "note_put",
+        )?;
         note_put_samples.push(elapsed_ms(note_put_start));
 
         let events_poll_start = Instant::now();

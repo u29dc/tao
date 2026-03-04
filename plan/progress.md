@@ -1892,3 +1892,43 @@ Append-only execution log for autonomous runs.
   - commands: [prepare parallel full-rebuild producer refactor]
   - outcomes: [next step is parallel markdown parse/property/task/link extraction with deterministic merge order]
 - residual_risk: none
+
+- timestamp: 2026-03-04T22:05:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-002
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/indexing.rs]
+  - commands: [cargo test -p tao-sdk-service --release rebuild_produces_deterministic_link_rows_across_repeated_runs]
+  - outcomes: [full rebuild producer stage now parses markdown and extracts properties/tasks/links/search payloads in parallel workers with deterministic post-merge ordering]
+- residual_risk: none
+
+- timestamp: 2026-03-04T22:05:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-003
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/indexing.rs]
+  - commands: [cargo test -p tao-sdk-service --release rebuild_produces_deterministic_link_rows_across_repeated_runs]
+  - outcomes: [link resolution/materialization now runs in parallel per source document and merges by sorted link_id; repeated rebuilds produced identical link id sets]
+- residual_risk: none
+
+- timestamp: 2026-03-04T22:05:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-004
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/Cargo.toml, crates/tao-sdk-service/src/lib.rs]
+  - commands: [cargo test -p tao-sdk-service --release base_table_executor_parallel_fast_path_is_deterministic]
+  - outcomes: [base table executor now uses parallel filter/sort/summaries above threshold while preserving deterministic row/snapshot output]
+- residual_risk: none
+
+- timestamp: 2026-03-04T22:05:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-005
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/indexing.rs, crates/tao-bench/src/main.rs]
+  - commands: [cargo run -p tao-bench --release -- --scenario startup --iterations 20 --json-out .benchmarks/reports/par-startup.json]
+  - outcomes: [full rebuild writes now execute as one transaction with prepared-statement batching for files/properties/tasks/links/bases/search_index; startup benchmark scenario passes with p50=0.218ms p95=0.263ms]
+- residual_risk: benchmark reflects local machine profile and should be compared against CI baselines for regression alerting

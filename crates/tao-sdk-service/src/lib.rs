@@ -33,6 +33,7 @@ pub use indexing::{
     ReconciliationScanResult, ReconciliationScannerService, StaleCleanupError, StaleCleanupResult,
     StaleCleanupService,
 };
+use rayon::prelude::*;
 pub use tracing_hooks::ServiceTraceContext;
 
 use rusqlite::types::Value as SqlValue;
@@ -1402,6 +1403,8 @@ impl BaseTableExecutorService {
         connection: &Connection,
         plan: &TableQueryPlan,
     ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        const PARALLEL_CANDIDATE_THRESHOLD: usize = 1_024;
+
         if plan.limit == 0 {
             return Err(BaseTableExecutorError::InvalidPlan {
                 reason: "limit must be greater than zero".to_string(),
@@ -1505,8 +1508,24 @@ ORDER BY p.file_id ASC, p.key ASC
             }
         }
 
-        candidates.retain(|row| row_matches_filters(row, &plan.filters));
-        candidates.sort_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+        let mut candidates = if candidates.len() >= PARALLEL_CANDIDATE_THRESHOLD {
+            candidates
+                .into_par_iter()
+                .filter(|row| row_matches_filters(row, &plan.filters))
+                .collect::<Vec<_>>()
+        } else {
+            candidates
+                .into_iter()
+                .filter(|row| row_matches_filters(row, &plan.filters))
+                .collect::<Vec<_>>()
+        };
+
+        if candidates.len() >= PARALLEL_CANDIDATE_THRESHOLD {
+            candidates
+                .par_sort_unstable_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+        } else {
+            candidates.sort_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+        }
 
         let total = candidates.len() as u64;
         let summaries = compute_table_summaries(&candidates, &plan.columns);
@@ -1740,58 +1759,74 @@ fn compute_table_summaries(
     rows: &[TableRowCandidate],
     columns: &[BaseColumnConfig],
 ) -> Vec<BaseTableSummary> {
-    columns
-        .iter()
-        .map(|column| {
-            let mut count = 0_u64;
-            let mut min: Option<JsonValue> = None;
-            let mut max: Option<JsonValue> = None;
-            let mut numeric_sum = 0_f64;
-            let mut numeric_count = 0_u64;
+    const PARALLEL_SUMMARY_ROW_THRESHOLD: usize = 1_024;
+    const PARALLEL_SUMMARY_COLUMN_THRESHOLD: usize = 3;
 
-            for row in rows {
-                let Some(value) = row.lookup_value(&column.key) else {
-                    continue;
-                };
-                if value.is_null() {
-                    continue;
-                }
+    if rows.len() >= PARALLEL_SUMMARY_ROW_THRESHOLD
+        && columns.len() >= PARALLEL_SUMMARY_COLUMN_THRESHOLD
+    {
+        columns
+            .par_iter()
+            .map(|column| compute_column_summary(rows, column))
+            .collect()
+    } else {
+        columns
+            .iter()
+            .map(|column| compute_column_summary(rows, column))
+            .collect()
+    }
+}
 
-                count += 1;
-                if min
-                    .as_ref()
-                    .is_none_or(|current| compare_json_values(&value, current).is_lt())
-                {
-                    min = Some(value.clone());
-                }
-                if max
-                    .as_ref()
-                    .is_none_or(|current| compare_json_values(&value, current).is_gt())
-                {
-                    max = Some(value.clone());
-                }
-                if let Some(number) = value.as_f64() {
-                    numeric_sum += number;
-                    numeric_count += 1;
-                }
-            }
+fn compute_column_summary(
+    rows: &[TableRowCandidate],
+    column: &BaseColumnConfig,
+) -> BaseTableSummary {
+    let mut count = 0_u64;
+    let mut min: Option<JsonValue> = None;
+    let mut max: Option<JsonValue> = None;
+    let mut numeric_sum = 0_f64;
+    let mut numeric_count = 0_u64;
 
-            let avg = if numeric_count > 0 {
-                serde_json::Number::from_f64(numeric_sum / (numeric_count as f64))
-                    .map(JsonValue::Number)
-            } else {
-                None
-            };
+    for row in rows {
+        let Some(value) = row.lookup_value(&column.key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
 
-            BaseTableSummary {
-                key: column.key.clone(),
-                count,
-                min,
-                max,
-                avg,
-            }
-        })
-        .collect()
+        count += 1;
+        if min
+            .as_ref()
+            .is_none_or(|current| compare_json_values(&value, current).is_lt())
+        {
+            min = Some(value.clone());
+        }
+        if max
+            .as_ref()
+            .is_none_or(|current| compare_json_values(&value, current).is_gt())
+        {
+            max = Some(value.clone());
+        }
+        if let Some(number) = value.as_f64() {
+            numeric_sum += number;
+            numeric_count += 1;
+        }
+    }
+
+    let avg = if numeric_count > 0 {
+        serde_json::Number::from_f64(numeric_sum / (numeric_count as f64)).map(JsonValue::Number)
+    } else {
+        None
+    };
+
+    BaseTableSummary {
+        key: column.key.clone(),
+        count,
+        min,
+        max,
+        avg,
+    }
 }
 
 fn json_scalar_to_string(value: &JsonValue) -> Option<String> {
@@ -4040,6 +4075,76 @@ mod tests {
             page.rows[0].values.get("path"),
             Some(&serde_json::json!("notes/projects/alpha.md"))
         );
+    }
+
+    #[test]
+    fn base_table_executor_parallel_fast_path_is_deterministic() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        for index in 0..1_300 {
+            let file_id = format!("f{index}");
+            let path = format!("notes/projects/{index:04}.md");
+            FilesRepository::insert(
+                &connection,
+                &file_record(&file_id, &path, &path, &format!("/vault/{path}")),
+            )
+            .expect("insert file");
+            PropertiesRepository::upsert(
+                &connection,
+                &PropertyRecordInput {
+                    property_id: format!("p{index}"),
+                    file_id: file_id.clone(),
+                    key: "due".to_string(),
+                    value_type: "number".to_string(),
+                    value_json: ((index % 17) as i64).to_string(),
+                },
+            )
+            .expect("upsert property");
+        }
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec!["due".to_string()],
+            filters: vec![BaseFilterClause {
+                key: "due".to_string(),
+                op: BaseFilterOp::Gte,
+                value: serde_json::json!(3),
+            }],
+            sorts: vec![BaseSortClause {
+                key: "due".to_string(),
+                direction: BaseSortDirection::Desc,
+            }],
+            columns: vec![
+                BaseColumnConfig {
+                    key: "path".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+                BaseColumnConfig {
+                    key: "due".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+            ],
+            limit: 200,
+            offset: 20,
+            property_queries: Vec::new(),
+        };
+
+        let first = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute first");
+        let second = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute second");
+
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.summaries, second.summaries);
+        assert_eq!(first.rows, second.rows);
     }
 
     #[test]

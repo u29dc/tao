@@ -38,6 +38,7 @@ uuid = { version = "1.16.0", features = ["v4", "serde"] }
 unicode-normalization = "0.1.25"
 walkdir = "2.5.0"
 blake3 = "1.8.2"
+rayon = "1.11.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

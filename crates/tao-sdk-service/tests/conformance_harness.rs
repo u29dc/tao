@@ -30,6 +30,9 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        if !should_copy_fixture_entry(&entry) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
@@ -43,6 +46,11 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+fn should_copy_fixture_entry(entry: &fs::DirEntry) -> bool {
+    let file_name = entry.file_name();
+    !matches!(file_name.to_str(), Some("generated" | ".tao"))
 }
 
 fn collect_link_resolution_snapshot(

@@ -2,10 +2,10 @@
 	"plan_version": "2026-03-04",
 	"manifest_path": "plan/tickets.csv",
 	"phase": "phase23",
-	"active_ticket": "PAR-002",
-	"last_completed_ticket": "PAR-001",
+	"active_ticket": "DATA-001",
+	"last_completed_ticket": "PAR-005",
 	"session_status": "running",
 	"retry": {},
 	"blockers": [],
-	"updated_at": "2026-03-04T21:28:00Z"
+	"updated_at": "2026-03-04T22:05:00Z"
 }
