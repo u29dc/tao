@@ -104,6 +104,11 @@ import Foundation
     )
 
     let client = TaoBridgeClient()
+    _ = try client.startupBundle(
+        vaultRoot: vaultRoot.path,
+        dbPath: dbPath.path,
+        limit: 50
+    )
     let stats = try client.vaultStats(
         vaultRoot: vaultRoot.path,
         dbPath: dbPath.path

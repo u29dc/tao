@@ -96,6 +96,10 @@ pub enum BaseFilterOp {
     NotIn,
     /// Field existence check.
     Exists,
+    /// String starts with prefix.
+    StartsWith,
+    /// String does not start with prefix.
+    NotStartsWith,
 }
 
 impl BaseFilterOp {
@@ -111,6 +115,8 @@ impl BaseFilterOp {
             "in" => Ok(Self::In),
             "not_in" | "notin" | "not-in" => Ok(Self::NotIn),
             "exists" => Ok(Self::Exists),
+            "starts_with" | "startswith" => Ok(Self::StartsWith),
+            "not_starts_with" | "notstartswith" | "not-starts-with" => Ok(Self::NotStartsWith),
             unsupported => Err(BaseParseError::UnsupportedValue {
                 view_index,
                 field: "filters[].op".to_string(),
@@ -522,30 +528,41 @@ pub fn parse_base_document(input: &str) -> Result<BaseDocument, BaseParseError> 
             expected: "sequence",
         });
     };
+    let defaults = parse_obsidian_root_defaults(&root)?;
 
     let mut views = Vec::with_capacity(view_values.len());
     for (index, view_value) in view_values.iter().enumerate() {
-        views.push(parse_view(view_value, index + 1)?);
+        views.push(parse_view(view_value, index + 1, &defaults)?);
     }
 
     Ok(BaseDocument { views })
 }
 
-fn parse_view(value: &Value, view_index: usize) -> Result<BaseViewDefinition, BaseParseError> {
+#[derive(Debug, Clone, Default)]
+struct ObsidianRootDefaults {
+    source: Option<String>,
+    filters: Vec<BaseFilterClause>,
+}
+
+fn parse_view(
+    value: &Value,
+    view_index: usize,
+    defaults: &ObsidianRootDefaults,
+) -> Result<BaseViewDefinition, BaseParseError> {
     match value {
         Value::String(kind) => {
             let kind = BaseViewKind::parse(kind, view_index, "type")?;
             Ok(BaseViewDefinition {
                 name: default_view_name(kind, view_index),
                 kind,
-                source: None,
-                filters: Vec::new(),
+                source: defaults.source.clone(),
+                filters: defaults.filters.clone(),
                 sorts: Vec::new(),
                 columns: Vec::new(),
                 extras: JsonMap::new(),
             })
         }
-        Value::Mapping(mapping) => parse_view_mapping(mapping, view_index),
+        Value::Mapping(mapping) => parse_view_mapping(mapping, view_index, defaults),
         _ => Err(BaseParseError::InvalidViewEntry { view_index }),
     }
 }
@@ -553,6 +570,7 @@ fn parse_view(value: &Value, view_index: usize) -> Result<BaseViewDefinition, Ba
 fn parse_view_mapping(
     mapping: &Mapping,
     view_index: usize,
+    defaults: &ObsidianRootDefaults,
 ) -> Result<BaseViewDefinition, BaseParseError> {
     let kind = match mapping_get(mapping, "type") {
         Some(Value::String(kind)) => BaseViewKind::parse(kind, view_index, "type")?,
@@ -589,10 +607,11 @@ fn parse_view_mapping(
                 expected: "string",
             });
         }
-        None => None,
+        None => defaults.source.clone(),
     };
 
-    let filters = parse_filters(mapping, view_index)?;
+    let mut filters = defaults.filters.clone();
+    filters.extend(parse_filters(mapping, view_index)?);
     let sorts = parse_sorts(mapping, view_index)?;
     let columns = parse_columns(mapping, view_index)?;
     let extras = parse_extras(mapping, view_index)?;
@@ -606,6 +625,150 @@ fn parse_view_mapping(
         columns,
         extras,
     })
+}
+
+fn parse_obsidian_root_defaults(root: &Mapping) -> Result<ObsidianRootDefaults, BaseParseError> {
+    let (source, filters) = parse_obsidian_root_filters(root)?;
+    Ok(ObsidianRootDefaults { source, filters })
+}
+
+fn parse_obsidian_root_filters(
+    root: &Mapping,
+) -> Result<(Option<String>, Vec<BaseFilterClause>), BaseParseError> {
+    let Some(raw_filters) = mapping_get(root, "filters") else {
+        return Ok((None, Vec::new()));
+    };
+    let Value::Mapping(filters_map) = raw_filters else {
+        return Err(BaseParseError::InvalidRootFieldType {
+            field: "filters".to_string(),
+            expected: "mapping",
+        });
+    };
+    let Some(and_filters) = mapping_get(filters_map, "and") else {
+        return Ok((None, Vec::new()));
+    };
+    let Value::Sequence(expressions) = and_filters else {
+        return Err(BaseParseError::InvalidRootFieldType {
+            field: "filters.and".to_string(),
+            expected: "sequence",
+        });
+    };
+
+    let mut source = None;
+    let mut clauses = Vec::new();
+    for expression in expressions {
+        let Value::String(raw_expression) = expression else {
+            return Err(BaseParseError::InvalidRootFieldType {
+                field: "filters.and[]".to_string(),
+                expected: "string",
+            });
+        };
+        let parsed = parse_obsidian_filter_expression(raw_expression)?;
+        match parsed {
+            ObsidianFilterExpr::InFolder(path) => {
+                if source.is_some() && source.as_deref() != Some(path.as_str()) {
+                    return Err(BaseParseError::UnsupportedRootFilter {
+                        expression: raw_expression.clone(),
+                    });
+                }
+                source = Some(path);
+            }
+            ObsidianFilterExpr::Clause(clause) => clauses.push(clause),
+        }
+    }
+
+    Ok((source, clauses))
+}
+
+enum ObsidianFilterExpr {
+    InFolder(String),
+    Clause(BaseFilterClause),
+}
+
+fn parse_obsidian_filter_expression(
+    expression: &str,
+) -> Result<ObsidianFilterExpr, BaseParseError> {
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        return Err(BaseParseError::UnsupportedRootFilter {
+            expression: expression.to_string(),
+        });
+    }
+
+    let (negated, body) = if let Some(stripped) = trimmed.strip_prefix('!') {
+        (true, stripped.trim())
+    } else {
+        (false, trimmed)
+    };
+
+    if let Some(argument) = parse_function_argument(body, "file.inFolder(", ')') {
+        if negated {
+            return Err(BaseParseError::UnsupportedRootFilter {
+                expression: expression.to_string(),
+            });
+        }
+        return Ok(ObsidianFilterExpr::InFolder(argument));
+    }
+
+    if let Some(argument) = parse_function_argument(body, "file.name.startsWith(", ')') {
+        let clause = BaseFilterClause {
+            key: "title".to_string(),
+            op: if negated {
+                BaseFilterOp::NotStartsWith
+            } else {
+                BaseFilterOp::StartsWith
+            },
+            value: serde_json::Value::String(argument),
+        };
+        return Ok(ObsidianFilterExpr::Clause(clause));
+    }
+
+    if let Some(field_expr) = body.strip_suffix(".isEmpty()") {
+        let key = normalize_obsidian_field_key(field_expr);
+        let clause = BaseFilterClause {
+            key,
+            op: BaseFilterOp::Exists,
+            value: serde_json::Value::Bool(negated),
+        };
+        return Ok(ObsidianFilterExpr::Clause(clause));
+    }
+
+    Err(BaseParseError::UnsupportedRootFilter {
+        expression: expression.to_string(),
+    })
+}
+
+fn parse_function_argument(expression: &str, prefix: &str, suffix: char) -> Option<String> {
+    let body = expression.strip_prefix(prefix)?;
+    let body = body.strip_suffix(suffix)?;
+    let body = body.trim();
+
+    if body.len() >= 2 && body.starts_with('"') && body.ends_with('"') {
+        return Some(body[1..body.len() - 1].to_string());
+    }
+    if body.len() >= 2 && body.starts_with('\'') && body.ends_with('\'') {
+        return Some(body[1..body.len() - 1].to_string());
+    }
+
+    None
+}
+
+fn normalize_obsidian_field_key(raw: &str) -> String {
+    let normalized = raw.trim();
+    if normalized.eq_ignore_ascii_case("file.name") {
+        return "title".to_string();
+    }
+    if normalized.eq_ignore_ascii_case("file.path") {
+        return "path".to_string();
+    }
+    if normalized.eq_ignore_ascii_case("file.folder") {
+        return "file_folder".to_string();
+    }
+    if let Some(rest) = normalized.strip_prefix("note.") {
+        return rest.to_string();
+    }
+
+    normalized.to_string()
 }
 
 fn parse_filters(
@@ -663,13 +826,17 @@ fn parse_sorts(
     mapping: &Mapping,
     view_index: usize,
 ) -> Result<Vec<BaseSortClause>, BaseParseError> {
-    let Some(raw_sorts) = mapping_get(mapping, "sorts") else {
+    let (raw_sorts, field_name) = if let Some(raw) = mapping_get(mapping, "sorts") {
+        (raw, "sorts")
+    } else if let Some(raw) = mapping_get(mapping, "sort") {
+        (raw, "sort")
+    } else {
         return Ok(Vec::new());
     };
     let Value::Sequence(sorts) = raw_sorts else {
         return Err(BaseParseError::InvalidFieldType {
             view_index,
-            field: "sorts".to_string(),
+            field: field_name.to_string(),
             expected: "sequence",
         });
     };
@@ -684,7 +851,11 @@ fn parse_sorts(
             });
         };
 
-        let key = required_string_field(sort_map, view_index, "key", "sorts[]")?;
+        let key = if sort_map.contains_key("key") {
+            required_string_field(sort_map, view_index, "key", "sorts[]")?
+        } else {
+            required_string_field(sort_map, view_index, "property", "sorts[]")?
+        };
         let direction = match sort_map.get("direction") {
             Some(Value::String(direction)) => BaseSortDirection::parse(direction, view_index)?,
             Some(_) => {
@@ -697,7 +868,10 @@ fn parse_sorts(
             None => BaseSortDirection::Asc,
         };
 
-        parsed.push(BaseSortClause { key, direction });
+        parsed.push(BaseSortClause {
+            key: normalize_obsidian_field_key(&key),
+            direction,
+        });
     }
 
     Ok(parsed)
@@ -707,83 +881,149 @@ fn parse_columns(
     mapping: &Mapping,
     view_index: usize,
 ) -> Result<Vec<BaseColumnConfig>, BaseParseError> {
-    let Some(raw_columns) = mapping_get(mapping, "columns") else {
+    if let Some(raw_columns) = mapping_get(mapping, "columns") {
+        let Value::Sequence(columns) = raw_columns else {
+            return Err(BaseParseError::InvalidFieldType {
+                view_index,
+                field: "columns".to_string(),
+                expected: "sequence",
+            });
+        };
+
+        let mut parsed = Vec::with_capacity(columns.len());
+        for (column_index, column_value) in columns.iter().enumerate() {
+            match column_value {
+                Value::String(key) => parsed.push(BaseColumnConfig {
+                    key: normalize_obsidian_field_key(&normalize_non_empty_string(
+                        key,
+                        view_index,
+                        &format!("columns[{column_index}]"),
+                    )?),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                }),
+                Value::Mapping(column_map) => {
+                    let key = required_string_field(
+                        column_map,
+                        view_index,
+                        "key",
+                        &format!("columns[{column_index}]"),
+                    )?;
+                    let label = match column_map.get("label") {
+                        Some(Value::String(label)) => Some(normalize_non_empty_string(
+                            label,
+                            view_index,
+                            &format!("columns[{column_index}].label"),
+                        )?),
+                        Some(_) => {
+                            return Err(BaseParseError::InvalidFieldType {
+                                view_index,
+                                field: format!("columns[{column_index}].label"),
+                                expected: "string",
+                            });
+                        }
+                        None => None,
+                    };
+                    let width = match column_map.get("width") {
+                        Some(width) => Some(parse_column_width(width, view_index, column_index)?),
+                        None => None,
+                    };
+                    let hidden = match column_map.get("hidden") {
+                        Some(Value::Bool(hidden)) => *hidden,
+                        Some(_) => {
+                            return Err(BaseParseError::InvalidFieldType {
+                                view_index,
+                                field: format!("columns[{column_index}].hidden"),
+                                expected: "boolean",
+                            });
+                        }
+                        None => false,
+                    };
+
+                    parsed.push(BaseColumnConfig {
+                        key: normalize_obsidian_field_key(&key),
+                        label,
+                        width,
+                        hidden,
+                    });
+                }
+                _ => {
+                    return Err(BaseParseError::InvalidFieldType {
+                        view_index,
+                        field: format!("columns[{column_index}]"),
+                        expected: "string or mapping",
+                    });
+                }
+            }
+        }
+
+        return Ok(parsed);
+    }
+
+    let Some(raw_order) = mapping_get(mapping, "order") else {
         return Ok(Vec::new());
     };
-    let Value::Sequence(columns) = raw_columns else {
+    let Value::Sequence(order_columns) = raw_order else {
         return Err(BaseParseError::InvalidFieldType {
             view_index,
-            field: "columns".to_string(),
+            field: "order".to_string(),
             expected: "sequence",
         });
     };
+    let width_by_key = parse_obsidian_column_widths(mapping, view_index)?;
 
-    let mut parsed = Vec::with_capacity(columns.len());
-    for (column_index, column_value) in columns.iter().enumerate() {
+    let mut parsed = Vec::with_capacity(order_columns.len());
+    for (column_index, column_value) in order_columns.iter().enumerate() {
         match column_value {
-            Value::String(key) => parsed.push(BaseColumnConfig {
-                key: normalize_non_empty_string(
+            Value::String(key) => {
+                let normalized_key = normalize_obsidian_field_key(&normalize_non_empty_string(
                     key,
                     view_index,
-                    &format!("columns[{column_index}]"),
-                )?,
-                label: None,
-                width: None,
-                hidden: false,
-            }),
-            Value::Mapping(column_map) => {
-                let key = required_string_field(
-                    column_map,
-                    view_index,
-                    "key",
-                    &format!("columns[{column_index}]"),
-                )?;
-                let label = match column_map.get("label") {
-                    Some(Value::String(label)) => Some(normalize_non_empty_string(
-                        label,
-                        view_index,
-                        &format!("columns[{column_index}].label"),
-                    )?),
-                    Some(_) => {
-                        return Err(BaseParseError::InvalidFieldType {
-                            view_index,
-                            field: format!("columns[{column_index}].label"),
-                            expected: "string",
-                        });
-                    }
-                    None => None,
-                };
-                let width = match column_map.get("width") {
-                    Some(width) => Some(parse_column_width(width, view_index, column_index)?),
-                    None => None,
-                };
-                let hidden = match column_map.get("hidden") {
-                    Some(Value::Bool(hidden)) => *hidden,
-                    Some(_) => {
-                        return Err(BaseParseError::InvalidFieldType {
-                            view_index,
-                            field: format!("columns[{column_index}].hidden"),
-                            expected: "boolean",
-                        });
-                    }
-                    None => false,
-                };
-
+                    &format!("order[{column_index}]"),
+                )?);
                 parsed.push(BaseColumnConfig {
-                    key,
-                    label,
-                    width,
-                    hidden,
+                    key: normalized_key.clone(),
+                    label: None,
+                    width: width_by_key.get(&normalized_key).copied(),
+                    hidden: false,
                 });
             }
             _ => {
                 return Err(BaseParseError::InvalidFieldType {
                     view_index,
-                    field: format!("columns[{column_index}]"),
-                    expected: "string or mapping",
+                    field: format!("order[{column_index}]"),
+                    expected: "string",
                 });
             }
         }
+    }
+
+    Ok(parsed)
+}
+
+fn parse_obsidian_column_widths(
+    mapping: &Mapping,
+    view_index: usize,
+) -> Result<std::collections::HashMap<String, u16>, BaseParseError> {
+    let Some(raw_column_size) = mapping_get(mapping, "columnSize") else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let Value::Mapping(column_size) = raw_column_size else {
+        return Err(BaseParseError::InvalidFieldType {
+            view_index,
+            field: "columnSize".to_string(),
+            expected: "mapping",
+        });
+    };
+
+    let mut parsed = std::collections::HashMap::new();
+    for (key, value) in column_size {
+        let Value::String(key) = key else {
+            continue;
+        };
+        let parsed_width = parse_column_width(value, view_index, 0)?;
+        parsed.insert(normalize_obsidian_field_key(key), parsed_width);
     }
 
     Ok(parsed)
@@ -827,7 +1067,15 @@ fn parse_extras(
         };
         if matches!(
             key.as_str(),
-            "name" | "type" | "source" | "filters" | "sorts" | "columns"
+            "name"
+                | "type"
+                | "source"
+                | "filters"
+                | "sorts"
+                | "sort"
+                | "columns"
+                | "order"
+                | "columnSize"
         ) {
             continue;
         }
@@ -915,6 +1163,12 @@ pub enum BaseParseError {
         field: String,
         /// Expected type.
         expected: &'static str,
+    },
+    /// Root-level Obsidian filter expression is unsupported.
+    #[error("unsupported root filter expression: {expression}")]
+    UnsupportedRootFilter {
+        /// Raw expression text.
+        expression: String,
     },
     /// View entry was not a string shorthand or mapping.
     #[error("view {view_index} must be a string shorthand or mapping")]
@@ -1159,6 +1413,7 @@ fn parse_error_field(error: &BaseParseError) -> Option<String> {
         | BaseParseError::JsonConversion { field, .. } => Some(field.clone()),
         BaseParseError::MissingViews => Some("views".to_string()),
         BaseParseError::InvalidViewEntry { view_index } => Some(format!("views[{view_index}]")),
+        BaseParseError::UnsupportedRootFilter { .. } => Some("filters.and".to_string()),
         BaseParseError::EmptyInput
         | BaseParseError::DeserializeYaml { .. }
         | BaseParseError::RootMustBeMapping => None,
@@ -1314,6 +1569,128 @@ views:
                 expected
             } if field == "columns[0].width" && expected == "unsigned integer"
         ));
+    }
+
+    #[test]
+    fn parse_base_document_maps_obsidian_root_filters_to_source_and_clauses() {
+        let document = parse_base_document(
+            r#"
+filters:
+  and:
+    - file.inFolder("WORK/13-RELATIONS/Communications")
+    - '!file.name.startsWith("hub_work_")'
+views:
+  - type: table
+    name: Table
+    order:
+      - file.name
+      - date
+    sort:
+      - property: date
+        direction: DESC
+"#,
+        )
+        .expect("parse document");
+
+        assert_eq!(document.views.len(), 1);
+        let table = &document.views[0];
+        assert_eq!(
+            table.source.as_deref(),
+            Some("WORK/13-RELATIONS/Communications")
+        );
+        assert_eq!(
+            table.filters,
+            vec![BaseFilterClause {
+                key: "title".to_string(),
+                op: BaseFilterOp::NotStartsWith,
+                value: json!("hub_work_"),
+            }]
+        );
+        assert_eq!(
+            table.sorts,
+            vec![BaseSortClause {
+                key: "date".to_string(),
+                direction: BaseSortDirection::Desc,
+            }]
+        );
+        assert_eq!(
+            table.columns,
+            vec![
+                BaseColumnConfig {
+                    key: "title".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+                BaseColumnConfig {
+                    key: "date".to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_base_document_maps_obsidian_order_sort_and_column_size() {
+        let document = parse_base_document(
+            r#"
+filters:
+  and:
+    - file.inFolder("WORK/14-PROJECTS")
+    - "!prod_folder.isEmpty()"
+views:
+  - type: table
+    name: Table
+    order:
+      - file.name
+      - client
+      - service
+      - status
+      - start_date
+      - end_date
+      - prod_folder
+    sort:
+      - property: formula.Untitled
+        direction: ASC
+      - property: file.name
+        direction: ASC
+    columnSize:
+      file.name: 230
+      note.client: 220
+"#,
+        )
+        .expect("parse document");
+
+        let table = &document.views[0];
+        assert_eq!(table.source.as_deref(), Some("WORK/14-PROJECTS"));
+        assert_eq!(
+            table.filters,
+            vec![BaseFilterClause {
+                key: "prod_folder".to_string(),
+                op: BaseFilterOp::Exists,
+                value: json!(true),
+            }]
+        );
+        assert_eq!(
+            table.sorts,
+            vec![
+                BaseSortClause {
+                    key: "formula.Untitled".to_string(),
+                    direction: BaseSortDirection::Asc,
+                },
+                BaseSortClause {
+                    key: "title".to_string(),
+                    direction: BaseSortDirection::Asc,
+                },
+            ]
+        );
+        assert_eq!(table.columns.len(), 7);
+        assert_eq!(table.columns[0].key, "title");
+        assert_eq!(table.columns[0].width, Some(230));
+        assert_eq!(table.columns[1].key, "client");
+        assert_eq!(table.columns[1].width, Some(220));
     }
 
     #[test]

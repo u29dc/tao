@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -59,11 +59,13 @@ impl VaultScanService {
     pub fn scan(&self) -> Result<VaultManifest, VaultScanError> {
         let mut entries = Vec::new();
         let root = self.canonicalizer.root().to_path_buf();
+        let root_for_filter = root.clone();
 
         for entry in WalkDir::new(&root)
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
+            .filter_entry(|entry| should_descend(entry.path(), &root_for_filter))
         {
             let entry = entry.map_err(|source| VaultScanError::Walk {
                 root: root.clone(),
@@ -98,6 +100,24 @@ impl VaultScanService {
 
         Ok(VaultManifest { root, entries })
     }
+}
+
+fn should_descend(path: &Path, root: &Path) -> bool {
+    if path == root {
+        return true;
+    }
+
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    let Some(Component::Normal(first_component)) = relative.components().next() else {
+        return true;
+    };
+
+    !matches!(
+        first_component.to_str(),
+        Some(".git" | ".obsidian" | ".tao")
+    )
 }
 
 /// Errors returned by vault scan operations.
@@ -185,5 +205,30 @@ mod tests {
             manifest.entries[0].absolute,
             fs::canonicalize(note).expect("canonical note")
         );
+    }
+
+    #[test]
+    fn scan_excludes_internal_directories() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".git")).expect("create .git");
+        fs::create_dir_all(temp.path().join(".obsidian")).expect("create .obsidian");
+        fs::create_dir_all(temp.path().join(".tao")).expect("create .tao");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes");
+
+        fs::write(temp.path().join(".git/HEAD"), "ref").expect("write .git head");
+        fs::write(temp.path().join(".obsidian/app.json"), "{}").expect("write app json");
+        fs::write(temp.path().join(".tao/index.sqlite"), "sqlite").expect("write tao sqlite");
+        fs::write(temp.path().join("notes/live.md"), "# live").expect("write markdown");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+        let normalized = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.normalized.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(normalized, vec!["notes/live.md"]);
     }
 }

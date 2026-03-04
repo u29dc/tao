@@ -1412,7 +1412,8 @@ impl BaseTableExecutorService {
         let mut candidates = files
             .into_iter()
             .filter(|file| {
-                matches_source_prefix(&file.normalized_path, plan.source_prefix.as_deref())
+                file.is_markdown
+                    && matches_source_prefix(&file.normalized_path, plan.source_prefix.as_deref())
             })
             .map(|file| TableRowCandidate {
                 file_id: file.file_id,
@@ -1483,6 +1484,9 @@ impl TableRowCandidate {
         if key.eq_ignore_ascii_case("path") || key.eq_ignore_ascii_case("file_path") {
             return Some(JsonValue::String(self.file_path.clone()));
         }
+        if key.eq_ignore_ascii_case("folder") || key.eq_ignore_ascii_case("file_folder") {
+            return Some(JsonValue::String(note_folder_from_path(&self.file_path)));
+        }
         if key.eq_ignore_ascii_case("title") {
             return Some(JsonValue::String(note_title_from_path(&self.file_path)));
         }
@@ -1496,6 +1500,13 @@ fn note_title_from_path(path: &str) -> String {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .map_or_else(|| path.to_string(), |stem| stem.to_string())
+}
+
+fn note_folder_from_path(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .and_then(|parent| parent.to_str())
+        .map_or_else(String::new, |parent| parent.to_string())
 }
 
 fn matches_source_prefix(path: &str, source_prefix: Option<&str>) -> bool {
@@ -1549,6 +1560,20 @@ fn row_matches_filter(row: &TableRowCandidate, filter: &BaseFilterClause) -> boo
             let expected_exists = filter.value.as_bool().unwrap_or(true);
             row_value.is_some() == expected_exists
         }
+        BaseFilterOp::StartsWith => row_value
+            .as_ref()
+            .and_then(json_scalar_to_string)
+            .is_some_and(|value| {
+                json_scalar_to_string(&filter.value)
+                    .is_some_and(|prefix| value.starts_with(&prefix))
+            }),
+        BaseFilterOp::NotStartsWith => row_value
+            .as_ref()
+            .and_then(json_scalar_to_string)
+            .is_none_or(|value| {
+                json_scalar_to_string(&filter.value)
+                    .is_none_or(|prefix| !value.starts_with(&prefix))
+            }),
     }
 }
 
@@ -2471,18 +2496,13 @@ impl HealthSnapshotService {
         index_lag: u64,
         watcher_status: WatcherStatus,
     ) -> Result<HealthSnapshot, HealthSnapshotError> {
-        let scanner = VaultScanService::from_root(vault_root, CasePolicy::Sensitive)
-            .map_err(|source| HealthSnapshotError::CreateScanner { source })?;
-        let manifest = scanner
-            .scan()
-            .map_err(|source| HealthSnapshotError::Scan { source })?;
-
-        let files_total = manifest.entries.len() as u64;
-        let markdown_files = manifest
-            .entries
-            .iter()
-            .filter(|entry| entry.normalized.ends_with(".md"))
-            .count() as u64;
+        let (files_total, markdown_files): (u64, u64) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_markdown = 1 THEN 1 ELSE 0 END), 0) FROM files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
 
         let db_migrations = connection
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
@@ -2500,7 +2520,7 @@ impl HealthSnapshotService {
             .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
 
         Ok(HealthSnapshot {
-            vault_root: manifest.root.to_string_lossy().to_string(),
+            vault_root: vault_root.to_string_lossy().to_string(),
             db_healthy: true,
             db_migrations,
             index_lag,
@@ -3392,6 +3412,20 @@ mod tests {
 
         let mut connection = Connection::open_in_memory().expect("open db");
         run_migrations(&mut connection).expect("run migrations");
+        FilesRepository::insert(
+            &connection,
+            &file_record("f1", "notes/a.md", "notes/a.md", "/vault/notes/a.md"),
+        )
+        .expect("insert a");
+        FilesRepository::insert(
+            &connection,
+            &file_record("f2", "notes/b.md", "notes/b.md", "/vault/notes/b.md"),
+        )
+        .expect("insert b");
+        let mut non_markdown =
+            file_record("f3", "notes/c.png", "notes/c.png", "/vault/notes/c.png");
+        non_markdown.is_markdown = false;
+        FilesRepository::insert(&connection, &non_markdown).expect("insert c");
         connection
             .execute(
                 "INSERT INTO index_state (key, value_json) VALUES (?1, ?2)",
@@ -3923,6 +3957,55 @@ mod tests {
             page.rows[0].values.get("path"),
             Some(&serde_json::json!("notes/projects/alpha.md"))
         );
+    }
+
+    #[test]
+    fn base_table_executor_excludes_non_markdown_files_from_candidates() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert markdown");
+        let mut non_markdown = file_record(
+            "f2",
+            "notes/projects/readme.txt",
+            "notes/projects/readme.txt",
+            "/vault/notes/projects/readme.txt",
+        );
+        non_markdown.is_markdown = false;
+        FilesRepository::insert(&connection, &non_markdown).expect("insert text");
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: Vec::new(),
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            columns: vec![BaseColumnConfig {
+                key: "path".to_string(),
+                label: None,
+                width: None,
+                hidden: false,
+            }],
+            limit: 10,
+            offset: 0,
+            property_queries: Vec::new(),
+        };
+
+        let page = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute table plan");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].file_path, "notes/projects/alpha.md");
     }
 
     #[test]

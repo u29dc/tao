@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use tao_sdk_bases::{BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest};
+use tao_sdk_bases::{
+    BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest,
+    parse_base_document,
+};
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, IncrementalIndexService,
@@ -707,7 +710,7 @@ impl BridgeKernel {
 
         let mut refs = Vec::with_capacity(bases.len());
         for base in bases {
-            let document = match serde_json::from_str::<BaseDocument>(&base.config_json) {
+            let document = match decode_base_document(&base.config_json) {
                 Ok(document) => document,
                 Err(source) => {
                     return BridgeEnvelope::failure(
@@ -793,7 +796,7 @@ impl BridgeKernel {
             );
         };
 
-        let document = match serde_json::from_str::<BaseDocument>(&base.config_json) {
+        let document = match decode_base_document(&base.config_json) {
             Ok(document) => document,
             Err(source) => {
                 return BridgeEnvelope::failure(
@@ -1197,6 +1200,19 @@ struct ResolvedBridgeBase {
     config_json: String,
 }
 
+fn decode_base_document(config_json: &str) -> Result<BaseDocument, String> {
+    if let Ok(document) = serde_json::from_str::<BaseDocument>(config_json) {
+        return Ok(document);
+    }
+
+    let raw_value =
+        serde_json::from_str::<JsonValue>(config_json).map_err(|source| source.to_string())?;
+    let Some(raw_yaml) = raw_value.get("raw").and_then(JsonValue::as_str) else {
+        return Err("base config json is not a supported document payload".to_string());
+    };
+    parse_base_document(raw_yaml).map_err(|source| source.to_string())
+}
+
 fn resolve_base_by_id_or_path(
     connection: &Connection,
     path_or_id: &str,
@@ -1492,7 +1508,8 @@ mod tests {
         fs::write(vault_root.join("notes/a.md"), "# A").expect("write markdown");
         let db_path = temp.path().join("tao.db");
 
-        let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        kernel.ensure_indexed().expect("ensure indexed");
         let stats = kernel.vault_stats();
 
         assert!(stats.ok);
