@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use thiserror::Error;
 
 /// Persisted row model for `links` table.
@@ -62,6 +62,28 @@ pub struct LinkWithPaths {
     pub block_id: Option<String>,
     /// Unresolved marker.
     pub is_unresolved: bool,
+}
+
+/// Lightweight resolved link pair for graph component construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLinkPair {
+    /// Source file id.
+    pub source_file_id: String,
+    /// Resolved target file id.
+    pub target_file_id: String,
+}
+
+/// One markdown node with resolved incoming/outgoing degree counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNodeDegree {
+    /// Stable file identifier.
+    pub file_id: String,
+    /// Normalized file path.
+    pub path: String,
+    /// Count of resolved incoming edges.
+    pub incoming_resolved: u64,
+    /// Count of resolved outgoing edges.
+    pub outgoing_resolved: u64,
 }
 
 /// Repository operations over `links` table.
@@ -342,6 +364,248 @@ LIMIT ?1 OFFSET ?2
         })
         .collect()
     }
+
+    /// Count markdown notes that have at least one incoming resolved edge and zero outgoing resolved edges.
+    pub fn count_deadends(connection: &Connection) -> Result<u64, LinksRepositoryError> {
+        let sql = deadends_count_sql();
+        connection
+            .query_row(&sql, [], |row| row.get::<_, u64>("total"))
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "count_deadends",
+                source,
+            })
+    }
+
+    /// List one deadends page in deterministic path order.
+    pub fn list_deadends_window(
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<GraphNodeDegree>, LinksRepositoryError> {
+        let sql = deadends_window_sql();
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_deadends_window",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params![i64::from(limit), i64::from(offset)],
+                row_to_graph_node_degree,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_deadends_window",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_deadends_window_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// Count markdown notes with zero incoming and zero outgoing resolved edges.
+    pub fn count_orphans(connection: &Connection) -> Result<u64, LinksRepositoryError> {
+        let sql = orphans_count_sql();
+        connection
+            .query_row(&sql, [], |row| row.get::<_, u64>("total"))
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "count_orphans",
+                source,
+            })
+    }
+
+    /// List one orphans page in deterministic path order.
+    pub fn list_orphans_window(
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<GraphNodeDegree>, LinksRepositoryError> {
+        let sql = orphans_window_sql();
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_orphans_window",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params![i64::from(limit), i64::from(offset)],
+                row_to_graph_node_degree,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_orphans_window",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_orphans_window_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// List resolved source-target file id pairs used by graph component services.
+    pub fn list_resolved_pairs(
+        connection: &Connection,
+    ) -> Result<Vec<ResolvedLinkPair>, LinksRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT DISTINCT
+  source_file_id,
+  resolved_file_id AS target_file_id
+FROM links
+WHERE is_unresolved = 0
+  AND resolved_file_id IS NOT NULL
+ORDER BY source_file_id ASC, target_file_id ASC
+"#,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "prepare_list_resolved_pairs",
+                source,
+            })?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(ResolvedLinkPair {
+                    source_file_id: row.get("source_file_id")?,
+                    target_file_id: row.get("target_file_id")?,
+                })
+            })
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_resolved_pairs",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_resolved_pairs_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// Fetch outgoing edges for a frontier of source ids.
+    pub fn list_outgoing_for_sources_with_paths(
+        connection: &Connection,
+        source_file_ids: &[String],
+        include_unresolved: bool,
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        if source_file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = in_clause_placeholders(source_file_ids.len(), 1);
+        let unresolved_clause = if include_unresolved {
+            ""
+        } else {
+            "AND l.is_unresolved = 0"
+        };
+        let query = format!(
+            r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+WHERE l.source_file_id IN ({placeholders})
+  {unresolved_clause}
+ORDER BY l.link_id ASC
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&query)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_outgoing_for_sources_with_paths",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params_from_iter(source_file_ids.iter()),
+                row_to_link_with_paths,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_outgoing_for_sources_with_paths",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_outgoing_for_sources_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// Fetch incoming resolved edges for a frontier of target ids.
+    pub fn list_incoming_for_targets_with_paths(
+        connection: &Connection,
+        target_file_ids: &[String],
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        if target_file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = in_clause_placeholders(target_file_ids.len(), 1);
+        let query = format!(
+            r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+WHERE l.resolved_file_id IN ({placeholders})
+  AND l.is_unresolved = 0
+ORDER BY l.link_id ASC
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&query)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_incoming_for_targets_with_paths",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params_from_iter(target_file_ids.iter()),
+                row_to_link_with_paths,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_incoming_for_targets_with_paths",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_incoming_for_targets_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
 }
 
 fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
@@ -373,6 +637,120 @@ fn row_to_link_with_paths(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkWithP
         block_id: row.get("block_id")?,
         is_unresolved: is_unresolved != 0,
     })
+}
+
+fn row_to_graph_node_degree(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphNodeDegree> {
+    Ok(GraphNodeDegree {
+        file_id: row.get("file_id")?,
+        path: row.get("path")?,
+        incoming_resolved: row.get("incoming_resolved")?,
+        outgoing_resolved: row.get("outgoing_resolved")?,
+    })
+}
+
+fn in_clause_placeholders(count: usize, start_index: usize) -> String {
+    (0..count)
+        .map(|index| format!("?{}", start_index + index))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn degree_cte_sql() -> &'static str {
+    r#"
+WITH incoming AS (
+  SELECT
+    resolved_file_id AS file_id,
+    COUNT(*) AS incoming_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY resolved_file_id
+),
+outgoing AS (
+  SELECT
+    source_file_id AS file_id,
+    COUNT(*) AS outgoing_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY source_file_id
+),
+degrees AS (
+  SELECT
+    f.file_id AS file_id,
+    f.normalized_path AS path,
+    COALESCE(i.incoming_resolved, 0) AS incoming_resolved,
+    COALESCE(o.outgoing_resolved, 0) AS outgoing_resolved
+  FROM files f
+  LEFT JOIN incoming i ON i.file_id = f.file_id
+  LEFT JOIN outgoing o ON o.file_id = f.file_id
+  WHERE f.is_markdown = 1
+)
+"#
+}
+
+fn deadends_count_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT COUNT(*) AS total
+FROM degrees
+WHERE incoming_resolved > 0
+  AND outgoing_resolved = 0
+"#,
+        degree_cte_sql()
+    )
+}
+
+fn deadends_window_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT
+  file_id,
+  path,
+  incoming_resolved,
+  outgoing_resolved
+FROM degrees
+WHERE incoming_resolved > 0
+  AND outgoing_resolved = 0
+ORDER BY path ASC
+LIMIT ?1 OFFSET ?2
+"#,
+        degree_cte_sql()
+    )
+}
+
+fn orphans_count_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT COUNT(*) AS total
+FROM degrees
+WHERE incoming_resolved = 0
+  AND outgoing_resolved = 0
+"#,
+        degree_cte_sql()
+    )
+}
+
+fn orphans_window_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT
+  file_id,
+  path,
+  incoming_resolved,
+  outgoing_resolved
+FROM degrees
+WHERE incoming_resolved = 0
+  AND outgoing_resolved = 0
+ORDER BY path ASC
+LIMIT ?1 OFFSET ?2
+"#,
+        degree_cte_sql()
+    )
 }
 
 /// Links repository operation failures.

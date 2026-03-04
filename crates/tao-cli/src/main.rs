@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,8 +15,9 @@ use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_properties::TypedPropertyValue;
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
-    BacklinkGraphService, BaseTableExecutorService, HealthSnapshotService, PropertyUpdateService,
-    SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
+    BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphWalkDirection,
+    GraphWalkRequest, HealthSnapshotService, PropertyUpdateService, SdkConfigLoader,
+    SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, PropertiesRepository, TasksRepository, preflight_migrations,
@@ -132,7 +133,7 @@ enum GraphCommands {
     /// Return isolated notes with no incoming/outgoing resolved edges.
     Orphans(GraphWindowArgs),
     /// Return connected components across resolved graph edges.
-    Components(GraphWindowArgs),
+    Components(GraphComponentsArgs),
     /// Walk graph neighbors from one root note.
     Walk(GraphWalkArgs),
 }
@@ -362,6 +363,28 @@ struct GraphWalkArgs {
 }
 
 #[derive(Debug, Clone, Args, Serialize)]
+struct GraphComponentsArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+    /// Include full member path list for each component (slower on large vaults).
+    #[arg(long, default_value_t = false)]
+    include_members: bool,
+    /// Number of member paths to include when `--include-members` is not set.
+    #[arg(long, default_value_t = 64)]
+    sample_size: u32,
+}
+
+#[derive(Debug, Clone, Args, Serialize)]
 struct TaskListArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -484,6 +507,12 @@ impl GraphWalkArgs {
     }
 }
 
+impl GraphComponentsArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
 impl TaskListArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
@@ -521,17 +550,6 @@ struct ExtractedTask {
     line: usize,
     state: String,
     text: String,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedEdge {
-    link_id: String,
-    source_file_id: String,
-    source_path: String,
-    target_file_id: Option<String>,
-    target_path: Option<String>,
-    raw_target: String,
-    is_unresolved: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -706,38 +724,20 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         GraphCommands::Deadends(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
-            let mut incoming_counts = HashMap::<String, usize>::new();
-            let mut outgoing_counts = HashMap::<String, usize>::new();
-            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
-                *outgoing_counts
-                    .entry(edge.source_file_id.clone())
-                    .or_insert(0) += 1;
-                if let Some(target_id) = &edge.target_file_id {
-                    *incoming_counts.entry(target_id.clone()).or_insert(0) += 1;
-                }
-            }
-            let mut items = paths_by_id
-                .iter()
-                .filter_map(|(file_id, path)| {
-                    let incoming = *incoming_counts.get(file_id).unwrap_or(&0);
-                    let outgoing = *outgoing_counts.get(file_id).unwrap_or(&0);
-                    (incoming > 0 && outgoing == 0).then_some(serde_json::json!({
-                        "file_id": file_id,
-                        "path": path,
-                        "incoming_resolved": incoming,
-                        "outgoing_resolved": outgoing,
-                    }))
+            let (total, rows) = BacklinkGraphService
+                .deadends_page(&connection, args.limit, args.offset)
+                .map_err(|source| anyhow!("query deadends failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "file_id": row.file_id,
+                        "path": row.path,
+                        "incoming_resolved": row.incoming_resolved,
+                        "outgoing_resolved": row.outgoing_resolved,
+                    })
                 })
                 .collect::<Vec<_>>();
-            items.sort_by(|left, right| {
-                left["path"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["path"].as_str().unwrap_or_default())
-            });
-            let total = items.len();
-            let items = paginate_json_items(items, args.limit, args.offset);
             Ok(CommandResult {
                 command: "graph.deadends".to_string(),
                 summary: "graph deadends completed".to_string(),
@@ -752,31 +752,20 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         GraphCommands::Orphans(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
-            let mut degree = HashMap::<String, usize>::new();
-            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
-                *degree.entry(edge.source_file_id.clone()).or_insert(0) += 1;
-                if let Some(target_id) = &edge.target_file_id {
-                    *degree.entry(target_id.clone()).or_insert(0) += 1;
-                }
-            }
-            let mut items = paths_by_id
-                .iter()
-                .filter_map(|(file_id, path)| {
-                    (*degree.get(file_id).unwrap_or(&0) == 0).then_some(serde_json::json!({
-                        "file_id": file_id,
-                        "path": path,
-                    }))
+            let (total, rows) = BacklinkGraphService
+                .orphans_page(&connection, args.limit, args.offset)
+                .map_err(|source| anyhow!("query orphans failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "file_id": row.file_id,
+                        "path": row.path,
+                        "incoming_resolved": row.incoming_resolved,
+                        "outgoing_resolved": row.outgoing_resolved,
+                    })
                 })
                 .collect::<Vec<_>>();
-            items.sort_by(|left, right| {
-                left["path"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["path"].as_str().unwrap_or_default())
-            });
-            let total = items.len();
-            let items = paginate_json_items(items, args.limit, args.offset);
             Ok(CommandResult {
                 command: "graph.orphans".to_string(),
                 summary: "graph orphans completed".to_string(),
@@ -791,57 +780,25 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         GraphCommands::Components(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
-            let mut adjacency = HashMap::<String, Vec<String>>::new();
-            for edge in edges.iter().filter(|edge| !edge.is_unresolved) {
-                if let Some(target_id) = &edge.target_file_id {
-                    adjacency
-                        .entry(edge.source_file_id.clone())
-                        .or_default()
-                        .push(target_id.clone());
-                    adjacency
-                        .entry(target_id.clone())
-                        .or_default()
-                        .push(edge.source_file_id.clone());
-                }
-            }
-            let mut visited = HashSet::<String>::new();
-            let mut components = Vec::new();
-            let mut ids = paths_by_id.keys().cloned().collect::<Vec<_>>();
-            ids.sort();
-            for root in ids {
-                if visited.contains(&root) {
-                    continue;
-                }
-                let mut queue = VecDeque::from([root.clone()]);
-                let mut members = Vec::new();
-                visited.insert(root.clone());
-                while let Some(current) = queue.pop_front() {
-                    members.push(current.clone());
-                    for next in adjacency.get(&current).into_iter().flatten() {
-                        if visited.insert(next.clone()) {
-                            queue.push_back(next.clone());
-                        }
-                    }
-                }
-                let mut paths = members
-                    .iter()
-                    .filter_map(|file_id| paths_by_id.get(file_id).cloned())
-                    .collect::<Vec<_>>();
-                paths.sort();
-                components.push(serde_json::json!({
-                    "size": members.len(),
-                    "paths": paths,
-                }));
-            }
-            components.sort_by(|left, right| {
-                right["size"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .cmp(&left["size"].as_u64().unwrap_or(0))
-            });
-            let total = components.len();
-            let items = paginate_json_items(components, args.limit, args.offset);
+            let (total, rows) = BacklinkGraphService
+                .components_page(
+                    &connection,
+                    args.limit,
+                    args.offset,
+                    args.include_members,
+                    args.sample_size as usize,
+                )
+                .map_err(|source| anyhow!("query graph components failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "size": row.size,
+                        "paths": row.paths,
+                        "truncated": row.truncated,
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "graph.components".to_string(),
                 summary: "graph components completed".to_string(),
@@ -849,6 +806,8 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
                     "total": total,
                     "limit": args.limit,
                     "offset": args.offset,
+                    "include_members": args.include_members,
+                    "sample_size": args.sample_size,
                     "items": items,
                 }),
             })
@@ -856,113 +815,43 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         GraphCommands::Walk(args) => {
             let resolved = args.resolve()?;
             let connection = open_initialized_connection(&resolved)?;
-            let (paths_by_id, edges) = load_graph_snapshot(&connection)?;
-            let source_by_path = paths_by_id
-                .iter()
-                .map(|(file_id, path)| (path.clone(), file_id.clone()))
-                .collect::<HashMap<_, _>>();
-            let Some(start_id) = source_by_path.get(&args.path) else {
-                return Ok(CommandResult {
-                    command: "graph.walk".to_string(),
-                    summary: "graph walk completed".to_string(),
-                    args: serde_json::json!({
-                        "path": args.path,
-                        "depth": args.depth,
-                        "total": 0,
-                        "items": [],
-                    }),
-                });
-            };
-
-            let mut outgoing = HashMap::<String, Vec<&ResolvedEdge>>::new();
-            let mut incoming = HashMap::<String, Vec<&ResolvedEdge>>::new();
-            for edge in &edges {
-                outgoing
-                    .entry(edge.source_file_id.clone())
-                    .or_default()
-                    .push(edge);
-                if let Some(target_id) = &edge.target_file_id {
-                    incoming.entry(target_id.clone()).or_default().push(edge);
-                }
-            }
-
-            let mut queue = VecDeque::from([(start_id.clone(), 0_u32)]);
-            let mut visited_depth = HashMap::<String, u32>::from([(start_id.clone(), 0)]);
-            let mut traversed = Vec::new();
-            while let Some((node_id, depth)) = queue.pop_front() {
-                if depth >= args.depth {
-                    continue;
-                }
-
-                for edge in outgoing.get(&node_id).into_iter().flatten() {
-                    if edge.is_unresolved && !args.include_unresolved {
-                        continue;
-                    }
-                    let next_id = edge.target_file_id.clone();
-                    traversed.push(serde_json::json!({
-                        "depth": depth + 1,
-                        "direction": "outgoing",
-                        "link_id": edge.link_id,
-                        "source_path": edge.source_path,
-                        "target_path": edge.target_path,
-                        "raw_target": edge.raw_target,
-                        "resolved": !edge.is_unresolved && edge.target_file_id.is_some(),
-                    }));
-                    if let Some(next_id) = next_id {
-                        let next_depth = depth + 1;
-                        let should_visit = visited_depth
-                            .get(&next_id)
-                            .map(|seen_depth| next_depth < *seen_depth)
-                            .unwrap_or(true);
-                        if should_visit {
-                            visited_depth.insert(next_id.clone(), next_depth);
-                            queue.push_back((next_id, next_depth));
-                        }
-                    }
-                    if traversed.len() >= args.limit as usize {
-                        break;
-                    }
-                }
-                if traversed.len() >= args.limit as usize {
-                    break;
-                }
-
-                for edge in incoming.get(&node_id).into_iter().flatten() {
-                    traversed.push(serde_json::json!({
-                        "depth": depth + 1,
-                        "direction": "incoming",
-                        "link_id": edge.link_id,
-                        "source_path": edge.source_path,
-                        "target_path": edge.target_path,
-                        "raw_target": edge.raw_target,
-                        "resolved": !edge.is_unresolved && edge.target_file_id.is_some(),
-                    }));
-                    let next_id = edge.source_file_id.clone();
-                    let next_depth = depth + 1;
-                    let should_visit = visited_depth
-                        .get(&next_id)
-                        .map(|seen_depth| next_depth < *seen_depth)
-                        .unwrap_or(true);
-                    if should_visit {
-                        visited_depth.insert(next_id.clone(), next_depth);
-                        queue.push_back((next_id, next_depth));
-                    }
-                    if traversed.len() >= args.limit as usize {
-                        break;
-                    }
-                }
-                if traversed.len() >= args.limit as usize {
-                    break;
-                }
-            }
+            let traversed = BacklinkGraphService
+                .walk(
+                    &connection,
+                    &GraphWalkRequest {
+                        path: args.path.clone(),
+                        depth: args.depth,
+                        limit: args.limit,
+                        include_unresolved: args.include_unresolved,
+                    },
+                )
+                .map_err(|source| anyhow!("graph walk failed: {source}"))?;
+            let items = traversed
+                .into_iter()
+                .map(|step| {
+                    let direction = match step.direction {
+                        GraphWalkDirection::Outgoing => "outgoing",
+                        GraphWalkDirection::Incoming => "incoming",
+                    };
+                    serde_json::json!({
+                        "depth": step.depth,
+                        "direction": direction,
+                        "link_id": step.link_id,
+                        "source_path": step.source_path,
+                        "target_path": step.target_path,
+                        "raw_target": step.raw_target,
+                        "resolved": step.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "graph.walk".to_string(),
                 summary: "graph walk completed".to_string(),
                 args: serde_json::json!({
                     "path": args.path,
                     "depth": args.depth,
-                    "total": traversed.len(),
-                    "items": traversed,
+                    "total": items.len(),
+                    "items": items,
                 }),
             })
         }
@@ -1669,7 +1558,13 @@ fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
                 )
                 .map_err(|source| anyhow!("compile base table query plan failed: {source}"))?;
             let page = BaseTableExecutorService
-                .execute(&connection, &plan)
+                .execute_with_options(
+                    &connection,
+                    &plan,
+                    BaseTableExecutionOptions {
+                        include_summaries: false,
+                    },
+                )
                 .map_err(|source| anyhow!("execute base table query failed: {source}"))?;
             let has_more = (args.page as usize * args.page_size as usize) < page.total as usize;
             let rows = page
@@ -1766,48 +1661,6 @@ fn link_edge_to_json(edge: tao_sdk_service::LinkGraphEdge) -> JsonValue {
         "block_id": edge.block_id,
         "is_unresolved": edge.is_unresolved,
     })
-}
-
-fn load_graph_snapshot(
-    connection: &Connection,
-) -> Result<(HashMap<String, String>, Vec<ResolvedEdge>)> {
-    let files = FilesRepository::list_all(connection)
-        .map_err(|source| anyhow!("list files for graph snapshot failed: {source}"))?;
-    let mut paths_by_id = HashMap::new();
-    for file in files.into_iter().filter(|file| file.is_markdown) {
-        paths_by_id.insert(file.file_id, file.normalized_path);
-    }
-
-    let mut statement = connection
-        .prepare(
-            "SELECT l.link_id, l.source_file_id, sf.normalized_path AS source_path, \
-                    l.resolved_file_id, tf.normalized_path AS target_path, \
-                    l.raw_target, l.is_unresolved \
-             FROM links l \
-             JOIN files sf ON sf.file_id = l.source_file_id \
-             LEFT JOIN files tf ON tf.file_id = l.resolved_file_id \
-             ORDER BY l.link_id ASC",
-        )
-        .context("prepare graph snapshot query")?;
-    let rows = statement
-        .query_map([], |row| {
-            let is_unresolved: i64 = row.get("is_unresolved")?;
-            Ok(ResolvedEdge {
-                link_id: row.get("link_id")?,
-                source_file_id: row.get("source_file_id")?,
-                source_path: row.get("source_path")?,
-                target_file_id: row.get("resolved_file_id")?,
-                target_path: row.get("target_path")?,
-                raw_target: row.get("raw_target")?,
-                is_unresolved: is_unresolved != 0,
-            })
-        })
-        .context("query graph snapshot rows")?;
-    let mut edges = Vec::new();
-    for row in rows {
-        edges.push(row.context("map graph snapshot row")?);
-    }
-    Ok((paths_by_id, edges))
 }
 
 fn handle_meta_token_aggregate(

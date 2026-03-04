@@ -77,6 +77,7 @@ impl SearchQueryService {
             })?;
 
         let needle = query.to_ascii_lowercase();
+        let fts_query = build_fts_query(query);
         let mut statement = connection
             .prepare(
                 r#"
@@ -85,36 +86,46 @@ WITH matches AS (
     si.file_id,
     COALESCE(si.normalized_path, si.normalized_path_lc) AS normalized_path,
     si.updated_at AS indexed_at,
+    si.title_lc,
     si.normalized_path_lc,
-    instr(si.title_lc, ?1) AS title_pos,
-    instr(si.normalized_path_lc, ?1) AS path_pos,
-    instr(si.content_lc, ?1) AS content_pos
+    si.content_lc
   FROM search_index si
+  JOIN search_index_fts ON search_index_fts.rowid = si.rowid
+  WHERE search_index_fts MATCH ?1
+),
+scored AS (
+  SELECT
+    file_id,
+    normalized_path,
+    indexed_at,
+    CASE WHEN instr(title_lc, ?2) > 0 THEN 1 ELSE 0 END AS title_match,
+    CASE WHEN instr(normalized_path_lc, ?2) > 0 THEN 1 ELSE 0 END AS path_match,
+    CASE WHEN instr(content_lc, ?2) > 0 THEN 1 ELSE 0 END AS content_match
+  FROM matches
 )
 SELECT
   file_id,
   normalized_path,
   indexed_at,
-  CASE WHEN title_pos > 0 THEN 1 ELSE 0 END AS title_match,
-  CASE WHEN path_pos > 0 THEN 1 ELSE 0 END AS path_match,
-  CASE WHEN content_pos > 0 THEN 1 ELSE 0 END AS content_match,
+  title_match,
+  path_match,
+  content_match,
   (
-    CASE WHEN title_pos > 0 THEN 3 ELSE 0 END
-    + CASE WHEN path_pos > 0 THEN 2 ELSE 0 END
-    + CASE WHEN content_pos > 0 THEN 1 ELSE 0 END
+    CASE WHEN title_match > 0 THEN 3 ELSE 0 END
+    + CASE WHEN path_match > 0 THEN 2 ELSE 0 END
+    + CASE WHEN content_match > 0 THEN 1 ELSE 0 END
   ) AS score,
   COUNT(*) OVER() AS total_count
-FROM matches
-WHERE title_pos > 0 OR path_pos > 0 OR content_pos > 0
-ORDER BY score DESC, normalized_path_lc ASC
-LIMIT ?2
-OFFSET ?3
+FROM scored
+ORDER BY score DESC, normalized_path ASC
+LIMIT ?3
+OFFSET ?4
 "#,
             )
             .map_err(|source| SearchQueryError::PrepareQuery { source })?;
 
         let rows = statement
-            .query_map(params![needle, limit_i64, offset_i64], |row| {
+            .query_map(params![fts_query, needle, limit_i64, offset_i64], |row| {
                 let path: String = row.get("normalized_path")?;
                 let title_match: i64 = row.get("title_match")?;
                 let path_match: i64 = row.get("path_match")?;
@@ -167,6 +178,34 @@ fn title_from_path(path: &str) -> String {
         .and_then(|stem| stem.to_str())
         .map(std::string::ToString::to_string)
         .unwrap_or_else(|| path.to_string())
+}
+
+fn build_fts_query(query: &str) -> String {
+    let tokens = query
+        .split_whitespace()
+        .filter_map(|token| {
+            let sanitized = token
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return String::from("\"\"");
+    }
+
+    tokens
+        .into_iter()
+        .map(|token| format!("\"{token}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// Search query failures.

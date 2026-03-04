@@ -23,7 +23,8 @@ pub use index_state::{
     IndexStateRecord, IndexStateRecordInput, IndexStateRepository, IndexStateRepositoryError,
 };
 pub use links::{
-    LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository, LinksRepositoryError,
+    GraphNodeDegree, LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository,
+    LinksRepositoryError, ResolvedLinkPair,
 };
 pub use properties::{
     PropertiesRepository, PropertiesRepositoryError, PropertyRecord, PropertyRecordInput,
@@ -58,6 +59,10 @@ pub const MIGRATION_0004_SQL: &str = include_str!("../migrations/0004_links_perf
 pub const MIGRATION_0005_ID: &str = "0005_search_index_path";
 /// Search index path projection SQL payload.
 pub const MIGRATION_0005_SQL: &str = include_str!("../migrations/0005_search_index_path.sql");
+/// Search FTS virtual table + triggers migration identifier.
+pub const MIGRATION_0006_ID: &str = "0006_search_fts";
+/// Search FTS virtual table + triggers SQL payload.
+pub const MIGRATION_0006_SQL: &str = include_str!("../migrations/0006_search_fts.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -76,7 +81,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 5] = [
+const MIGRATIONS: [Migration; 6] = [
     Migration {
         id: MIGRATION_0001_ID,
         sql: MIGRATION_0001_SQL,
@@ -96,6 +101,10 @@ const MIGRATIONS: [Migration; 5] = [
     Migration {
         id: MIGRATION_0005_ID,
         sql: MIGRATION_0005_SQL,
+    },
+    Migration {
+        id: MIGRATION_0006_ID,
+        sql: MIGRATION_0006_SQL,
     },
 ];
 
@@ -441,8 +450,8 @@ mod tests {
 
     use super::{
         MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
-        MIGRATION_0005_ID, MigrationRunnerError, apply_initial_schema, known_migrations,
-        migration_checksum, preflight_migrations, run_migrations,
+        MIGRATION_0005_ID, MIGRATION_0006_ID, MigrationRunnerError, apply_initial_schema,
+        known_migrations, migration_checksum, preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -496,7 +505,8 @@ mod tests {
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string()
+                MIGRATION_0005_ID.to_string(),
+                MIGRATION_0006_ID.to_string()
             ]
         );
         assert!(report.skipped.is_empty());
@@ -586,7 +596,8 @@ mod tests {
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string()
+                MIGRATION_0005_ID.to_string(),
+                MIGRATION_0006_ID.to_string()
             ]
         );
         assert!(first.skipped.is_empty());
@@ -598,7 +609,8 @@ mod tests {
                 MIGRATION_0002_ID.to_string(),
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string()
+                MIGRATION_0005_ID.to_string(),
+                MIGRATION_0006_ID.to_string()
             ]
         );
     }

@@ -1,7 +1,7 @@
 //! Service-layer orchestration entrypoints over SDK subsystem crates.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -1396,12 +1396,37 @@ pub struct BaseTablePage {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BaseTableExecutorService;
 
+/// Execution options for base table query plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseTableExecutionOptions {
+    /// Compute summary rows across the filtered result set.
+    pub include_summaries: bool,
+}
+
+impl Default for BaseTableExecutionOptions {
+    fn default() -> Self {
+        Self {
+            include_summaries: true,
+        }
+    }
+}
+
 impl BaseTableExecutorService {
     /// Execute one compiled table query plan and return a paged result.
     pub fn execute(
         &self,
         connection: &Connection,
         plan: &TableQueryPlan,
+    ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        self.execute_with_options(connection, plan, BaseTableExecutionOptions::default())
+    }
+
+    /// Execute one compiled table query plan with explicit execution options.
+    pub fn execute_with_options(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+        options: BaseTableExecutionOptions,
     ) -> Result<BaseTablePage, BaseTableExecutorError> {
         const PARALLEL_CANDIDATE_THRESHOLD: usize = 1_024;
 
@@ -1411,20 +1436,7 @@ impl BaseTableExecutorService {
             });
         }
 
-        let files = FilesRepository::list_all(connection)
-            .map_err(|source| BaseTableExecutorError::FilesRepository { source })?;
-        let mut candidates = files
-            .into_iter()
-            .filter(|file| {
-                file.is_markdown
-                    && matches_source_prefix(&file.normalized_path, plan.source_prefix.as_deref())
-            })
-            .map(|file| TableRowCandidate {
-                file_id: file.file_id,
-                file_path: file.normalized_path,
-                properties: HashMap::new(),
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = load_table_candidates(connection, plan.source_prefix.as_deref())?;
         let candidate_indices = candidates
             .iter()
             .enumerate()
@@ -1528,7 +1540,11 @@ ORDER BY p.file_id ASC, p.key ASC
         }
 
         let total = candidates.len() as u64;
-        let summaries = compute_table_summaries(&candidates, &plan.columns);
+        let summaries = if options.include_summaries {
+            compute_table_summaries(&candidates, &plan.columns)
+        } else {
+            Vec::new()
+        };
         let rows = candidates
             .into_iter()
             .skip(plan.offset)
@@ -1581,16 +1597,67 @@ fn note_folder_from_path(path: &str) -> String {
         .map_or_else(String::new, |parent| parent.to_string())
 }
 
-fn matches_source_prefix(path: &str, source_prefix: Option<&str>) -> bool {
-    let Some(source_prefix) = source_prefix else {
-        return true;
+fn load_table_candidates(
+    connection: &Connection,
+    source_prefix: Option<&str>,
+) -> Result<Vec<TableRowCandidate>, BaseTableExecutorError> {
+    let (query, params): (&str, Vec<SqlValue>) = if let Some(prefix) = source_prefix {
+        (
+            r#"
+SELECT
+  file_id,
+  normalized_path
+FROM files
+WHERE is_markdown = 1
+  AND (normalized_path = ?1 OR normalized_path LIKE ?2)
+ORDER BY normalized_path ASC
+"#,
+            vec![
+                SqlValue::Text(prefix.to_string()),
+                SqlValue::Text(format!("{prefix}/%")),
+            ],
+        )
+    } else {
+        (
+            r#"
+SELECT
+  file_id,
+  normalized_path
+FROM files
+WHERE is_markdown = 1
+ORDER BY normalized_path ASC
+"#,
+            Vec::new(),
+        )
     };
-    if path == source_prefix {
-        return true;
-    }
 
-    path.strip_prefix(source_prefix)
-        .is_some_and(|remainder| remainder.starts_with('/'))
+    let mut statement =
+        connection
+            .prepare(query)
+            .map_err(|source| BaseTableExecutorError::Sql {
+                operation: "prepare_table_candidate_files",
+                source,
+            })?;
+    let rows = statement
+        .query_map(params_from_iter(params), |row| {
+            Ok(TableRowCandidate {
+                file_id: row.get("file_id")?,
+                file_path: row.get("normalized_path")?,
+                properties: HashMap::new(),
+            })
+        })
+        .map_err(|source| BaseTableExecutorError::Sql {
+            operation: "query_table_candidate_files",
+            source,
+        })?;
+
+    rows.map(|row| {
+        row.map_err(|source| BaseTableExecutorError::Sql {
+            operation: "map_table_candidate_files_row",
+            source,
+        })
+    })
+    .collect()
 }
 
 fn row_matches_filters(row: &TableRowCandidate, filters: &[BaseFilterClause]) -> bool {
@@ -2678,6 +2745,71 @@ pub struct LinkGraphEdge {
     pub is_unresolved: bool,
 }
 
+/// One graph node row with resolved in/out degree counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNodeDegreeRow {
+    /// Stable file id.
+    pub file_id: String,
+    /// Normalized path.
+    pub path: String,
+    /// Resolved incoming count.
+    pub incoming_resolved: u64,
+    /// Resolved outgoing count.
+    pub outgoing_resolved: u64,
+}
+
+/// One connected component summary row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphComponentRow {
+    /// Number of markdown nodes in the component.
+    pub size: u64,
+    /// Member paths (full list or bounded sample, depending on request).
+    pub paths: Vec<String>,
+    /// Whether `paths` is truncated compared to full membership.
+    pub truncated: bool,
+}
+
+/// Graph walk traversal direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphWalkDirection {
+    /// Edge traversed from source to target.
+    Outgoing,
+    /// Edge traversed from target to source.
+    Incoming,
+}
+
+/// One graph walk step row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphWalkStep {
+    /// Traversal depth (1-based from root).
+    pub depth: u32,
+    /// Traversal direction.
+    pub direction: GraphWalkDirection,
+    /// Stable link identifier.
+    pub link_id: String,
+    /// Source path.
+    pub source_path: String,
+    /// Target path when resolved.
+    pub target_path: Option<String>,
+    /// Raw target token.
+    pub raw_target: String,
+    /// Whether the edge is resolved.
+    pub resolved: bool,
+}
+
+/// Input request for graph walk traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphWalkRequest {
+    /// Root note path for traversal.
+    pub path: String,
+    /// Maximum traversal depth.
+    pub depth: u32,
+    /// Maximum number of step rows returned.
+    pub limit: u32,
+    /// Include unresolved outgoing edges.
+    pub include_unresolved: bool,
+}
+
 /// Link graph query service for outgoing, backlink, and unresolved edges.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BacklinkGraphService;
@@ -2740,6 +2872,226 @@ impl BacklinkGraphService {
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
         Ok((total, map_link_edges(rows)))
     }
+
+    /// List one deadends diagnostics window in deterministic path order.
+    pub fn deadends_page(
+        &self,
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(u64, Vec<GraphNodeDegreeRow>), LinkGraphServiceError> {
+        let total = LinksRepository::count_deadends(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let rows = LinksRepository::list_deadends_window(connection, limit, offset)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok((total, map_graph_node_degrees(rows)))
+    }
+
+    /// List one orphans diagnostics window in deterministic path order.
+    pub fn orphans_page(
+        &self,
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(u64, Vec<GraphNodeDegreeRow>), LinkGraphServiceError> {
+        let total = LinksRepository::count_orphans(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let rows = LinksRepository::list_orphans_window(connection, limit, offset)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        Ok((total, map_graph_node_degrees(rows)))
+    }
+
+    /// Build connected components over resolved graph edges and return one deterministic page.
+    pub fn components_page(
+        &self,
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+        include_members: bool,
+        sample_size: usize,
+    ) -> Result<(u64, Vec<GraphComponentRow>), LinkGraphServiceError> {
+        let markdown_files = FilesRepository::list_all(connection)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+            .into_iter()
+            .filter(|file| file.is_markdown)
+            .map(|file| (file.file_id, file.normalized_path))
+            .collect::<Vec<_>>();
+        let mut paths_by_id = HashMap::with_capacity(markdown_files.len());
+        let mut ids = Vec::with_capacity(markdown_files.len());
+        for (file_id, path) in markdown_files {
+            ids.push(file_id.clone());
+            paths_by_id.insert(file_id, path);
+        }
+        ids.sort();
+
+        let pairs = LinksRepository::list_resolved_pairs(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let mut adjacency = HashMap::<String, Vec<String>>::new();
+        for pair in pairs {
+            adjacency
+                .entry(pair.source_file_id.clone())
+                .or_default()
+                .push(pair.target_file_id.clone());
+            adjacency
+                .entry(pair.target_file_id)
+                .or_default()
+                .push(pair.source_file_id);
+        }
+
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort();
+            neighbors.dedup();
+        }
+
+        let mut visited = HashSet::<String>::new();
+        let mut components = Vec::<GraphComponentRow>::new();
+        for root in ids {
+            if !visited.insert(root.clone()) {
+                continue;
+            }
+            let mut queue = VecDeque::from([root]);
+            let mut members = Vec::<String>::new();
+            while let Some(current) = queue.pop_front() {
+                members.push(current.clone());
+                if let Some(neighbors) = adjacency.get(&current) {
+                    for next in neighbors {
+                        if visited.insert(next.clone()) {
+                            queue.push_back(next.clone());
+                        }
+                    }
+                }
+            }
+
+            let mut paths = members
+                .iter()
+                .filter_map(|file_id| paths_by_id.get(file_id).cloned())
+                .collect::<Vec<_>>();
+            paths.sort();
+            let full_len = paths.len();
+            if !include_members && paths.len() > sample_size {
+                paths.truncate(sample_size);
+            }
+            components.push(GraphComponentRow {
+                size: u64::try_from(members.len()).unwrap_or(u64::MAX),
+                truncated: !include_members && full_len > paths.len(),
+                paths,
+            });
+        }
+
+        components.sort_by(|left, right| {
+            right
+                .size
+                .cmp(&left.size)
+                .then_with(|| left.paths.first().cmp(&right.paths.first()))
+        });
+        let total = u64::try_from(components.len()).unwrap_or(u64::MAX);
+        let items = components
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+        Ok((total, items))
+    }
+
+    /// Walk graph neighbors from one root path using frontier SQL lookups.
+    pub fn walk(
+        &self,
+        connection: &Connection,
+        request: &GraphWalkRequest,
+    ) -> Result<Vec<GraphWalkStep>, LinkGraphServiceError> {
+        if request.depth == 0 || request.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let Some(start_file) =
+            FilesRepository::get_by_normalized_path(connection, &request.path)
+                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(Vec::new());
+        };
+
+        let mut steps = Vec::<GraphWalkStep>::new();
+        let mut frontier = vec![start_file.file_id];
+        let mut visited_depth = HashMap::<String, u32>::new();
+        visited_depth.insert(frontier[0].clone(), 0);
+        let hard_limit = request.limit as usize;
+
+        for depth in 0..request.depth {
+            if frontier.is_empty() || steps.len() >= hard_limit {
+                break;
+            }
+
+            let outgoing = LinksRepository::list_outgoing_for_sources_with_paths(
+                connection,
+                &frontier,
+                request.include_unresolved,
+            )
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+            let incoming =
+                LinksRepository::list_incoming_for_targets_with_paths(connection, &frontier)
+                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+
+            let mut next_frontier = Vec::<String>::new();
+            let next_depth = depth + 1;
+
+            for edge in outgoing {
+                if steps.len() >= hard_limit {
+                    break;
+                }
+                let resolved = !edge.is_unresolved && edge.resolved_file_id.is_some();
+                steps.push(GraphWalkStep {
+                    depth: next_depth,
+                    direction: GraphWalkDirection::Outgoing,
+                    link_id: edge.link_id,
+                    source_path: edge.source_path,
+                    target_path: edge.resolved_path,
+                    raw_target: edge.raw_target,
+                    resolved,
+                });
+
+                if let Some(target_id) = edge.resolved_file_id {
+                    let should_visit = visited_depth
+                        .get(&target_id)
+                        .map(|seen_depth| next_depth < *seen_depth)
+                        .unwrap_or(true);
+                    if should_visit {
+                        visited_depth.insert(target_id.clone(), next_depth);
+                        next_frontier.push(target_id);
+                    }
+                }
+            }
+
+            for edge in incoming {
+                if steps.len() >= hard_limit {
+                    break;
+                }
+                steps.push(GraphWalkStep {
+                    depth: next_depth,
+                    direction: GraphWalkDirection::Incoming,
+                    link_id: edge.link_id,
+                    source_path: edge.source_path,
+                    target_path: edge.resolved_path,
+                    raw_target: edge.raw_target,
+                    resolved: true,
+                });
+                let source_id = edge.source_file_id;
+                let should_visit = visited_depth
+                    .get(&source_id)
+                    .map(|seen_depth| next_depth < *seen_depth)
+                    .unwrap_or(true);
+                if should_visit {
+                    visited_depth.insert(source_id.clone(), next_depth);
+                    next_frontier.push(source_id);
+                }
+            }
+
+            next_frontier.sort();
+            next_frontier.dedup();
+            frontier = next_frontier;
+        }
+
+        Ok(steps)
+    }
 }
 
 fn map_link_edges(rows: Vec<tao_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdge> {
@@ -2754,6 +3106,17 @@ fn map_link_edges(rows: Vec<tao_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdg
             heading_slug: row.heading_slug,
             block_id: row.block_id,
             is_unresolved: row.is_unresolved,
+        })
+        .collect()
+}
+
+fn map_graph_node_degrees(rows: Vec<tao_sdk_storage::GraphNodeDegree>) -> Vec<GraphNodeDegreeRow> {
+    rows.into_iter()
+        .map(|row| GraphNodeDegreeRow {
+            file_id: row.file_id,
+            path: row.path,
+            incoming_resolved: row.incoming_resolved,
+            outgoing_resolved: row.outgoing_resolved,
         })
         .collect()
 }
