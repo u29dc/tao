@@ -4,6 +4,7 @@ target/
 dist/
 build/
 .tmp/
-apps/obs-macos/.build/
-apps/obs-macos/.swiftpm/
-bench/reports/
+apps/tao-macos/.build/
+apps/tao-macos/.swiftpm/
+.benchmarks/
+vault/generated/

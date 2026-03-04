@@ -32,10 +32,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: types
-        run: cargo check --workspace
+        run: cargo check --workspace --release
 
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --release
 
       - name: perf budget gate
         run: ./scripts/budgets.sh
@@ -45,8 +45,9 @@ jobs:
         with:
           name: perf-reports
           path: |
-            bench/reports/bridge-call-budgets.json
-            bench/reports/startup-budgets.json
+            .benchmarks/reports/bridge-call-budgets.json
+            .benchmarks/reports/ffi-call-budgets.json
+            .benchmarks/reports/startup-budgets.json
 
       - name: build
         run: cargo build --workspace --release
