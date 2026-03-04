@@ -150,7 +150,7 @@ impl FullIndexService {
                     &markdown,
                     &entry.absolute,
                 )?;
-                let links = extract_wikilinks(&parsed.body);
+                let links = extract_index_links(&markdown, &parsed.body);
                 let heading_slugs = parsed
                     .headings
                     .iter()
@@ -211,7 +211,8 @@ impl FullIndexService {
         for markdown_doc in markdown_docs {
             property_records.extend(markdown_doc.properties.clone());
 
-            for (index, link) in markdown_doc.links.iter().enumerate() {
+            for (index, indexed_link) in markdown_doc.links.iter().enumerate() {
+                let link = &indexed_link.link;
                 let resolution = resolve_target(
                     &link.raw,
                     Some(&markdown_doc.source_path),
@@ -255,7 +256,10 @@ impl FullIndexService {
                 link_records.push(LinkRecordInput {
                     link_id: deterministic_id(
                         "link",
-                        &format!("{}:{}:{}", markdown_doc.file_id, index, link.raw),
+                        &format!(
+                            "{}:{}:{}:{}",
+                            markdown_doc.file_id, index, indexed_link.source, link.raw
+                        ),
                     ),
                     source_file_id: markdown_doc.file_id.clone(),
                     raw_target: link.target.clone(),
@@ -579,7 +583,11 @@ impl IncrementalIndexService {
                     let heading_index = build_heading_index(vault_root, &candidates, &self.parser)?;
                     let block_index = build_block_index(vault_root, &candidates, &self.parser)?;
 
-                    for (index, link) in extract_wikilinks(&parsed.body).iter().enumerate() {
+                    for (index, indexed_link) in extract_index_links(&markdown, &parsed.body)
+                        .iter()
+                        .enumerate()
+                    {
+                        let link = &indexed_link.link;
                         let resolution = resolve_target(&link.raw, Some(&normalized), &candidates);
                         let mut resolved_file_id = resolution
                             .resolved_path
@@ -624,7 +632,10 @@ impl IncrementalIndexService {
                             &LinkRecordInput {
                                 link_id: deterministic_id(
                                     "link",
-                                    &format!("{file_id}:{index}:{}", link.raw),
+                                    &format!(
+                                        "{file_id}:{index}:{}:{}",
+                                        indexed_link.source, link.raw
+                                    ),
                                 ),
                                 source_file_id: file_id.clone(),
                                 raw_target: link.target.clone(),
@@ -1933,10 +1944,16 @@ fn query_filesystem_path_issues(
 struct MarkdownIndexDocument {
     file_id: String,
     source_path: String,
-    links: Vec<WikiLink>,
+    links: Vec<IndexedWikiLink>,
     heading_slugs: Vec<String>,
     block_ids: Vec<String>,
     properties: Vec<PropertyRecordInput>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedWikiLink {
+    link: WikiLink,
+    source: String,
 }
 
 fn hash_file_blake3(path: &Path) -> Result<String, std::io::Error> {
@@ -2004,6 +2021,98 @@ fn build_property_records(
     }
 
     Ok(records)
+}
+
+fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
+    let mut links = Vec::new();
+
+    for link in extract_wikilinks(body) {
+        links.push(IndexedWikiLink {
+            link,
+            source: "body".to_string(),
+        });
+    }
+
+    let extraction = extract_front_matter(markdown);
+    if let FrontMatterStatus::Parsed { value } = extraction.status {
+        collect_frontmatter_links(&value, "", &mut links);
+    }
+
+    // Deterministic dedupe across body and frontmatter paths.
+    links.sort_by(|left, right| {
+        (
+            left.source.as_str(),
+            left.link.raw.as_str(),
+            left.link.target.as_str(),
+            left.link.heading.as_deref().unwrap_or(""),
+            left.link.block.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                right.source.as_str(),
+                right.link.raw.as_str(),
+                right.link.target.as_str(),
+                right.link.heading.as_deref().unwrap_or(""),
+                right.link.block.as_deref().unwrap_or(""),
+            ))
+    });
+    links.dedup_by(|left, right| {
+        left.source == right.source
+            && left.link.raw == right.link.raw
+            && left.link.target == right.link.target
+            && left.link.heading == right.link.heading
+            && left.link.block == right.link.block
+    });
+
+    links
+}
+
+fn collect_frontmatter_links(
+    value: &serde_yaml::Value,
+    path: &str,
+    links: &mut Vec<IndexedWikiLink>,
+) {
+    match value {
+        serde_yaml::Value::String(raw) => {
+            for link in extract_wikilinks(raw) {
+                links.push(IndexedWikiLink {
+                    link,
+                    source: format!("frontmatter:{path}"),
+                });
+            }
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for (index, item) in items.iter().enumerate() {
+                let nested_path = if path.is_empty() {
+                    format!("[{index}]")
+                } else {
+                    format!("{path}[{index}]")
+                };
+                collect_frontmatter_links(item, &nested_path, links);
+            }
+        }
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, nested) in mapping {
+                let key_label = match key {
+                    serde_yaml::Value::String(raw) => raw.clone(),
+                    other => serde_yaml::to_string(other)
+                        .unwrap_or_else(|_| "<non-string-key>".to_string())
+                        .replace('\n', "")
+                        .trim()
+                        .to_string(),
+                };
+                let nested_path = if path.is_empty() {
+                    key_label
+                } else {
+                    format!("{path}.{key_label}")
+                };
+                collect_frontmatter_links(nested, &nested_path, links);
+            }
+        }
+        serde_yaml::Value::Tagged(tagged) => {
+            collect_frontmatter_links(&tagged.value, path, links);
+        }
+        serde_yaml::Value::Null | serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {}
+    }
 }
 
 fn build_heading_index(
@@ -2872,6 +2981,90 @@ mod tests {
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/b.md"));
         assert!(!outgoing[0].is_unresolved);
+    }
+
+    #[test]
+    fn frontmatter_only_wikilinks_are_indexed_for_outgoing_and_backlinks() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nup: \"[[b]]\"\nchildren:\n  - \"[[c]]\"\n---\n# A\n",
+        )
+        .expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B\n").expect("write b");
+        fs::write(temp.path().join("notes/c.md"), "# C\n").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        let result = FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        assert_eq!(result.links_total, 2);
+        assert_eq!(result.unresolved_links, 0);
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let mut outgoing =
+            LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+                .expect("list outgoing");
+        outgoing.sort_by(|left, right| left.raw_target.cmp(&right.raw_target));
+        assert_eq!(outgoing.len(), 2);
+        assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/b.md"));
+        assert_eq!(outgoing[1].resolved_path.as_deref(), Some("notes/c.md"));
+
+        let target_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b")
+            .expect("b exists");
+        let backlinks_b =
+            LinksRepository::list_backlinks_with_paths(&connection, &target_b.file_id)
+                .expect("list b backlinks");
+        assert_eq!(backlinks_b.len(), 1);
+        assert_eq!(backlinks_b[0].source_path, "notes/a.md");
+    }
+
+    #[test]
+    fn incremental_reindex_updates_frontmatter_only_wikilinks() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nup: \"[[b]]\"\n---\n# A\n",
+        )
+        .expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B\n").expect("write b");
+        fs::write(temp.path().join("notes/c.md"), "# C\n").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nup: \"[[c]]\"\n---\n# A updated\n",
+        )
+        .expect("update a");
+
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/a.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental update");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+            .expect("list outgoing");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/c.md"));
     }
 
     #[test]
