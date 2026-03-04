@@ -456,6 +456,20 @@ impl IncrementalIndexService {
         let mut properties_reindexed = 0_u64;
         let mut bases_reindexed = 0_u64;
 
+        let mut markdown_candidates = FilesRepository::list_all(&transaction)
+            .map_err(|source| FullIndexError::UpsertFileMetadata {
+                source: Box::new(source),
+            })?
+            .into_iter()
+            .filter(|record| record.is_markdown)
+            .map(|record| record.normalized_path)
+            .collect::<Vec<_>>();
+        markdown_candidates.sort();
+        markdown_candidates.dedup();
+        let mut heading_index =
+            build_heading_index(vault_root, &markdown_candidates, &self.parser)?;
+        let mut block_index = build_block_index(vault_root, &markdown_candidates, &self.parser)?;
+
         for changed_path in changed_paths {
             let normalized = normalize_changed_path(changed_path)?;
             let absolute = vault_root.join(changed_path);
@@ -572,23 +586,28 @@ impl IncrementalIndexService {
                         source: Box::new(source),
                     })?;
 
-                    let candidates = FilesRepository::list_all(&transaction)
-                        .map_err(|source| FullIndexError::UpsertFileMetadata {
-                            source: Box::new(source),
-                        })?
-                        .into_iter()
-                        .filter(|record| record.is_markdown)
-                        .map(|record| record.normalized_path)
+                    if !markdown_candidates.iter().any(|path| path == &normalized) {
+                        markdown_candidates.push(normalized.clone());
+                        markdown_candidates.sort();
+                    }
+                    let mut heading_slugs = parsed
+                        .headings
+                        .iter()
+                        .map(|heading| slugify_heading(&heading.text))
+                        .filter(|slug| !slug.is_empty())
                         .collect::<Vec<_>>();
-                    let heading_index = build_heading_index(vault_root, &candidates, &self.parser)?;
-                    let block_index = build_block_index(vault_root, &candidates, &self.parser)?;
+                    heading_slugs.sort();
+                    heading_slugs.dedup();
+                    heading_index.insert(normalized.clone(), heading_slugs);
+                    block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
 
                     for (index, indexed_link) in extract_index_links(&markdown, &parsed.body)
                         .iter()
                         .enumerate()
                     {
                         let link = &indexed_link.link;
-                        let resolution = resolve_target(&link.raw, Some(&normalized), &candidates);
+                        let resolution =
+                            resolve_target(&link.raw, Some(&normalized), &markdown_candidates);
                         let mut resolved_file_id = resolution
                             .resolved_path
                             .as_ref()
@@ -692,6 +711,11 @@ impl IncrementalIndexService {
                         source: Box::new(source),
                     },
                 )?;
+                if existing.is_markdown {
+                    markdown_candidates.retain(|candidate| candidate != &normalized);
+                    heading_index.remove(&normalized);
+                    block_index.remove(&normalized);
+                }
                 removed_files += 1;
             }
         }
