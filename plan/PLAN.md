@@ -1172,6 +1172,7 @@ Design constraints:
 
 ### 23.4 Deterministic Execution Order (Tonight Program)
 
+- Parallelization core first: `PAR-001..PAR-005`
 - Data realism first: `DATA-001..DATA-006`
 - Graph correctness and no-hub inference: `GRAPH-001..GRAPH-006`
 - Unified query core: `QUERY-001..QUERY-006`
@@ -1184,6 +1185,14 @@ Design constraints:
 - Validation and closure: `QA-013..QA-020`
 - Data realism (extended): `DATA-007`
 - Specs and narrative updates: `DOC-010..DOC-013`
+
+### 23.4.1 Parallelization Core Tickets (High Priority)
+
+- `PAR-001`: parallel file discovery metadata stage + unchanged prefilter in incremental index.
+- `PAR-002`: parallel markdown parse/property/task/link extraction for full rebuild producers.
+- `PAR-003`: parallel link resolution + deterministic graph edge merge.
+- `PAR-004`: parallel query fast paths for base table execution over large in-memory candidate sets.
+- `PAR-005`: single-writer sqlite ingest with prepared-statement batching.
 
 ### 23.5 Phase 23 Exit Criteria
 

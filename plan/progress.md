@@ -1862,3 +1862,13 @@ Append-only execution log for autonomous runs.
   - commands: [extend phase23 deterministic execution order with DATA-007 TASK-001..003 PERF-015..016 PARITY-001..003 DOC-013]
   - outcomes: [phase23 execution order now references the expanded ticket set and removes the sequencing gap noted in prior residual risk]
 - residual_risk: none
+
+- timestamp: 2026-03-04T21:10:00Z
+- session: session-2026-03-04-parallel-core
+- ticket: PAR-001
+- action: start
+- evidence:
+  - files: [plan/tickets.csv, plan/PLAN.md, plan/run-state.json]
+  - commands: [append PAR-001..PAR-005 ticket rows, update phase23 execution order]
+  - outcomes: [parallelization recommendations are now first-class tracked tickets with explicit pass/fail DoD criteria and active run-state switched to PAR-001]
+- residual_risk: implementation pending for PAR-001..PAR-005
