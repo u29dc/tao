@@ -1502,3 +1502,223 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-cli --release, bun run util:check]
   - outcomes: [explicit --db-path override path remains supported and validated by contract test]
 - residual_risk: cargo audit still reports allowlisted advisory warnings via tao-tui transitive dependencies
+
+- timestamp: 2026-03-04T00:18:00Z
+- session: session-2026-03-04-b
+- ticket: FFI-009
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-bridge/Cargo.toml, crates/tao-sdk-bridge/src/runtime.rs, crates/tao-sdk-bridge/src/bin/uniffi-bindgen.rs, scripts/ffi.sh]
+  - commands: [cargo test -p tao-sdk-bridge --release, bun run util:ffi]
+  - outcomes: [bridge crate exports UniFFI runtime object and deterministic binding generation pipeline]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:18:30Z
+- session: session-2026-03-04-b
+- ticket: FFI-010
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Package.swift, apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/*]
+  - commands: [bun run util:ffi, swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [generated Swift bindings and FFI module map integrated into app package build]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:19:00Z
+- session: session-2026-03-04-b
+- ticket: FFI-011
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [swift bridge client caches long-lived runtime handles keyed by vault/db path]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:19:30Z
+- session: session-2026-03-04-b
+- ticket: FFI-012
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSAppScaffold/TaoBridgeClient.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [subprocess launch path removed from TaoBridgeClient; calls now execute through direct runtime bindings]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:20:00Z
+- session: session-2026-03-04-b
+- ticket: FFI-013
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-bridge/src/runtime.rs, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [batched/windowed runtime APIs (`startup_bundle_json`, `notes_window_json`, `note_context_json`) adopted in file-tree and note-open flows]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:20:30Z
+- session: session-2026-03-04-b
+- ticket: FFI-014
+- action: done
+- evidence:
+  - files: [crates/tao-bench/src/main.rs, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
+  - commands: [cargo run -p tao-bench --release -- --scenario ffi --iterations 20 --bridge-notes 200 --json-out .benchmarks/reports/ffi-call-budgets.json, ./scripts/budgets.sh]
+  - outcomes: [ffi latency scenario and budget checks added with machine-readable reports and ci artifact path updates]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:21:00Z
+- session: session-2026-03-04-b
+- ticket: APP-013
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [debug/diagnostic panels removed from app shell]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:21:30Z
+- session: session-2026-03-04-b
+- ticket: APP-014
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [single sidebar tree + main note reader layout implemented]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:22:00Z
+- session: session-2026-03-04-b
+- ticket: APP-015
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [front matter properties rendered as key/value section above markdown body]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:22:30Z
+- session: session-2026-03-04-b
+- ticket: APP-016
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [settings window supports vault folder selection and refresh behavior]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:23:00Z
+- session: session-2026-03-04-b
+- ticket: APP-017
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Sources/TaoMacOSApp/TaoMacOSApp.swift, apps/tao-macos/Sources/TaoMacOSApp/FileTreeViewModel.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release, ./scripts/budgets.sh]
+  - outcomes: [startup bundle hydration + delayed-spinner threshold reduces perceived note-open latency]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:23:30Z
+- session: session-2026-03-04-b
+- ticket: VAULT-001
+- action: done
+- evidence:
+  - files: [vault/**, crates/tao-sdk-service/tests/conformance_harness.rs]
+  - commands: [git mv qa/fixtures/conformance-vault vault]
+  - outcomes: [shipped conformance fixture vault moved to repository root `vault/`]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:24:00Z
+- session: session-2026-03-04-b
+- ticket: VAULT-002
+- action: done
+- evidence:
+  - files: [scripts/fixtures.sh, vault/README.md]
+  - commands: [update fixtures generator default output root]
+  - outcomes: [deterministic synthetic vault generator now targets `vault/generated`]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:24:30Z
+- session: session-2026-03-04-b
+- ticket: BENCH-001
+- action: done
+- evidence:
+  - files: [.gitignore, scripts/budgets.sh, package.json, .github/workflows/rust-ci.yml]
+  - commands: [./scripts/budgets.sh]
+  - outcomes: [benchmark outputs redirected to `.benchmarks/reports` and gitignored]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:25:00Z
+- session: session-2026-03-04-b
+- ticket: BENCH-002
+- action: done
+- evidence:
+  - files: [crates/tao-bench/**, bench/reports/* removed]
+  - commands: [git rm -r bench]
+  - outcomes: [benchmark harness source preserved while bulky static benchmark outputs removed from git]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:25:30Z
+- session: session-2026-03-04-b
+- ticket: DOC-007
+- action: done
+- evidence:
+  - files: [AGENTS.md, docs/** removed]
+  - commands: [git rm -r -f docs]
+  - outcomes: [repository documentation consolidated into concise root AGENTS.md]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:26:00Z
+- session: session-2026-03-04-b
+- ticket: DOC-008
+- action: done
+- evidence:
+  - files: [CLAUDE.md]
+  - commands: [ln -s AGENTS.md CLAUDE.md]
+  - outcomes: [CLAUDE.md now symlinks to AGENTS.md]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:26:30Z
+- session: session-2026-03-04-b
+- ticket: DOC-009
+- action: done
+- evidence:
+  - files: [README.md]
+  - commands: [ln -s AGENTS.md README.md]
+  - outcomes: [README.md now symlinks to AGENTS.md]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:27:00Z
+- session: session-2026-03-04-b
+- ticket: TUI-006
+- action: done
+- evidence:
+  - files: [crates/tao-tui/src/main.rs, crates/tao-tui/Cargo.toml]
+  - commands: [cargo check --workspace --release]
+  - outcomes: [tui reset to minimal placeholder shell with no route/content logic]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:32:00Z
+- session: session-2026-03-04-b
+- ticket: QA-009
+- action: done
+- evidence:
+  - files: [plan/tickets.csv, plan/run-state.json]
+  - commands: [bun run util:clean && bun run util:check]
+  - outcomes: [cold-cache release-quality gates passed across rust, bridge generation, swift build, and audits]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:32:20Z
+- session: session-2026-03-04-b
+- ticket: QA-010
+- action: done
+- evidence:
+  - files: [apps/tao-macos/Tests/TaoMacOSAppScaffoldTests/TaoMacOSAppScaffoldTests.swift]
+  - commands: [swift test --package-path apps/tao-macos --configuration release]
+  - outcomes: [launch/open/navigate/edit smoke flow validated against root fixture vault behavior]
+- residual_risk: direct interactive mouse/keyboard walkthrough remains user-verifiable on local machine
+
+- timestamp: 2026-03-04T00:32:40Z
+- session: session-2026-03-04-b
+- ticket: REL-007
+- action: done
+- evidence:
+  - files: [plan/release-notes-tao.md]
+  - commands: [write tao transition release notes and migration guidance]
+  - outcomes: [published release notes for rename migration, ffi runtime, config bootstrap, and operational guidance]
+- residual_risk: none
