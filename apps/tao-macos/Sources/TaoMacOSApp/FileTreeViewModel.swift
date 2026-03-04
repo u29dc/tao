@@ -19,17 +19,23 @@ final class FileTreeViewModel: ObservableObject {
     private var vaultRoot = ""
     private var summaries: [BridgeNoteSummary] = []
     private var notePaths: Set<String> = []
+    private var loadTask: Task<Void, Never>?
 
     var hasLoadedNotes: Bool {
         !summaries.isEmpty
     }
 
     func bindVault(vaultRoot: String, eagerLoad: Bool = true) {
-        guard self.vaultRoot != vaultRoot else {
+        let normalizedVaultRoot = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard self.vaultRoot != normalizedVaultRoot else {
+            if eagerLoad {
+                reload()
+            }
             return
         }
 
-        self.vaultRoot = vaultRoot
+        loadTask?.cancel()
+        self.vaultRoot = normalizedVaultRoot
         self.summaries = []
         self.notePaths = []
         self.roots = []
@@ -41,9 +47,7 @@ final class FileTreeViewModel: ObservableObject {
     }
 
     func reload() {
-        guard !isLoading else {
-            return
-        }
+        loadTask?.cancel()
         guard !vaultRoot.isEmpty else {
             errorMessage = "open a vault first"
             return
@@ -52,9 +56,9 @@ final class FileTreeViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        let requestVaultRoot = vaultRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestVaultRoot = vaultRoot
 
-        Task {
+        loadTask = Task {
             do {
                 let (stats, allNotes) = try await Task.detached(priority: .userInitiated) {
                     let client = TaoBridgeClient()
@@ -65,7 +69,11 @@ final class FileTreeViewModel: ObservableObject {
                     )
                     var notes = startup.notes.items
                     var cursor = startup.notes.nextCursor
+                    var seenCursors: Set<String> = []
                     while let cursorPath = cursor {
+                        if !seenCursors.insert(cursorPath).inserted {
+                            throw FileTreeLoadError.cursorCycle(cursorPath)
+                        }
                         let page = try client.notesList(
                             vaultRoot: requestVaultRoot,
                             dbPath: "",
@@ -87,11 +95,13 @@ final class FileTreeViewModel: ObservableObject {
                     roots = FileTreeBuilder.build(from: summaries)
                     self.stats = stats
                     isLoading = false
+                    loadTask = nil
                 }
             } catch {
                 await MainActor.run {
                     errorMessage = "file tree load failed: \(error)"
                     isLoading = false
+                    loadTask = nil
                 }
             }
         }
@@ -115,6 +125,17 @@ final class FileTreeViewModel: ObservableObject {
             }
             .prefix(limit)
             .map { $0 }
+    }
+}
+
+private enum FileTreeLoadError: LocalizedError {
+    case cursorCycle(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cursorCycle(let cursor):
+            return "notes pagination cursor did not advance (\(cursor))"
+        }
     }
 }
 

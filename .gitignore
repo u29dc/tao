@@ -8,3 +8,5 @@ apps/tao-macos/.build/
 apps/tao-macos/.swiftpm/
 .benchmarks/
 vault/generated/
+vault/.tao/
+vault/config.toml

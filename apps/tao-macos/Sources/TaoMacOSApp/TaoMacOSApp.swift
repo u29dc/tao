@@ -38,6 +38,9 @@ private struct TaoRootSplitView: View {
         if normalizedVaultRoot.isEmpty {
             return "No vault selected"
         }
+        if let error = fileTreeViewModel.errorMessage {
+            return error
+        }
         if let stats = fileTreeViewModel.stats {
             return "\(stats.markdownFiles) notes indexed"
         }
@@ -60,7 +63,11 @@ private struct TaoRootSplitView: View {
 
                 Text(sidebarSubtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(
+                        fileTreeViewModel.errorMessage == nil
+                            ? AnyShapeStyle(.secondary)
+                            : AnyShapeStyle(.red)
+                    )
 
                 if normalizedVaultRoot.isEmpty {
                     ContentUnavailableView(
@@ -68,6 +75,18 @@ private struct TaoRootSplitView: View {
                         systemImage: "folder",
                         description: Text("Open Settings and choose your vault folder.")
                     )
+                } else if let error = fileTreeViewModel.errorMessage, fileTreeViewModel.roots.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ContentUnavailableView(
+                            "Load Failed",
+                            systemImage: "exclamationmark.triangle",
+                            description: Text(error)
+                        )
+                        Button("Retry") {
+                            fileTreeViewModel.reload()
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 } else {
                     List(selection: $selectedPath) {
                         OutlineGroup(fileTreeViewModel.roots, children: \.children) { node in
