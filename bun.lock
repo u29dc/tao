@@ -5,11 +5,11 @@
     "": {
       "name": "tao",
       "devDependencies": {
-        "@biomejs/biome": "^2.4.5",
-        "@commitlint/cli": "^20.4.3",
-        "@commitlint/config-conventional": "^20.4.3",
-        "husky": "^9.1.7",
-        "lint-staged": "^16.3.2",
+        "@biomejs/biome": "latest",
+        "@commitlint/cli": "latest",
+        "@commitlint/config-conventional": "latest",
+        "husky": "latest",
+        "lint-staged": "latest",
       },
     },
   },

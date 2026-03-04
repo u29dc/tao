@@ -1,35 +1,39 @@
 {
-  "name": "tao",
-  "version": "0.0.1",
-  "type": "module",
-  "private": true,
-  "repository": {
-    "type": "git",
-    "url": "git@github.com:u29dc/tao.git"
-  },
-  "scripts": {
-    "prepare": "husky",
-    "tao:dev": "./target/release/tao",
-    "build": "cargo build --workspace --release && OUT_DIR=\"${TAO_HOME:-${TOOLS_HOME:-$HOME/.tools}/tao}\" && mkdir -p \"$OUT_DIR\" && cp target/release/tao \"$OUT_DIR/tao\" && cp target/release/tao-tui \"$OUT_DIR/tao-tui\"",
-    "util:release:cli": "./scripts/release.sh",
-    "util:release:mac": "./scripts/package.sh",
-    "util:clean": "./scripts/clean.sh",
-    "util:ffi": "./scripts/ffi.sh",
-    "util:format": "cargo fmt --all",
-    "util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-    "util:types": "cargo check --workspace --release",
-    "util:test": "cargo test --workspace --release",
-    "util:build": "cargo build --workspace --release && bun run util:ffi && swift build --configuration release --package-path apps/tao-macos --product TaoMacOSApp",
-    "util:audit": "cargo audit",
-    "util:bench:bridge": "./target/release/tao-bench --scenario bridge --iterations 200 --json-out .benchmarks/reports/bridge-call-budgets.json",
-    "util:bench:ffi": "./target/release/tao-bench --scenario ffi --iterations 200 --json-out .benchmarks/reports/ffi-call-budgets.json",
-    "util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.4.5",
-    "@commitlint/cli": "^20.4.3",
-    "@commitlint/config-conventional": "^20.4.3",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.3.2"
-  }
+	"name": "tao",
+	"version": "0.0.1",
+	"type": "module",
+	"private": true,
+	"repository": {
+		"type": "git",
+		"url": "git@github.com:u29dc/tao.git"
+	},
+	"scripts": {
+		"core --------------------------------------------": "",
+		"prepare": "husky",
+		"dev": "./target/release/tao",
+		"build": "bun run util:ffi && bun run release:cli && bun run release:mac",
+		"update": "cargo update && bun update --latest",
+		"release -----------------------------------------": "",
+		"release:cli": "./scripts/release_cli.sh",
+		"release:mac": "./scripts/release_mac.sh",
+		"util --------------------------------------------": "",
+		"util:clean": "./scripts/clean.sh",
+		"util:ffi": "./scripts/ffi.sh",
+		"util:format": "cargo fmt --all",
+		"util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+		"util:types": "cargo check --workspace --release",
+		"util:test": "cargo test --workspace --release",
+		"util:audit": "cargo audit",
+		"util:check": "bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build",
+		"bench -------------------------------------------": "",
+		"bench:bridge": "./target/release/tao-bench --scenario bridge --iterations 200 --json-out .benchmarks/reports/bridge-call-budgets.json",
+		"bench:ffi": "./target/release/tao-bench --scenario ffi --iterations 200 --json-out .benchmarks/reports/ffi-call-budgets.json"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.5",
+		"@commitlint/cli": "^20.4.3",
+		"@commitlint/config-conventional": "^20.4.3",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.3.2"
+	}
 }
