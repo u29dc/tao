@@ -1462,3 +1462,43 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-sdk-service config::tests:: -- --nocapture, cargo check --workspace --release]
   - outcomes: [new SdkBootstrapService API resolves config, ensures root+vault config files, opens sqlite, runs migrations, and returns db readiness metadata with resolved config paths]
 - residual_risk: cli wrappers still call local bootstrap logic directly until CLI-007..CLI-009 migration completes
+
+- timestamp: 2026-03-04T00:18:00Z
+- session: session-2026-03-04-a
+- ticket: PLAN-003
+- action: done
+- evidence:
+  - files: [plan/PLAN.md, plan/tickets.csv, plan/run-state.json]
+  - commands: [validate phase7+ roadmap sections and execution contract paths]
+  - outcomes: [phase7+ roadmap extension and execution contract already present in plan/PLAN.md; ticket state reconciled to done]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:24:00Z
+- session: session-2026-03-04-a
+- ticket: CLI-007
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-cli --release]
+  - outcomes: [all CLI command groups now resolve effective vault/db paths from sdk config when only --vault-root is supplied]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:25:00Z
+- session: session-2026-03-04-a
+- ticket: CLI-008
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-cli --release]
+  - outcomes: [vault open test verifies sqlite file auto-creation through migration bootstrap when db path is omitted]
+- residual_risk: none
+
+- timestamp: 2026-03-04T00:26:00Z
+- session: session-2026-03-04-a
+- ticket: CLI-009
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-cli --release, bun run util:check]
+  - outcomes: [explicit --db-path override path remains supported and validated by contract test]
+- residual_risk: cargo audit still reports allowlisted advisory warnings via tao-tui transitive dependencies

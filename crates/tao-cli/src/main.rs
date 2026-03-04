@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
@@ -14,7 +14,7 @@ use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_properties::TypedPropertyValue;
 use tao_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, PropertyUpdateService,
-    ReconcileService, WatcherStatus,
+    ReconcileService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, PropertiesRepository, preflight_migrations, run_migrations,
@@ -124,9 +124,9 @@ struct VaultPathArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Args, Serialize)]
@@ -134,9 +134,9 @@ struct NotePathArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
     /// Vault-relative normalized note path.
     #[arg(long)]
     path: String,
@@ -147,9 +147,9 @@ struct NotePutArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
     /// Vault-relative normalized note path.
     #[arg(long)]
     path: String,
@@ -163,9 +163,9 @@ struct PropertySetArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
     /// Vault-relative normalized note path.
     #[arg(long)]
     path: String,
@@ -182,9 +182,9 @@ struct BaseViewArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
     /// Base id or normalized base file path.
     #[arg(long)]
     path_or_id: String,
@@ -204,9 +204,9 @@ struct SearchQueryArgs {
     /// Absolute vault root path.
     #[arg(long)]
     vault_root: String,
-    /// SQLite database file path.
+    /// Optional sqlite database file path override.
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
     /// Query text.
     #[arg(long)]
     query: String,
@@ -218,11 +218,53 @@ struct SearchQueryArgs {
     offset: u32,
 }
 
+impl VaultPathArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl NotePathArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl NotePutArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl PropertySetArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl BaseViewArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl SearchQueryArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct CommandResult {
     command: String,
     summary: String,
     args: JsonValue,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedVaultPathArgs {
+    vault_root: String,
+    db_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -280,7 +322,8 @@ fn render_output(json: bool, result: &CommandResult) -> Result<String> {
 fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
     match command {
         VaultCommands::Open(args) => {
-            let connection = open_initialized_connection(&args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
             let migration_count: i64 = connection
                 .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
                     row.get(0)
@@ -290,18 +333,19 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
                 command: "vault.open".to_string(),
                 summary: "vault open completed".to_string(),
                 args: serde_json::json!({
-                    "vault_root": args.vault_root,
-                    "db_path": args.db_path,
+                    "vault_root": resolved.vault_root,
+                    "db_path": resolved.db_path,
                     "db_ready": true,
                     "migrations_applied": migration_count,
                 }),
             })
         }
         VaultCommands::Stats(args) => {
-            let connection = open_initialized_connection(&args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
             let snapshot = HealthSnapshotService
                 .snapshot(
-                    Path::new(&args.vault_root),
+                    Path::new(&resolved.vault_root),
                     &connection,
                     0,
                     WatcherStatus::Stopped,
@@ -323,19 +367,23 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
             })
         }
         VaultCommands::Preflight(args) => {
-            let vault_root = Path::new(&args.vault_root);
+            let resolved = args.resolve()?;
+            let vault_root = Path::new(&resolved.vault_root);
             if !vault_root.exists() {
-                return Err(anyhow!("vault root does not exist: {}", args.vault_root));
+                return Err(anyhow!(
+                    "vault root does not exist: {}",
+                    resolved.vault_root
+                ));
             }
             if !vault_root.is_dir() {
                 return Err(anyhow!(
                     "vault root is not a directory: {}",
-                    args.vault_root
+                    resolved.vault_root
                 ));
             }
 
-            let connection = Connection::open(&args.db_path)
-                .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
+            let connection = Connection::open(&resolved.db_path)
+                .with_context(|| format!("open sqlite database '{}'", resolved.db_path))?;
             let report = preflight_migrations(&connection)
                 .map_err(|source| anyhow!("migration preflight failed: {source}"))?;
             Ok(CommandResult {
@@ -350,10 +398,11 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
             })
         }
         VaultCommands::Reindex(args) => {
-            let mut connection = open_initialized_connection(&args)?;
+            let resolved = args.resolve()?;
+            let mut connection = open_initialized_connection(&resolved)?;
             let result = FullIndexService::default()
                 .rebuild(
-                    Path::new(&args.vault_root),
+                    Path::new(&resolved.vault_root),
                     &mut connection,
                     CasePolicy::Sensitive,
                 )
@@ -372,10 +421,11 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
             })
         }
         VaultCommands::Reconcile(args) => {
-            let mut connection = open_initialized_connection(&args)?;
+            let resolved = args.resolve()?;
+            let mut connection = open_initialized_connection(&resolved)?;
             let result = ReconcileService
                 .reconcile_vault(
-                    Path::new(&args.vault_root),
+                    Path::new(&resolved.vault_root),
                     &mut connection,
                     CasePolicy::Sensitive,
                 )
@@ -398,7 +448,8 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
 fn handle_note(command: NoteCommands) -> Result<CommandResult> {
     match command {
         NoteCommands::Get(args) => {
-            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let resolved = args.resolve()?;
+            let kernel = open_bridge_kernel(&resolved)?;
             let note = expect_bridge_value(kernel.note_get(&args.path), "note.get")?;
             Ok(CommandResult {
                 command: "note.get".to_string(),
@@ -413,7 +464,8 @@ fn handle_note(command: NoteCommands) -> Result<CommandResult> {
             })
         }
         NoteCommands::Put(args) => {
-            let mut kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let resolved = args.resolve()?;
+            let mut kernel = open_bridge_kernel(&resolved)?;
             let ack = expect_bridge_value(kernel.note_put(&args.path, &args.content), "note.put")?;
             Ok(CommandResult {
                 command: "note.put".to_string(),
@@ -426,7 +478,8 @@ fn handle_note(command: NoteCommands) -> Result<CommandResult> {
             })
         }
         NoteCommands::List(args) => {
-            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let resolved = args.resolve()?;
+            let kernel = open_bridge_kernel(&resolved)?;
             let mut after_path: Option<String> = None;
             let mut items = Vec::new();
             loop {
@@ -462,7 +515,8 @@ fn handle_note(command: NoteCommands) -> Result<CommandResult> {
 fn handle_links(command: LinksCommands) -> Result<CommandResult> {
     match command {
         LinksCommands::Outgoing(args) => {
-            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let resolved = args.resolve()?;
+            let kernel = open_bridge_kernel(&resolved)?;
             let panels = expect_bridge_value(kernel.note_links(&args.path), "links.outgoing")?;
             let items = panels
                 .outgoing
@@ -490,7 +544,8 @@ fn handle_links(command: LinksCommands) -> Result<CommandResult> {
             })
         }
         LinksCommands::Backlinks(args) => {
-            let kernel = open_bridge_kernel(&args.vault_root, &args.db_path)?;
+            let resolved = args.resolve()?;
+            let kernel = open_bridge_kernel(&resolved)?;
             let panels = expect_bridge_value(kernel.note_links(&args.path), "links.backlinks")?;
             let items = panels
                 .backlinks
@@ -523,11 +578,8 @@ fn handle_links(command: LinksCommands) -> Result<CommandResult> {
 fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
     match command {
         PropertiesCommands::Get(args) => {
-            let vault_args = VaultPathArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-            };
-            let connection = open_initialized_connection(&vault_args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
             let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
                 .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
             let Some(file) = file else {
@@ -574,11 +626,8 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
             })
         }
         PropertiesCommands::Set(args) => {
-            let vault_args = VaultPathArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-            };
-            let mut connection = open_initialized_connection(&vault_args)?;
+            let resolved = args.resolve()?;
+            let mut connection = open_initialized_connection(&resolved)?;
             let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
                 .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
             let Some(file) = file else {
@@ -591,7 +640,7 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
             let typed_value = parse_cli_property_value(&args.value)?;
             let result = PropertyUpdateService::default()
                 .set_property(
-                    Path::new(&args.vault_root),
+                    Path::new(&resolved.vault_root),
                     &mut connection,
                     &file.file_id,
                     &args.key,
@@ -618,7 +667,8 @@ fn handle_properties(command: PropertiesCommands) -> Result<CommandResult> {
 fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
     match command {
         BasesCommands::List(args) => {
-            let connection = open_initialized_connection(&args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
             let bases = BasesRepository::list_with_paths(&connection)
                 .map_err(|source| anyhow!("query bases failed: {source}"))?;
             let items = bases
@@ -647,11 +697,8 @@ fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
             })
         }
         BasesCommands::View(args) => {
-            let vault_args = VaultPathArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-            };
-            let connection = open_initialized_connection(&vault_args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
             let base = BasesRepository::list_with_paths(&connection)
                 .map_err(|source| anyhow!("query bases failed: {source}"))?
                 .into_iter()
@@ -712,11 +759,8 @@ fn handle_search(command: SearchCommands) -> Result<CommandResult> {
                 return Err(anyhow!("search query must not be empty"));
             }
 
-            let vault_args = VaultPathArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-            };
-            let connection = open_initialized_connection(&vault_args)?;
+            let resolved = args.resolve()?;
+            let connection = open_initialized_connection(&resolved)?;
 
             let query_lc = query.to_ascii_lowercase();
             let matches = FilesRepository::list_all(&connection)
@@ -765,8 +809,25 @@ fn handle_search(command: SearchCommands) -> Result<CommandResult> {
     }
 }
 
-fn open_bridge_kernel(vault_root: &str, db_path: &str) -> Result<BridgeKernel> {
-    BridgeKernel::open(vault_root, db_path)
+fn resolve_vault_paths(
+    vault_root: &str,
+    db_path_override: Option<&str>,
+) -> Result<ResolvedVaultPathArgs> {
+    let config = SdkConfigLoader::load(SdkConfigOverrides {
+        vault_root: Some(PathBuf::from(vault_root)),
+        db_path: db_path_override.map(PathBuf::from),
+        ..SdkConfigOverrides::default()
+    })
+    .map_err(|source| anyhow!("resolve sdk config failed: {source}"))?;
+
+    Ok(ResolvedVaultPathArgs {
+        vault_root: config.vault_root.to_string_lossy().to_string(),
+        db_path: config.db_path.to_string_lossy().to_string(),
+    })
+}
+
+fn open_bridge_kernel(args: &ResolvedVaultPathArgs) -> Result<BridgeKernel> {
+    BridgeKernel::open(&args.vault_root, &args.db_path)
         .map_err(|source| anyhow!("open bridge kernel failed: {source}"))
 }
 
@@ -871,7 +932,7 @@ fn decode_base_document(config_json: &str) -> Result<BaseDocument> {
     parse_base_document(raw_yaml).map_err(|source| anyhow!("parse base yaml failed: {source}"))
 }
 
-fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {
+fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connection> {
     let vault_root = Path::new(&args.vault_root);
     if !vault_root.exists() {
         return Err(anyhow!("vault root does not exist: {}", args.vault_root));
@@ -892,6 +953,7 @@ fn open_initialized_connection(args: &VaultPathArgs) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use super::{Cli, dispatch, render_output};
     use clap::{CommandFactory, Parser};
@@ -918,7 +980,6 @@ mod tests {
     fn json_output_is_one_envelope_object() {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().to_path_buf();
-        let db_path = vault_root.join("tao.sqlite");
         let cli = Cli::parse_from([
             "tao".to_string(),
             "--json".to_string(),
@@ -926,8 +987,6 @@ mod tests {
             "open".to_string(),
             "--vault-root".to_string(),
             vault_root.to_string_lossy().to_string(),
-            "--db-path".to_string(),
-            db_path.to_string_lossy().to_string(),
         ]);
         let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");
@@ -954,7 +1013,6 @@ mod tests {
         let notes_dir = vault_root.join("notes");
         let projects_dir = notes_dir.join("projects");
         let views_dir = vault_root.join("views");
-        let db_path = tempdir.path().join("tao.sqlite");
 
         fs::create_dir_all(&projects_dir).expect("create projects dir");
         fs::create_dir_all(&views_dir).expect("create views dir");
@@ -977,7 +1035,6 @@ mod tests {
         .expect("write projects base");
 
         let vault_root_string = vault_root.to_string_lossy().to_string();
-        let db_path_string = db_path.to_string_lossy().to_string();
 
         let scenarios = [
             (
@@ -989,8 +1046,6 @@ mod tests {
                     "open",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1002,8 +1057,6 @@ mod tests {
                     "stats",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1015,8 +1068,6 @@ mod tests {
                     "preflight",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1028,8 +1079,6 @@ mod tests {
                     "reindex",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1041,8 +1090,6 @@ mod tests {
                     "get",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/alpha.md",
                 ],
@@ -1056,8 +1103,6 @@ mod tests {
                     "list",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1069,8 +1114,6 @@ mod tests {
                     "put",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/new.md",
                     "--content",
@@ -1086,8 +1129,6 @@ mod tests {
                     "outgoing",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/alpha.md",
                 ],
@@ -1101,8 +1142,6 @@ mod tests {
                     "backlinks",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/projects/project-a.md",
                 ],
@@ -1116,8 +1155,6 @@ mod tests {
                     "get",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/projects/project-a.md",
                 ],
@@ -1131,8 +1168,6 @@ mod tests {
                     "set",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path",
                     "notes/projects/project-a.md",
                     "--key",
@@ -1150,8 +1185,6 @@ mod tests {
                     "list",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
             (
@@ -1163,8 +1196,6 @@ mod tests {
                     "view",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--path-or-id",
                     "views/projects.base",
                     "--view-name",
@@ -1184,8 +1215,6 @@ mod tests {
                     "query",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                     "--query",
                     "project",
                     "--limit",
@@ -1203,8 +1232,6 @@ mod tests {
                     "reconcile",
                     "--vault-root",
                     &vault_root_string,
-                    "--db-path",
-                    &db_path_string,
                 ],
             ),
         ];
@@ -1242,5 +1269,68 @@ mod tests {
         );
         assert!(payload.get("summary").is_some_and(JsonValue::is_string));
         assert!(payload.get("args").is_some_and(JsonValue::is_object));
+    }
+
+    #[test]
+    fn vault_open_creates_default_db_when_db_path_is_omitted() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault dir");
+
+        let cli = Cli::parse_from([
+            "tao",
+            "--json",
+            "vault",
+            "open",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+        ]);
+        let result = dispatch(cli.command).expect("dispatch");
+        let output = render_output(cli.json, &result).expect("render output");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+
+        let db_path = envelope
+            .get("value")
+            .and_then(|raw| raw.get("args"))
+            .and_then(|raw| raw.get("db_path"))
+            .and_then(JsonValue::as_str)
+            .expect("db_path in response");
+
+        assert!(
+            Path::new(db_path).exists(),
+            "expected default sqlite file to be created at {db_path}"
+        );
+    }
+
+    #[test]
+    fn vault_open_respects_db_path_override() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault dir");
+        let custom_db = tempdir.path().join("custom").join("tao.sqlite");
+
+        let cli = Cli::parse_from([
+            "tao",
+            "--json",
+            "vault",
+            "open",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--db-path",
+            custom_db.to_string_lossy().as_ref(),
+        ]);
+        let result = dispatch(cli.command).expect("dispatch");
+        let output = render_output(cli.json, &result).expect("render output");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+
+        let db_path = envelope
+            .get("value")
+            .and_then(|raw| raw.get("args"))
+            .and_then(|raw| raw.get("db_path"))
+            .and_then(JsonValue::as_str)
+            .expect("db_path in response");
+
+        assert_eq!(Path::new(db_path), custom_db.as_path());
+        assert!(custom_db.exists(), "expected override sqlite path to exist");
     }
 }
