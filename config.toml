@@ -1,0 +1,8 @@
+[runtime]
+# case_policy = "sensitive"
+# tracing_enabled = true
+# feature_flags = []
+
+[storage]
+# data_dir = ".tao"
+# db_path = ".tao.sqlite"

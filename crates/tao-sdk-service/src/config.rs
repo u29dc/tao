@@ -68,10 +68,12 @@ impl SdkConfigLoader {
         env: &HashMap<String, String>,
         cwd: &Path,
     ) -> Result<SdkConfig, SdkConfigError> {
-        let root_config = load_or_bootstrap(cwd).map_err(|source| SdkConfigError::RootConfig {
-            path: cwd.join("config.toml"),
-            source,
-        })?;
+        let root_dir = resolve_root_config_dir(cwd);
+        let root_config =
+            load_or_bootstrap(&root_dir).map_err(|source| SdkConfigError::RootConfig {
+                path: root_dir.join("config.toml"),
+                source,
+            })?;
 
         let vault_root_input = choose_path(
             overrides.vault_root,
@@ -99,7 +101,7 @@ impl SdkConfigLoader {
                     .storage
                     .data_dir
                     .as_ref()
-                    .map(|path| absolutize_from(cwd, path.clone()))
+                    .map(|path| absolutize_from(&root_dir, path.clone()))
             })
             .unwrap_or_else(|| vault_root.join(".tao"));
 
@@ -124,7 +126,7 @@ impl SdkConfigLoader {
                     .storage
                     .db_path
                     .as_ref()
-                    .map(|path| absolutize_from(cwd, path.clone()))
+                    .map(|path| absolutize_from(&root_dir, path.clone()))
             })
             .unwrap_or_else(|| data_dir.join("index.sqlite"));
 
@@ -229,6 +231,7 @@ impl SdkBootstrapService {
         env: &HashMap<String, String>,
         cwd: &Path,
     ) -> Result<SdkBootstrapSnapshot, SdkBootstrapError> {
+        let root_dir = resolve_root_config_dir(cwd);
         let config = SdkConfigLoader::load_from_map(overrides, env, cwd)
             .map_err(|source| SdkBootstrapError::LoadConfig { source })?;
 
@@ -251,7 +254,7 @@ impl SdkBootstrapService {
             })?;
 
         Ok(SdkBootstrapSnapshot {
-            root_config_path: cwd.join("config.toml"),
+            root_config_path: root_dir.join("config.toml"),
             vault_config_path: config.vault_root.join("config.toml"),
             db_path: config.db_path.clone(),
             db_ready: true,
@@ -277,6 +280,17 @@ fn absolutize_from(base: &Path, path: PathBuf) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn resolve_root_config_dir(cwd: &Path) -> PathBuf {
+    let mut cursor = Some(cwd);
+    while let Some(path) = cursor {
+        if path.join(".git").exists() {
+            return path.to_path_buf();
+        }
+        cursor = path.parent();
+    }
+    cwd.to_path_buf()
 }
 
 fn canonicalize_existing_directory(path: PathBuf) -> Result<PathBuf, SdkConfigError> {
