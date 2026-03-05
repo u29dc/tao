@@ -1,6 +1,6 @@
 ## BASE-005 Add grouping and aggregate projections
 
-Status: todo
+Status: done
 
 ### Objective
 Enable grouped base views with aggregate columns for count/sum/min/max.

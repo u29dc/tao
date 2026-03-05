@@ -2,8 +2,26 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use thiserror::Error;
+
+pub mod adapters;
+pub mod execution;
+pub mod logical_plan;
+pub mod optimizer;
+pub mod parser;
+pub mod physical_plan;
+
+pub use execution::{
+    QueryEvalError, apply_sort, apply_where_filter, title_from_path as derive_title_from_path,
+};
+pub use logical_plan::{LogicalPlanBuilder, LogicalQueryPlan, LogicalQueryPlanRequest, QueryScope};
+pub use optimizer::PhysicalPlanOptimizer;
+pub use parser::{
+    CompareOp, LiteralValue, NullOrder, ParseError, SortDirection, SortKey, WhereExpr,
+    parse_sort_keys, parse_where_expression, parse_where_expression_opt,
+};
+pub use physical_plan::{PhysicalPlanBuilder, PhysicalQueryPlan};
 
 /// Search query input parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,183 +165,8 @@ impl SearchQueryService {
         request: SearchQueryRequest,
         projection: SearchQueryProjection,
     ) -> Result<SearchQueryProjectedPage, SearchQueryError> {
-        let query = request.query.trim();
-        if query.is_empty() {
-            return Err(SearchQueryError::EmptyQuery);
-        }
-        if request.limit == 0 || request.limit > 1_000 {
-            return Err(SearchQueryError::InvalidLimit {
-                value: request.limit,
-            });
-        }
-        let limit_i64 =
-            i64::try_from(request.limit).map_err(|_| SearchQueryError::InvalidLimit {
-                value: request.limit,
-            })?;
-        let offset_i64 =
-            i64::try_from(request.offset).map_err(|_| SearchQueryError::InvalidOffset {
-                value: request.offset,
-            })?;
-
-        let needle = query.to_ascii_lowercase();
-        let fts_query = build_fts_query(query);
-        let mut statement = connection
-            .prepare_cached(
-                r#"
-WITH matches AS (
-  SELECT
-    si.file_id,
-    COALESCE(si.normalized_path, si.normalized_path_lc) AS normalized_path,
-    si.updated_at AS indexed_at,
-    si.title_lc,
-    si.normalized_path_lc,
-    si.content_lc
-  FROM search_index si
-  JOIN search_index_fts ON search_index_fts.rowid = si.rowid
-  WHERE search_index_fts MATCH ?1
-),
-scored AS (
-  SELECT
-    file_id,
-    normalized_path,
-    indexed_at,
-    CASE WHEN instr(title_lc, ?2) > 0 THEN 1 ELSE 0 END AS title_match,
-    CASE WHEN instr(normalized_path_lc, ?2) > 0 THEN 1 ELSE 0 END AS path_match,
-    CASE WHEN instr(content_lc, ?2) > 0 THEN 1 ELSE 0 END AS content_match
-  FROM matches
-)
-SELECT
-  file_id,
-  normalized_path,
-  indexed_at,
-  title_match,
-  path_match,
-  content_match,
-  (
-    CASE WHEN title_match > 0 THEN 3 ELSE 0 END
-    + CASE WHEN path_match > 0 THEN 2 ELSE 0 END
-    + CASE WHEN content_match > 0 THEN 1 ELSE 0 END
-  ) AS score,
-  COUNT(*) OVER() AS total_count
-FROM scored
-ORDER BY score DESC, normalized_path ASC
-LIMIT ?3
-OFFSET ?4
-"#,
-            )
-            .map_err(|source| SearchQueryError::PrepareQuery { source })?;
-
-        let rows = statement
-            .query_map(params![fts_query, needle, limit_i64, offset_i64], |row| {
-                let path: String = row.get("normalized_path")?;
-                let title_match: i64 = if projection.include_matched_in {
-                    row.get("title_match")?
-                } else {
-                    0
-                };
-                let path_match: i64 = if projection.include_matched_in {
-                    row.get("path_match")?
-                } else {
-                    0
-                };
-                let content_match: i64 = if projection.include_matched_in {
-                    row.get("content_match")?
-                } else {
-                    0
-                };
-                let total: u64 = row.get("total_count")?;
-                let matched_in = if projection.include_matched_in {
-                    let mut matched_in = Vec::new();
-                    if title_match != 0 {
-                        matched_in.push("title".to_string());
-                    }
-                    if path_match != 0 {
-                        matched_in.push("path".to_string());
-                    }
-                    if matched_in.is_empty() && content_match != 0 {
-                        matched_in.push("content".to_string());
-                    }
-                    Some(matched_in)
-                } else {
-                    None
-                };
-                Ok(SearchQueryProjectedItem {
-                    file_id: if projection.include_file_id {
-                        Some(row.get("file_id")?)
-                    } else {
-                        None
-                    },
-                    title: if projection.include_title {
-                        Some(title_from_path(&path))
-                    } else {
-                        None
-                    },
-                    path: if projection.include_path {
-                        Some(path)
-                    } else {
-                        None
-                    },
-                    indexed_at: row.get("indexed_at")?,
-                    matched_in,
-                })
-                .map(|item| (item, total))
-            })
-            .map_err(|source| SearchQueryError::RunQuery { source })?;
-        let mut total = 0_u64;
-        let items = rows
-            .map(|row| row.map_err(|source| SearchQueryError::MapQueryRow { source }))
-            .map(|row| {
-                row.map(|(item, row_total)| {
-                    total = row_total;
-                    item
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(SearchQueryProjectedPage {
-            query: query.to_string(),
-            limit: request.limit,
-            offset: request.offset,
-            total,
-            items,
-        })
+        execution::execute_projected_query(connection, request, projection)
     }
-}
-
-fn title_from_path(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| path.to_string())
-}
-
-fn build_fts_query(query: &str) -> String {
-    let tokens = query
-        .split_whitespace()
-        .filter_map(|token| {
-            let sanitized = token
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
-                .collect::<String>()
-                .to_ascii_lowercase();
-            if sanitized.is_empty() {
-                None
-            } else {
-                Some(sanitized)
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if tokens.is_empty() {
-        return String::from("\"\"");
-    }
-
-    tokens
-        .into_iter()
-        .map(|token| format!("\"{token}\"*"))
-        .collect::<Vec<_>>()
-        .join(" AND ")
 }
 
 /// Search query failures.

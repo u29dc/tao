@@ -1,6 +1,6 @@
 ## REF-002 Refactor tao-sdk-service indexing.rs into submodules
 
-Status: todo
+Status: done
 
 ### Objective
 Split indexing pipeline into explicit stages for scan, parse, resolve, and persist.

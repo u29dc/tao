@@ -1,6 +1,6 @@
 ## BASE-009 Unify base execution under query planner
 
-Status: todo
+Status: done
 
 ### Objective
 Route base command execution through shared query pipeline to avoid duplicated logic.

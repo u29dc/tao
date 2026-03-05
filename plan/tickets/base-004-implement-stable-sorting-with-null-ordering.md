@@ -1,6 +1,6 @@
 ## BASE-004 Implement stable sorting with null ordering
 
-Status: todo
+Status: done
 
 ### Objective
 Provide deterministic multi-column sorting with explicit null placement.

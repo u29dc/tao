@@ -1,6 +1,6 @@
 ## REF-001 Refactor tao-sdk-service lib.rs into modules
 
-Status: todo
+Status: done
 
 ### Objective
 Break monolithic tao-sdk-service lib.rs into coherent modules for maintainability.

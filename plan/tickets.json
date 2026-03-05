@@ -419,7 +419,7 @@
     "id": "BASE-001",
     "title": "Split base parser into AST and evaluator modules",
     "priority": "P0",
-    "status": "todo",
+    "status": "done",
     "depends_on": [],
     "objective": "Refactor base parsing into maintainable modules without changing behavior.",
     "scope": "tao-sdk-bases crate module structure and unit tests.",
@@ -445,7 +445,7 @@
     "id": "BASE-002",
     "title": "Implement strict typed coercion for base fields",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-001"
     ],
@@ -473,7 +473,7 @@
     "id": "BASE-003",
     "title": "Add complete base filter operator set",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-001"
     ],
@@ -501,7 +501,7 @@
     "id": "BASE-004",
     "title": "Implement stable sorting with null ordering",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-002"
     ],
@@ -529,7 +529,7 @@
     "id": "BASE-005",
     "title": "Add grouping and aggregate projections",
     "priority": "P2",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-003",
       "BASE-004"
@@ -558,7 +558,7 @@
     "id": "BASE-006",
     "title": "Implement relation field resolution",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "GRAPH-001",
       "BASE-002"
@@ -587,7 +587,7 @@
     "id": "BASE-007",
     "title": "Add rollup groundwork over relation fields",
     "priority": "P2",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-006"
     ],
@@ -643,7 +643,7 @@
     "id": "BASE-009",
     "title": "Unify base execution under query planner",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "BASE-003",
       "BASE-004",
@@ -701,7 +701,7 @@
     "id": "QUERY-001",
     "title": "Split query engine into logical and physical planner modules",
     "priority": "P0",
-    "status": "todo",
+    "status": "done",
     "depends_on": [],
     "objective": "Refactor query engine architecture for maintainability and future optimizer work.",
     "scope": "tao-sdk-search module decomposition and interface cleanup.",
@@ -727,7 +727,7 @@
     "id": "QUERY-002",
     "title": "Implement typed where-expression parser",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "QUERY-001"
     ],
@@ -783,7 +783,7 @@
     "id": "QUERY-004",
     "title": "Add query sort grammar and comparator registry",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "QUERY-001"
     ],
@@ -811,7 +811,7 @@
     "id": "QUERY-005",
     "title": "Implement query explain output",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "QUERY-001"
     ],
@@ -867,7 +867,7 @@
     "id": "QUERY-007",
     "title": "Add query integration parity matrix tests",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "QUERY-002",
       "QUERY-003",
@@ -952,7 +952,7 @@
     "id": "CLI-002",
     "title": "Standardize structured error codes across CLI",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "CLI-001"
     ],
@@ -980,7 +980,7 @@
     "id": "CLI-003",
     "title": "Modularize CLI command wiring",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "CLI-001"
     ],
@@ -1008,7 +1008,7 @@
     "id": "CLI-004",
     "title": "Harden daemon socket lifecycle and stale recovery",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "CLI-003"
     ],
@@ -1285,7 +1285,7 @@
     "id": "REF-001",
     "title": "Refactor tao-sdk-service lib.rs into modules",
     "priority": "P0",
-    "status": "todo",
+    "status": "done",
     "depends_on": [],
     "objective": "Break monolithic tao-sdk-service lib.rs into coherent modules for maintainability.",
     "scope": "Service crate internal structure and test updates.",
@@ -1311,7 +1311,7 @@
     "id": "REF-002",
     "title": "Refactor tao-sdk-service indexing.rs into submodules",
     "priority": "P0",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "REF-001"
     ],
@@ -1339,7 +1339,7 @@
     "id": "REF-003",
     "title": "Refactor tao-cli main.rs into command modules",
     "priority": "P0",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "CLI-003"
     ],
@@ -1367,7 +1367,7 @@
     "id": "REF-004",
     "title": "Extract shared parsing and normalization utilities",
     "priority": "P1",
-    "status": "todo",
+    "status": "done",
     "depends_on": [
       "GRAPH-001",
       "QUERY-001",

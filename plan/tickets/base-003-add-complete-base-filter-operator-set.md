@@ -1,6 +1,6 @@
 ## BASE-003 Add complete base filter operator set
 
-Status: todo
+Status: done
 
 ### Objective
 Support rich filtering semantics in base views and query adapter.

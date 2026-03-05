@@ -1,6 +1,6 @@
 ## BASE-006 Implement relation field resolution
 
-Status: todo
+Status: done
 
 ### Objective
 Resolve relation fields to note references and expose resolved targets.

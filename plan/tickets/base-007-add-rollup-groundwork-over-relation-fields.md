@@ -1,6 +1,6 @@
 ## BASE-007 Add rollup groundwork over relation fields
 
-Status: todo
+Status: done
 
 ### Objective
 Enable computed rollup values sourced from related rows.

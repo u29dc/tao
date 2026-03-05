@@ -1,6 +1,6 @@
 ## BASE-001 Split base parser into AST and evaluator modules
 
-Status: todo
+Status: done
 
 ### Objective
 Refactor base parsing into maintainable modules without changing behavior.

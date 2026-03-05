@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use tao_sdk_core::{cmp_normalized_paths, normalize_path_like};
 use thiserror::Error;
 
 /// Parsed wikilink token.
@@ -357,10 +358,6 @@ fn split_fragments(value: &str) -> (&str, Option<String>, Option<String>) {
     (value.trim(), None, None)
 }
 
-fn normalize_path_like(value: &str) -> String {
-    value.replace('\\', "/").trim().to_string()
-}
-
 fn normalized_candidate_equals_target(candidate: &str, target: &str) -> bool {
     if candidate.contains('\\') || target.contains('\\') {
         let normalized_candidate = normalize_path_like(candidate);
@@ -414,9 +411,7 @@ fn compare_candidates(left: &str, right: &str, source_dir: Option<&str>) -> std:
         }
     }
 
-    normalize_path_like(left)
-        .to_lowercase()
-        .cmp(&normalize_path_like(right).to_lowercase())
+    cmp_normalized_paths(left, right)
 }
 
 fn relative_distance(source_dir: &str, candidate_path: &str) -> usize {

@@ -1,6 +1,6 @@
 ## QUERY-005 Implement query explain output
 
-Status: todo
+Status: done
 
 ### Objective
 Expose planner/executor decisions for debugging and optimization.

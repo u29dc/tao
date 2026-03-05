@@ -1,6 +1,6 @@
 ## CLI-002 Standardize structured error codes across CLI
 
-Status: todo
+Status: done
 
 ### Objective
 Ensure every command returns stable error codes and contextual messages.

@@ -1,6 +1,6 @@
 ## QUERY-007 Add query integration parity matrix tests
 
-Status: todo
+Status: done
 
 ### Objective
 Verify query semantics across all scopes with one parity matrix.

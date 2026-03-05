@@ -1,6 +1,6 @@
 ## CLI-003 Modularize CLI command wiring
 
-Status: todo
+Status: done
 
 ### Objective
 Break monolithic CLI entrypoint into maintainable command modules.

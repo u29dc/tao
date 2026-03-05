@@ -1,6 +1,6 @@
 ## REF-003 Refactor tao-cli main.rs into command modules
 
-Status: todo
+Status: done
 
 ### Objective
 Eliminate CLI monolith by splitting command implementation into per-domain modules.

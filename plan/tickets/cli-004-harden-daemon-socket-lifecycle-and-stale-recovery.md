@@ -1,6 +1,6 @@
 ## CLI-004 Harden daemon socket lifecycle and stale recovery
 
-Status: todo
+Status: done
 
 ### Objective
 Ensure daemon mode recovers cleanly from stale sockets and orphaned processes.

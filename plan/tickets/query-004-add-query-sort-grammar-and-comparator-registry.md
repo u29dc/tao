@@ -1,6 +1,6 @@
 ## QUERY-004 Add query sort grammar and comparator registry
 
-Status: todo
+Status: done
 
 ### Objective
 Standardize sorting behavior across all query scopes.

@@ -1,6 +1,6 @@
 ## REF-004 Extract shared parsing and normalization utilities
 
-Status: todo
+Status: done
 
 ### Objective
 Reduce duplicated logic across crates by introducing shared utility modules/crate.

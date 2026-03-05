@@ -1,6 +1,6 @@
 ## QUERY-001 Split query engine into logical and physical planner modules
 
-Status: todo
+Status: done
 
 ### Objective
 Refactor query engine architecture for maintainability and future optimizer work.

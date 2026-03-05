@@ -1,6 +1,6 @@
 ## QUERY-002 Implement typed where-expression parser
 
-Status: todo
+Status: done
 
 ### Objective
 Support expressive where clauses consistently across docs, graph, base, and meta scopes.

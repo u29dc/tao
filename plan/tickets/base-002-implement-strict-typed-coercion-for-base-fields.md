@@ -1,6 +1,6 @@
 ## BASE-002 Implement strict typed coercion for base fields
 
-Status: todo
+Status: done
 
 ### Objective
 Guarantee deterministic coercion behavior for string, number, bool, and date-like fields.

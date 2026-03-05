@@ -118,3 +118,63 @@
   - graph walk supports optional folder overlay edges with edge-type labels
   - graph parity snapshots are locked to deterministic fixture goldens
   - fixture generator supports deterministic parity profile and fixture-generation timing report
+
+### 2026-03-05 Query/Base/CLI Refactor Closure
+- completed tickets:
+  - BASE-001, BASE-002, BASE-003, BASE-004, BASE-005, BASE-006, BASE-007, BASE-009
+  - QUERY-001, QUERY-002, QUERY-004, QUERY-005, QUERY-007
+  - CLI-002, CLI-003, CLI-004
+  - REF-001, REF-002, REF-003, REF-004
+- files changed:
+  - crates/tao-sdk-bases/src/lib.rs
+  - crates/tao-sdk-bases/src/ast.rs
+  - crates/tao-sdk-bases/src/lexer.rs
+  - crates/tao-sdk-bases/src/parser.rs
+  - crates/tao-sdk-bases/src/planner.rs
+  - crates/tao-sdk-bases/src/validation.rs
+  - crates/tao-sdk-bases/src/evaluator.rs
+  - crates/tao-sdk-bases/src/types.rs
+  - crates/tao-sdk-search/src/lib.rs
+  - crates/tao-sdk-search/src/optimizer.rs
+  - crates/tao-sdk-search/src/execution.rs
+  - crates/tao-sdk-search/Cargo.toml
+  - crates/tao-sdk-service/src/lib.rs
+  - crates/tao-sdk-service/src/legacy.rs
+  - crates/tao-sdk-service/src/indexing/mod.rs
+  - crates/tao-sdk-service/src/indexing/pipeline.rs
+  - crates/tao-sdk-service/src/indexing/file_scan.rs
+  - crates/tao-sdk-service/src/indexing/parse_extract.rs
+  - crates/tao-sdk-service/src/indexing/link_resolve.rs
+  - crates/tao-sdk-service/src/indexing/write_batch.rs
+  - crates/tao-sdk-service/src/indexing/reconcile.rs
+  - crates/tao-cli/src/main.rs
+  - crates/tao-cli/src/cli_impl.rs
+  - crates/tao-cli/src/cli_impl/commands/*
+  - crates/tao-sdk-core/src/lib.rs
+  - crates/tao-sdk-core/src/text.rs
+  - crates/tao-sdk-links/src/lib.rs
+  - crates/tao-sdk-links/Cargo.toml
+  - plan/tickets.json
+  - plan/tickets.csv
+  - plan/tickets.md
+  - plan/run-state.json
+- implementation:
+  - split base crate into parser/planner/validation/evaluator/types/ast/lexer modules with facade exports
+  - added strict/permissive typed coercion paths and evaluator comparator/filter primitives
+  - added grouped aggregate output, relation resolution diagnostics, and rollup computation in base execution
+  - exposed base execution metadata (`adapter=base_table`, `path=query-planner`) and base sort/grouping metadata in CLI output
+  - completed query planner module decomposition with optimizer stage and deterministic explain payload flow
+  - moved CLI entrypoint to thin bootstrap (`main.rs`) with command dispatch wrappers under `cli_impl/commands`
+  - reduced service root `lib.rs` to facade and moved implementation to `legacy.rs`; indexing now routed via `indexing/mod.rs` with explicit stage modules
+  - extracted shared text/path normalization helpers into `tao-sdk-core` and adopted them in links/search/service
+- validation:
+  - `cargo fmt --all`
+  - `cargo test -p tao-sdk-bases --release`
+  - `cargo test -p tao-sdk-search --release`
+  - `cargo test -p tao-sdk-core --release`
+  - `cargo test -p tao-sdk-links --release`
+  - `cargo test -p tao-sdk-service --release`
+  - `cargo test -p tao-cli --release`
+- outcome:
+  - all phase24 tickets now marked done (`50/50`) with updated run-state completion metadata
+  - service/cli/base/query test suites are green after refactor and feature parity additions
