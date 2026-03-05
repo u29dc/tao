@@ -51,6 +51,9 @@ public struct BridgeWriteAck: Decodable {
     public let path: String
     public let fileId: String
     public let action: String
+    public let indexSynced: Bool
+    public let eventLogged: Bool
+    public let warnings: [String]
 }
 
 public struct BridgeEvent: Decodable {
@@ -150,6 +153,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
     case notePutEventLogFailed(BridgeErrorDTO)
     case eventsPollInvalidLimit(BridgeErrorDTO)
     case eventsPollFailed(BridgeErrorDTO)
+    case startupBundleFailed(BridgeErrorDTO)
     case serializeFailed(BridgeErrorDTO)
     case unknown(BridgeErrorDTO)
 
@@ -211,6 +215,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return .eventsPollInvalidLimit(error)
         case "bridge.events_poll.failed":
             return .eventsPollFailed(error)
+        case "bridge.startup_bundle.failed":
+            return .startupBundleFailed(error)
         case "bridge.serialize.failed":
             return .serializeFailed(error)
         default:
@@ -288,6 +294,8 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             return "events poll invalid limit: \(error.message)"
         case .eventsPollFailed(let error):
             return "events poll failed: \(error.message)"
+        case .startupBundleFailed(let error):
+            return "startup bundle failed: \(error.message)"
         case .serializeFailed(let error):
             return "bridge serialize failed: \(error.message)"
         case .unknown(let error):
@@ -325,6 +333,7 @@ public enum TaoBridgeTypedError: Error, Equatable, CustomStringConvertible {
             .notePutEventLogFailed(let error),
             .eventsPollInvalidLimit(let error),
             .eventsPollFailed(let error),
+            .startupBundleFailed(let error),
             .serializeFailed(let error),
             .unknown(let error):
             return error
@@ -489,16 +498,10 @@ public struct TaoBridgeClient {
         limit: UInt64 = 128
     ) throws -> BridgeStartupBundle {
         let runtime = try bridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        do {
-            return try decoder.decode(
-                BridgeStartupBundle.self,
-                from: Data(try runtime.startupBundleJson(limit: limit).utf8)
-            )
-        } catch {
-            throw TaoBridgeClientError.decodeFailed(error.localizedDescription)
-        }
+        return try invoke(
+            runtimeCall: { try runtime.startupBundleJson(limit: limit) },
+            as: BridgeStartupBundle.self
+        )
     }
 
     private func invoke<Value: Decodable>(
@@ -594,6 +597,8 @@ public struct TaoBridgeClient {
 private enum TaoBridgeRuntimeCache {
     private static let lock = NSLock()
     private static var runtimes: [String: TaoBridgeRuntime] = [:]
+    private static var lruKeys: [String] = []
+    private static let maxEntries = 4
 
     static func runtime(vaultRoot: String, dbPath: String?) throws -> TaoBridgeRuntime {
         let key = "\(vaultRoot)\n\(dbPath ?? "")"
@@ -601,11 +606,14 @@ private enum TaoBridgeRuntimeCache {
         defer { lock.unlock() }
 
         if let existing = runtimes[key] {
+            touch(key)
             return existing
         }
 
         let runtime = try TaoBridgeRuntime(vaultRoot: vaultRoot, dbPath: dbPath)
         runtimes[key] = runtime
+        touch(key)
+        trimIfNeeded()
         return runtime
     }
 
@@ -613,5 +621,18 @@ private enum TaoBridgeRuntimeCache {
         lock.lock()
         defer { lock.unlock() }
         runtimes.removeAll()
+        lruKeys.removeAll()
+    }
+
+    private static func touch(_ key: String) {
+        lruKeys.removeAll { $0 == key }
+        lruKeys.append(key)
+    }
+
+    private static func trimIfNeeded() {
+        while runtimes.count > maxEntries, let evictedKey = lruKeys.first {
+            lruKeys.removeFirst()
+            runtimes.removeValue(forKey: evictedKey)
+        }
     }
 }

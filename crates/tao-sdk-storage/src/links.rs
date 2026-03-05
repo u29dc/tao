@@ -103,6 +103,52 @@ pub struct GraphNodeDegree {
 pub struct LinksRepository;
 
 impl LinksRepository {
+    /// List all links across the vault with joined source/target paths.
+    pub fn list_all_with_paths(
+        connection: &Connection,
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+ORDER BY l.link_id ASC
+"#,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "prepare_list_all_with_paths",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map([], row_to_link_with_paths)
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_all_with_paths",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_all_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// Insert one link record.
     pub fn insert(
         connection: &Connection,

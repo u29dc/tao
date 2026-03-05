@@ -200,9 +200,9 @@ pub fn build_fts_query(query: &str) -> String {
         .filter_map(|token| {
             let sanitized = token
                 .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
+                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
                 .collect::<String>()
-                .to_ascii_lowercase();
+                .to_lowercase();
             if sanitized.is_empty() {
                 None
             } else {

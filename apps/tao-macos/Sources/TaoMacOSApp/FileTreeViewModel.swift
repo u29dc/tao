@@ -87,6 +87,9 @@ final class FileTreeViewModel: ObservableObject {
                 }.value
 
                 await MainActor.run {
+                    guard self.vaultRoot == requestVaultRoot else {
+                        return
+                    }
                     summaries = allNotes
                         .sorted { left, right in
                             left.path.localizedCaseInsensitiveCompare(right.path) == .orderedAscending
@@ -99,6 +102,9 @@ final class FileTreeViewModel: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
+                    guard self.vaultRoot == requestVaultRoot else {
+                        return
+                    }
                     errorMessage = "file tree load failed: \(error)"
                     isLoading = false
                     loadTask = nil

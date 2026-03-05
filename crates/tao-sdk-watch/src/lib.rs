@@ -1,8 +1,12 @@
 //! Reconciliation-backed watch adapter for filesystem drift repair.
 
-use std::path::Path;
-
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tao_sdk_service::ReconciliationScannerService;
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
@@ -66,6 +70,69 @@ impl WatchReconcileService {
     }
 }
 
+/// Filesystem monitor that increments one generation counter when vault content changes.
+pub struct VaultChangeMonitor {
+    generation: Arc<AtomicU64>,
+    _watcher: RecommendedWatcher,
+}
+
+impl std::fmt::Debug for VaultChangeMonitor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultChangeMonitor")
+            .field("generation", &self.generation())
+            .finish()
+    }
+}
+
+impl VaultChangeMonitor {
+    /// Start monitoring one vault root recursively for external content changes.
+    pub fn start(vault_root: &Path) -> Result<Self, VaultChangeMonitorError> {
+        let canonical_root = std::fs::canonicalize(vault_root).map_err(|source| {
+            VaultChangeMonitorError::CanonicalizeRoot {
+                path: vault_root.to_path_buf(),
+                source,
+            }
+        })?;
+        let ignored_runtime_root = canonical_root.join(".tao");
+        let generation = Arc::new(AtomicU64::new(0));
+        let generation_ref = Arc::clone(&generation);
+        let ignored_runtime_root_ref = ignored_runtime_root.clone();
+
+        let mut watcher =
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                let should_mark_dirty = match result {
+                    Ok(event) => event
+                        .paths
+                        .iter()
+                        .any(|path| !path.starts_with(&ignored_runtime_root_ref)),
+                    Err(_) => true,
+                };
+                if should_mark_dirty {
+                    generation_ref.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .map_err(|source| VaultChangeMonitorError::CreateWatcher { source })?;
+        watcher
+            .watch(&canonical_root, RecursiveMode::Recursive)
+            .map_err(|source| VaultChangeMonitorError::WatchRoot {
+                path: canonical_root.clone(),
+                source,
+            })?;
+
+        Ok(Self {
+            generation,
+            _watcher: watcher,
+        })
+    }
+
+    /// Return the current change generation.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+}
+
 /// Watch adapter failures.
 #[derive(Debug, Error)]
 pub enum WatchReconcileError {
@@ -78,9 +145,41 @@ pub enum WatchReconcileError {
     },
 }
 
+/// Vault change monitor failures.
+#[derive(Debug, Error)]
+pub enum VaultChangeMonitorError {
+    /// Vault root canonicalization failed.
+    #[error("failed to canonicalize vault root '{path}': {source}")]
+    CanonicalizeRoot {
+        /// Input vault path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Watcher creation failed.
+    #[error("failed to create filesystem watcher: {source}")]
+    CreateWatcher {
+        /// Watcher backend error.
+        #[source]
+        source: notify::Error,
+    },
+    /// Registering the vault root with the watcher failed.
+    #[error("failed to watch vault root '{path}': {source}")]
+    WatchRoot {
+        /// Canonical watched root.
+        path: PathBuf,
+        /// Watcher backend error.
+        #[source]
+        source: notify::Error,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use rusqlite::Connection;
     use tao_sdk_service::FullIndexService;
@@ -88,7 +187,7 @@ mod tests {
     use tao_sdk_vault::CasePolicy;
     use tempfile::tempdir;
 
-    use super::WatchReconcileService;
+    use super::{VaultChangeMonitor, WatchReconcileService};
 
     #[test]
     fn reconcile_once_detects_changed_paths() {
@@ -110,5 +209,27 @@ mod tests {
             .expect("reconcile");
         assert!(result.updated_paths >= 1);
         assert!(result.upserted_files >= 1);
+    }
+
+    #[test]
+    fn change_monitor_marks_generation_when_vault_content_changes() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(vault.join("notes")).expect("create notes");
+        fs::write(vault.join("notes/a.md"), "# A").expect("write seed");
+
+        let monitor = VaultChangeMonitor::start(&vault).expect("start monitor");
+        let before = monitor.generation();
+        fs::write(vault.join("notes/a.md"), "# A\nupdated").expect("update note");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if monitor.generation() > before {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        panic!("expected watcher generation to advance after note update");
     }
 }

@@ -24,18 +24,20 @@ use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_search::{
     LogicalPlanBuilder, LogicalQueryPlanRequest, PhysicalPlanBuilder, PhysicalPlanOptimizer,
     SearchQueryProjectedItem, SearchQueryProjection, SearchQueryRequest, SearchQueryService,
-    apply_sort, apply_where_filter, parse_sort_keys, parse_where_expression_opt,
+    SortKey, WhereExpr, apply_sort, apply_where_filter, parse_sort_keys,
+    parse_where_expression_opt,
 };
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphWalkDirection,
     GraphWalkRequest, HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
+    ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, TasksRepository,
     preflight_migrations, run_migrations,
 };
-use tao_sdk_vault::CasePolicy;
-use tao_sdk_watch::WatchReconcileService;
+use tao_sdk_vault::{CasePolicy, PathCanonicalizationService, validate_relative_vault_path};
+use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
 
 mod commands;
 
@@ -794,14 +796,113 @@ fn query_docs_projection(columns: &[QueryDocsColumn]) -> SearchQueryProjection {
     }
 }
 
-fn collect_docs_items_for_post_filters(
+#[derive(Debug)]
+struct QueryPostFilterAccumulator {
+    offset: usize,
+    limit: usize,
+    sort_keys: Vec<SortKey>,
+    total: u64,
+    rows: Vec<serde_json::Map<String, JsonValue>>,
+}
+
+impl QueryPostFilterAccumulator {
+    fn new(offset: u32, limit: u32, sort_keys: &[SortKey]) -> Self {
+        Self {
+            offset: offset as usize,
+            limit: limit as usize,
+            sort_keys: sort_keys.to_vec(),
+            total: 0,
+            rows: Vec::new(),
+        }
+    }
+
+    fn push_batch(&mut self, batch: Vec<serde_json::Map<String, JsonValue>>) {
+        if self.sort_keys.is_empty() {
+            for row in batch {
+                let row_index = usize::try_from(self.total).unwrap_or(usize::MAX);
+                self.total = self.total.saturating_add(1);
+                if row_index < self.offset {
+                    continue;
+                }
+                if self.rows.len() < self.limit {
+                    self.rows.push(row);
+                }
+            }
+            return;
+        }
+
+        let window_size = self.offset.saturating_add(self.limit);
+        for row in batch {
+            self.total = self.total.saturating_add(1);
+            if window_size == 0 {
+                continue;
+            }
+            self.rows.push(row);
+            apply_sort(&mut self.rows, &self.sort_keys);
+            if self.rows.len() > window_size {
+                self.rows.pop();
+            }
+        }
+    }
+
+    fn finish(mut self) -> (u64, Vec<JsonValue>) {
+        let rows = if self.sort_keys.is_empty() {
+            self.rows
+        } else {
+            self.rows = self
+                .rows
+                .into_iter()
+                .skip(self.offset)
+                .take(self.limit)
+                .collect::<Vec<_>>();
+            self.rows
+        };
+        (
+            self.total,
+            rows.into_iter().map(JsonValue::Object).collect::<Vec<_>>(),
+        )
+    }
+}
+
+fn apply_post_filter_batch(
+    batch: Vec<serde_json::Map<String, JsonValue>>,
+    where_expr: Option<&WhereExpr>,
+) -> Result<Vec<serde_json::Map<String, JsonValue>>> {
+    apply_where_filter(batch, where_expr)
+        .map_err(|source| anyhow!("evaluate --where failed: {source}"))
+}
+
+fn flatten_base_query_row(
+    row: serde_json::Map<String, JsonValue>,
+) -> serde_json::Map<String, JsonValue> {
+    let mut flattened = serde_json::Map::<String, JsonValue>::new();
+    if let Some(file_id) = row.get("file_id") {
+        flattened.insert("file_id".to_string(), file_id.clone());
+    }
+    if let Some(file_path) = row.get("file_path") {
+        flattened.insert("path".to_string(), file_path.clone());
+    }
+    if let Some(values) = row.get("values").and_then(JsonValue::as_object) {
+        for (key, value) in values {
+            flattened.insert(key.clone(), value.clone());
+        }
+    }
+    flattened
+}
+
+fn collect_docs_rows_for_where_only(
     runtime: &mut RuntimeMode,
     resolved: &ResolvedVaultPathArgs,
     query: &str,
-) -> Result<Vec<SearchQueryProjectedItem>> {
+    columns: &[QueryDocsColumn],
+    where_expr: &WhereExpr,
+    limit: u32,
+    offset: u32,
+) -> Result<(u64, Vec<JsonValue>)> {
     with_connection(runtime, resolved, |connection| {
-        let mut offset = 0_u64;
-        let mut items = Vec::new();
+        let mut query_offset = 0_u64;
+        let mut total = 0_u64;
+        let mut rows = Vec::new();
 
         loop {
             let page = SearchQueryService.query_projected(
@@ -810,25 +911,39 @@ fn collect_docs_items_for_post_filters(
                 SearchQueryRequest {
                     query: query.to_string(),
                     limit: QUERY_DOCS_POST_FILTER_PAGE_LIMIT,
-                    offset,
+                    offset: query_offset,
                 },
                 SearchQueryProjection::default(),
             )?;
-
             let batch_count = u64::try_from(page.items.len()).unwrap_or(u64::MAX);
-            let total = page.total;
-            items.extend(page.items);
-
             if batch_count == 0 {
                 break;
             }
-            offset = offset.saturating_add(batch_count);
-            if offset >= total {
+
+            let batch_rows = page
+                .items
+                .into_iter()
+                .filter_map(|item| match project_query_docs_row(item, columns) {
+                    JsonValue::Object(map) => Some(map),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let filtered = apply_where_filter(batch_rows, Some(where_expr))
+                .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
+            for row in filtered {
+                if total >= u64::from(offset) && rows.len() < limit as usize {
+                    rows.push(JsonValue::Object(row));
+                }
+                total = total.saturating_add(1);
+            }
+
+            query_offset = query_offset.saturating_add(batch_count);
+            if query_offset >= page.total {
                 break;
             }
         }
 
-        Ok(items)
+        Ok((total, rows))
     })
 }
 
@@ -958,7 +1073,9 @@ struct CommandResult {
 #[derive(Debug, Clone)]
 struct ResolvedVaultPathArgs {
     vault_root: String,
+    data_dir: String,
     db_path: String,
+    case_policy: CasePolicy,
     read_only: bool,
 }
 
@@ -974,13 +1091,21 @@ struct ExtractedTask {
 struct RuntimeCache {
     kernels: HashMap<String, BridgeKernel>,
     connections: HashMap<String, Connection>,
-    command_results: HashMap<String, CommandResult>,
+    command_results: HashMap<String, CachedCommandResult>,
+    change_monitors: HashMap<String, VaultChangeMonitor>,
+    last_reconciled_generation: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCommandResult {
+    runtime_key: String,
+    result: CommandResult,
 }
 
 #[derive(Debug)]
 enum RuntimeMode {
     OneShot,
-    Daemon(RuntimeCache),
+    Daemon(Box<RuntimeCache>),
 }
 
 #[derive(Debug, Serialize)]
@@ -1249,6 +1374,9 @@ fn handle_doc(
                     "path": ack.path,
                     "file_id": ack.file_id,
                     "action": ack.action,
+                    "index_synced": ack.index_synced,
+                    "event_logged": ack.event_logged,
+                    "warnings": ack.warnings,
                 }),
             })
         }
@@ -1967,7 +2095,8 @@ fn handle_task(
         TaskCommands::SetState(args) => {
             let resolved = args.resolve()?;
             ensure_writes_enabled(allow_writes, resolved.read_only, "task.set-state")?;
-            let absolute = Path::new(&resolved.vault_root).join(&args.path);
+            let absolute = resolve_existing_vault_note_path(&resolved, &args.path)
+                .map_err(|source| anyhow!("resolve task note path '{}': {source}", args.path))?;
             let markdown = fs::read_to_string(&absolute)
                 .with_context(|| format!("read markdown note '{}'", absolute.display()))?;
             let mut lines = markdown.lines().map(str::to_string).collect::<Vec<_>>();
@@ -1993,7 +2122,7 @@ fn handle_task(
                     .reconcile_once(
                         Path::new(&resolved.vault_root),
                         connection,
-                        CasePolicy::Sensitive,
+                        resolved.case_policy,
                     )
                     .map_err(|source| anyhow!("reconcile after task state update failed: {source}"))
             })?;
@@ -2084,25 +2213,62 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
         let query = args.query.clone().unwrap_or_default();
 
         let (total, rows) = if apply_post_filters {
-            let mut row_maps = collect_docs_items_for_post_filters(runtime, &resolved, &query)
-                .map_err(|source| anyhow!("query docs failed: {source}"))?
-                .into_iter()
-                .filter_map(|item| match project_query_docs_row(item, &columns) {
-                    JsonValue::Object(map) => Some(map),
-                    _ => None,
+            if sort_keys.is_empty() {
+                collect_docs_rows_for_where_only(
+                    runtime,
+                    &resolved,
+                    &query,
+                    &columns,
+                    where_expr
+                        .as_ref()
+                        .expect("apply_post_filters implies where expr when no sort keys"),
+                    limit,
+                    args.offset,
+                )?
+            } else {
+                let mut accumulator =
+                    QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
+                with_connection(runtime, &resolved, |connection| {
+                    let mut query_offset = 0_u64;
+
+                    loop {
+                        let page = SearchQueryService.query_projected(
+                            Path::new(&resolved.vault_root),
+                            connection,
+                            SearchQueryRequest {
+                                query: query.clone(),
+                                limit: QUERY_DOCS_POST_FILTER_PAGE_LIMIT,
+                                offset: query_offset,
+                            },
+                            SearchQueryProjection::default(),
+                        )?;
+                        let batch_count = u64::try_from(page.items.len()).unwrap_or(u64::MAX);
+                        if batch_count == 0 {
+                            break;
+                        }
+
+                        let batch_rows = page
+                            .items
+                            .into_iter()
+                            .filter_map(|item| match project_query_docs_row(item, &columns) {
+                                JsonValue::Object(map) => Some(map),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
+                        accumulator.push_batch(filtered);
+
+                        query_offset = query_offset.saturating_add(batch_count);
+                        if query_offset >= page.total {
+                            break;
+                        }
+                    }
+
+                    Ok::<(), anyhow::Error>(())
                 })
-                .collect::<Vec<_>>();
-            row_maps = apply_where_filter(row_maps, where_expr.as_ref())
-                .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
-            apply_sort(&mut row_maps, &sort_keys);
-            let total = u64::try_from(row_maps.len()).unwrap_or(u64::MAX);
-            let rows = row_maps
-                .into_iter()
-                .skip(args.offset as usize)
-                .take(limit as usize)
-                .map(JsonValue::Object)
-                .collect::<Vec<_>>();
-            (total, rows)
+                .map_err(|source| anyhow!("query docs failed: {source}"))?;
+                accumulator.finish()
+            }
         } else {
             let page = with_connection(runtime, &resolved, |connection| {
                 Ok(SearchQueryService.query_projected(
@@ -2211,75 +2377,125 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
             });
         }
 
-        let result = handle_base(
-            BaseCommands::View(BaseViewArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-                path_or_id: base_id_or_path.to_string(),
-                view_name,
-                page: 1,
-                page_size: 10_000,
-            }),
-            runtime,
-        )?;
-        let base_id = result
-            .args
-            .get("base_id")
-            .cloned()
-            .unwrap_or(JsonValue::String(base_id_or_path.to_string()));
-        let file_path = result
-            .args
-            .get("file_path")
-            .cloned()
-            .unwrap_or(JsonValue::Null);
-        let view_name = result
-            .args
-            .get("view_name")
-            .cloned()
-            .unwrap_or(JsonValue::Null);
-        let source_rows = result
-            .args
-            .get("rows")
-            .and_then(JsonValue::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut row_maps = source_rows
-            .into_iter()
-            .filter_map(|row| row.as_object().cloned())
-            .map(|row| {
-                let mut flattened = serde_json::Map::<String, JsonValue>::new();
-                if let Some(file_id) = row.get("file_id") {
-                    flattened.insert("file_id".to_string(), file_id.clone());
+        let fast_page_size = args.offset.saturating_add(limit);
+        let (base_id, file_path, view_name, total, rows) = if where_expr.is_none()
+            && sort_keys.is_empty()
+        {
+            let result = handle_base(
+                BaseCommands::View(BaseViewArgs {
+                    vault_root: args.vault_root.clone(),
+                    db_path: args.db_path.clone(),
+                    path_or_id: base_id_or_path.to_string(),
+                    view_name: view_name.clone(),
+                    page: 1,
+                    page_size: fast_page_size.max(1),
+                }),
+                runtime,
+            )?;
+            let base_id = result
+                .args
+                .get("base_id")
+                .cloned()
+                .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string()));
+            let file_path = result
+                .args
+                .get("file_path")
+                .cloned()
+                .unwrap_or(JsonValue::Null);
+            let view_name = result
+                .args
+                .get("view_name")
+                .cloned()
+                .unwrap_or_else(|| JsonValue::String(view_name.clone()));
+            let total = result
+                .args
+                .get("total")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let rows = result
+                .args
+                .get("rows")
+                .and_then(JsonValue::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .skip(args.offset as usize)
+                .take(limit as usize)
+                .collect::<Vec<_>>();
+            (base_id, file_path, view_name, total, rows)
+        } else {
+            const QUERY_BASE_PAGE_SIZE: u32 = 512;
+            let mut accumulator = QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
+            let mut page = 1_u32;
+
+            loop {
+                let result = handle_base(
+                    BaseCommands::View(BaseViewArgs {
+                        vault_root: args.vault_root.clone(),
+                        db_path: args.db_path.clone(),
+                        path_or_id: base_id_or_path.to_string(),
+                        view_name: view_name.clone(),
+                        page,
+                        page_size: QUERY_BASE_PAGE_SIZE,
+                    }),
+                    runtime,
+                )?;
+                let batch_rows = result
+                    .args
+                    .get("rows")
+                    .and_then(JsonValue::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|row| row.as_object().cloned())
+                    .map(flatten_base_query_row)
+                    .collect::<Vec<_>>();
+                let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
+                accumulator.push_batch(filtered);
+
+                let has_more = result
+                    .args
+                    .get("has_more")
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false);
+                if !has_more {
+                    let (total, rows) = accumulator.finish();
+                    let rows = rows
+                        .into_iter()
+                        .filter_map(|row| row.as_object().cloned())
+                        .map(|mut row| {
+                            let file_id = row.remove("file_id").unwrap_or(JsonValue::Null);
+                            let file_path = row.remove("path").unwrap_or(JsonValue::Null);
+                            serde_json::json!({
+                                "file_id": file_id,
+                                "file_path": file_path,
+                                "values": row,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    break (
+                        result
+                            .args
+                            .get("base_id")
+                            .cloned()
+                            .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string())),
+                        result
+                            .args
+                            .get("file_path")
+                            .cloned()
+                            .unwrap_or(JsonValue::Null),
+                        result
+                            .args
+                            .get("view_name")
+                            .cloned()
+                            .unwrap_or_else(|| JsonValue::String(view_name.clone())),
+                        total,
+                        rows,
+                    );
                 }
-                if let Some(file_path) = row.get("file_path") {
-                    flattened.insert("path".to_string(), file_path.clone());
-                }
-                if let Some(values) = row.get("values").and_then(JsonValue::as_object) {
-                    for (key, value) in values {
-                        flattened.insert(key.clone(), value.clone());
-                    }
-                }
-                flattened
-            })
-            .collect::<Vec<_>>();
-        row_maps = apply_where_filter(row_maps, where_expr.as_ref())
-            .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
-        apply_sort(&mut row_maps, &sort_keys);
-        let total = u64::try_from(row_maps.len()).unwrap_or(u64::MAX);
-        let rows = row_maps
-            .into_iter()
-            .skip(args.offset as usize)
-            .take(limit as usize)
-            .map(|mut row| {
-                let file_id = row.remove("file_id").unwrap_or(JsonValue::Null);
-                let file_path = row.remove("path").unwrap_or(JsonValue::Null);
-                serde_json::json!({
-                    "file_id": file_id,
-                    "file_path": file_path,
-                    "values": row,
-                })
-            })
-            .collect::<Vec<_>>();
+                page = page.saturating_add(1);
+            }
+        };
 
         let mut args_payload = serde_json::json!({
             "from": from,
@@ -2306,14 +2522,57 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
 
     if from.eq_ignore_ascii_case("graph") {
         let graph_result = if let Some(path) = &args.path {
-            handle_graph(
-                GraphCommands::Outgoing(NotePathArgs {
-                    vault_root: args.vault_root.clone(),
-                    db_path: args.db_path.clone(),
-                    path: path.clone(),
+            let resolved = args.resolve()?;
+            let panels = with_kernel(runtime, &resolved, |kernel| {
+                expect_bridge_value(kernel.note_links(path), "query.graph")
+            })?;
+            let outgoing = panels
+                .outgoing
+                .iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "direction": "outgoing",
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let backlinks = panels
+                .backlinks
+                .iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "direction": "backlinks",
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut items = outgoing.clone();
+            items.extend(backlinks.clone());
+            CommandResult {
+                command: "graph.links".to_string(),
+                summary: "graph links completed".to_string(),
+                args: serde_json::json!({
+                    "path": path,
+                    "outgoing_total": outgoing.len(),
+                    "backlinks_total": backlinks.len(),
+                    "total": outgoing.len() + backlinks.len(),
+                    "outgoing": outgoing,
+                    "backlinks": backlinks,
+                    "items": items,
                 }),
-                runtime,
-            )?
+            }
         } else {
             handle_graph(
                 GraphCommands::Unresolved(GraphWindowArgs {
@@ -2483,7 +2742,7 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
                     .reconcile_once(
                         Path::new(&resolved.vault_root),
                         connection,
-                        CasePolicy::Sensitive,
+                        resolved.case_policy,
                     )
                     .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
                 let totals = query_index_totals(connection)
@@ -2514,7 +2773,7 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
                     .reconcile_once(
                         Path::new(&resolved.vault_root),
                         connection,
-                        CasePolicy::Sensitive,
+                        resolved.case_policy,
                     )
                     .map_err(|source| anyhow!("vault reconcile failed: {source}"))
             })?;
@@ -2686,6 +2945,75 @@ fn command_is_cacheable(command: &Commands) -> bool {
             VaultCommands::Stats(_) | VaultCommands::Preflight(_)
         ),
     }
+}
+
+fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> Result<bool> {
+    let RuntimeMode::Daemon(_) = runtime else {
+        return Ok(false);
+    };
+    if !command_is_cacheable(command) {
+        return Ok(false);
+    }
+
+    let Some(resolved) = resolve_command_vault_paths(command)? else {
+        return Ok(false);
+    };
+    let runtime_key = runtime_cache_key(&resolved);
+    let current_generation = if let RuntimeMode::Daemon(cache) = runtime {
+        if !cache.change_monitors.contains_key(&runtime_key) {
+            let monitor =
+                VaultChangeMonitor::start(Path::new(&resolved.vault_root)).with_context(|| {
+                    format!(
+                        "start daemon filesystem monitor for vault '{}'",
+                        resolved.vault_root
+                    )
+                })?;
+            cache.change_monitors.insert(runtime_key.clone(), monitor);
+        }
+        cache
+            .change_monitors
+            .get(&runtime_key)
+            .map(VaultChangeMonitor::generation)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    if let RuntimeMode::Daemon(cache) = runtime
+        && cache
+            .last_reconciled_generation
+            .get(&runtime_key)
+            .is_some_and(|generation| *generation == current_generation)
+    {
+        return Ok(false);
+    }
+
+    let reconcile = with_connection(runtime, &resolved, |connection| {
+        WatchReconcileService::default()
+            .reconcile_once(
+                Path::new(&resolved.vault_root),
+                connection,
+                resolved.case_policy,
+            )
+            .map_err(|source| anyhow!("daemon reconcile failed: {source}"))
+    })?;
+
+    if let RuntimeMode::Daemon(cache) = runtime {
+        cache
+            .last_reconciled_generation
+            .insert(runtime_key.clone(), current_generation);
+        if reconcile.drift_paths > 0 {
+            clear_cached_results_for_runtime(cache, &runtime_key);
+        }
+    }
+
+    Ok(reconcile.drift_paths > 0)
+}
+
+fn clear_cached_results_for_runtime(cache: &mut RuntimeCache, runtime_key: &str) {
+    cache
+        .command_results
+        .retain(|_, entry| entry.runtime_key != runtime_key);
 }
 
 fn resolve_daemon_socket(
@@ -3047,7 +3375,7 @@ fn run_daemon_server(socket: &str) -> Result<()> {
 
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("bind daemon socket '{socket}'"))?;
-        let mut runtime = RuntimeMode::Daemon(RuntimeCache::default());
+        let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
         let started_at = Instant::now();
         let mut should_shutdown = false;
 
@@ -3063,6 +3391,9 @@ fn run_daemon_server(socket: &str) -> Result<()> {
             let response = match request {
                 DaemonRequest::Execute { payload } => {
                     let cacheable = command_is_cacheable(&payload.command);
+                    maybe_refresh_daemon_state(&payload.command, &mut runtime)?;
+                    let resolved = resolve_command_vault_paths(&payload.command)?;
+                    let runtime_key = resolved.as_ref().map(runtime_cache_key);
                     let cache_key = if cacheable {
                         daemon_cache_key(&payload.command).ok()
                     } else {
@@ -3070,7 +3401,10 @@ fn run_daemon_server(socket: &str) -> Result<()> {
                     };
                     let cached =
                         if let (RuntimeMode::Daemon(cache), Some(key)) = (&runtime, &cache_key) {
-                            cache.command_results.get(key).cloned()
+                            cache
+                                .command_results
+                                .get(key)
+                                .map(|entry| entry.result.clone())
                         } else {
                             None
                         };
@@ -3088,7 +3422,18 @@ fn run_daemon_server(socket: &str) -> Result<()> {
                         Ok(result) => {
                             if let RuntimeMode::Daemon(cache) = &mut runtime {
                                 if let Some(key) = cache_key {
-                                    cache.command_results.insert(key, result.clone());
+                                    let cache_runtime_key = runtime_key
+                                        .clone()
+                                        .unwrap_or_else(|| "<global>".to_string());
+                                    cache.command_results.insert(
+                                        key,
+                                        CachedCommandResult {
+                                            runtime_key: cache_runtime_key,
+                                            result: result.clone(),
+                                        },
+                                    );
+                                } else if let Some(runtime_key) = runtime_key.as_deref() {
+                                    clear_cached_results_for_runtime(cache, runtime_key);
                                 } else {
                                     cache.command_results.clear();
                                 }
@@ -3364,8 +3709,25 @@ fn update_task_line_state(line: &str, state: &str) -> Result<String> {
     Ok(format!("{indent}- {marker} {content}"))
 }
 
+fn resolve_existing_vault_note_path(
+    resolved: &ResolvedVaultPathArgs,
+    path: &str,
+) -> Result<PathBuf> {
+    validate_relative_vault_path(path).map_err(|source| anyhow!(source.to_string()))?;
+    let canonicalizer =
+        PathCanonicalizationService::new(&resolved.vault_root, resolved.case_policy)
+            .map_err(|source| anyhow!("create vault canonicalizer failed: {source}"))?;
+    canonicalizer
+        .canonicalize(Path::new(path))
+        .map(|canonical| canonical.absolute)
+        .map_err(|source| anyhow!("canonicalize vault note path failed: {source}"))
+}
+
 fn runtime_cache_key(args: &ResolvedVaultPathArgs) -> String {
-    format!("{}\u{1f}{}", args.vault_root, args.db_path)
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
+        args.vault_root, args.data_dir, args.db_path, args.case_policy, args.read_only
+    )
 }
 
 fn with_connection<T>(
@@ -3432,13 +3794,16 @@ fn resolve_vault_paths(
 
     Ok(ResolvedVaultPathArgs {
         vault_root: config.vault_root.to_string_lossy().to_string(),
+        data_dir: config.data_dir.to_string_lossy().to_string(),
         db_path: config.db_path.to_string_lossy().to_string(),
+        case_policy: config.case_policy,
         read_only: config.read_only,
     })
 }
 
 fn open_bridge_kernel(args: &ResolvedVaultPathArgs) -> Result<BridgeKernel> {
-    BridgeKernel::open(&args.vault_root, &args.db_path)
+    ensure_runtime_paths_for_args(args)?;
+    BridgeKernel::open_with_case_policy(&args.vault_root, &args.db_path, args.case_policy)
         .map_err(|source| anyhow!("open bridge kernel failed: {source}"))
 }
 
@@ -3488,10 +3853,24 @@ fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connectio
         ));
     }
 
+    ensure_runtime_paths_for_args(args)?;
     let mut connection = Connection::open(&args.db_path)
         .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
     run_migrations(&mut connection).map_err(|source| anyhow!("run migrations failed: {source}"))?;
     Ok(connection)
+}
+
+fn ensure_runtime_paths_for_args(args: &ResolvedVaultPathArgs) -> Result<()> {
+    ensure_runtime_paths(&tao_sdk_service::SdkConfig {
+        vault_root: PathBuf::from(&args.vault_root),
+        data_dir: PathBuf::from(&args.data_dir),
+        db_path: PathBuf::from(&args.db_path),
+        case_policy: args.case_policy,
+        tracing_enabled: true,
+        feature_flags: Vec::new(),
+        read_only: args.read_only,
+    })
+    .map_err(|source| anyhow!("prepare runtime paths failed: {source}"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3547,10 +3926,11 @@ mod tests {
 
     use super::{
         Cli, Commands, DaemonCommands, DaemonSocketArgs, DaemonStopAllArgs, DocCommands,
-        NotePutArgs, QueryArgs, command_is_cacheable, derive_daemon_socket_for_vault, dispatch,
-        handle_daemon, maybe_forward_to_daemon, maybe_render_streaming_output,
+        NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode, VaultPathArgs, command_is_cacheable,
+        derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime, handle_daemon,
+        maybe_forward_to_daemon, maybe_refresh_daemon_state, maybe_render_streaming_output,
         prepare_daemon_socket_path, render_error_output, render_output,
-        resolve_command_vault_paths, resolve_daemon_socket_for_cli,
+        resolve_command_vault_paths, resolve_daemon_socket_for_cli, runtime_cache_key,
     };
     use clap::{CommandFactory, Parser};
     use serde_json::Value as JsonValue;
@@ -4141,6 +4521,65 @@ mod tests {
     }
 
     #[test]
+    fn task_set_state_rejects_paths_outside_the_vault_boundary() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            let outside_path = tempdir.path().join("outside.md");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/tasks.md"), "- [ ] inside task\n")
+                .expect("write note");
+            fs::write(&outside_path, "- [ ] outside task\n").expect("write outside");
+
+            let absolute = Cli::parse_from([
+                "tao",
+                "--json",
+                "--allow-writes",
+                "task",
+                "set-state",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                outside_path.to_string_lossy().as_ref(),
+                "--line",
+                "1",
+                "--state",
+                "done",
+            ]);
+            let absolute_error = dispatch(absolute.command, absolute.allow_writes)
+                .expect_err("absolute path should be rejected");
+            assert!(absolute_error.to_string().contains("vault-relative"));
+            assert_eq!(
+                fs::read_to_string(&outside_path).expect("read outside after absolute attempt"),
+                "- [ ] outside task\n"
+            );
+
+            let parent = Cli::parse_from([
+                "tao",
+                "--json",
+                "--allow-writes",
+                "task",
+                "set-state",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "../outside.md",
+                "--line",
+                "1",
+                "--state",
+                "done",
+            ]);
+            let parent_error = dispatch(parent.command, parent.allow_writes)
+                .expect_err("parent traversal should be rejected");
+            assert!(parent_error.to_string().contains("traverse"));
+            assert_eq!(
+                fs::read_to_string(&outside_path).expect("read outside after traversal attempt"),
+                "- [ ] outside task\n"
+            );
+        });
+    }
+
+    #[test]
     fn vault_commands_use_configured_default_root_when_vault_root_arg_is_omitted() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -4475,6 +4914,96 @@ read_only = false
     }
 
     #[test]
+    fn query_docs_sort_scans_full_match_set_before_pagination() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            let notes_dir = vault_root.join("notes");
+            fs::create_dir_all(&notes_dir).expect("create notes");
+
+            for index in 0..1105_u32 {
+                let stem = format!("note-{index:04}");
+                fs::write(
+                    notes_dir.join(format!("{stem}.md")),
+                    format!("# {stem}\nproject"),
+                )
+                .expect("write note");
+            }
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--sort",
+                "path:asc",
+                "--select",
+                "path,title",
+                "--limit",
+                "5",
+                "--offset",
+                "1000",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(JsonValue::as_object)
+                .expect("args object");
+            assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(1105));
+            let rows = args
+                .get("rows")
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            let paths = rows
+                .iter()
+                .map(|row| {
+                    row.get("path")
+                        .and_then(JsonValue::as_str)
+                        .expect("path")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                vec![
+                    "notes/note-1000.md",
+                    "notes/note-1001.md",
+                    "notes/note-1002.md",
+                    "notes/note-1003.md",
+                    "notes/note-1004.md",
+                ]
+            );
+        });
+    }
+
+    #[test]
     fn query_docs_explain_returns_plan_without_rows_when_not_executing() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -4642,6 +5171,106 @@ priority: 2
                     .and_then(JsonValue::as_str)
                     == Some("active")
             }));
+        });
+    }
+
+    #[test]
+    fn query_base_where_and_sort_scan_all_base_pages_before_pagination() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create projects");
+            fs::create_dir_all(vault_root.join("views")).expect("create views");
+
+            fs::write(
+                vault_root.join("views/projects.base"),
+                r#"
+views:
+  - name: AllProjects
+    type: table
+    source: notes/projects
+    columns:
+      - title
+      - priority
+"#,
+            )
+            .expect("write base");
+
+            for priority in 1..=700_u32 {
+                fs::write(
+                    vault_root.join(format!("notes/projects/p-{priority:04}.md")),
+                    format!("---\npriority: {priority}\n---\n# P-{priority:04}\n"),
+                )
+                .expect("write project note");
+            }
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "base:views/projects.base",
+                "--view-name",
+                "AllProjects",
+                "--sort",
+                "priority:desc",
+                "--limit",
+                "5",
+                "--offset",
+                "650",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(JsonValue::as_object)
+                .expect("args object");
+
+            assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(700));
+            let rows = args
+                .get("rows")
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            let priorities = rows
+                .iter()
+                .map(|row| {
+                    row.get("values")
+                        .and_then(|value| value.get("priority"))
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(ToString::to_string)
+                                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                                .or_else(|| value.as_f64().map(|number| format!("{number:.0}")))
+                                .expect("priority")
+                        })
+                        .expect("priority value")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(priorities, vec!["50", "49", "48", "47", "46"]);
         });
     }
 
@@ -4814,6 +5443,81 @@ links fixture
                     scope, expected_total, total
                 );
             }
+        });
+    }
+
+    #[test]
+    fn query_graph_path_returns_outgoing_and_backlinks_panels() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A\n[[b]]\n").expect("write a");
+            fs::write(vault_root.join("notes/b.md"), "# B\n[[c]]\n").expect("write b");
+            fs::write(vault_root.join("notes/c.md"), "# C\n[[b]]\n").expect("write c");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "graph",
+                "--path",
+                "notes/b.md",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch graph query");
+            let output = render_output(cli.json, &result).expect("render graph query");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .expect("query args");
+            assert_eq!(
+                args.get("outgoing_total").and_then(JsonValue::as_u64),
+                Some(1)
+            );
+            assert_eq!(
+                args.get("backlinks_total").and_then(JsonValue::as_u64),
+                Some(2)
+            );
+            assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(3));
+            assert_eq!(
+                args.get("outgoing")
+                    .and_then(JsonValue::as_array)
+                    .map(Vec::len),
+                Some(1)
+            );
+            assert_eq!(
+                args.get("backlinks")
+                    .and_then(JsonValue::as_array)
+                    .map(Vec::len),
+                Some(2)
+            );
         });
     }
 
@@ -5727,6 +6431,74 @@ links fixture
         let result = operation();
         env::set_current_dir(&original_dir).expect("restore cwd");
         result
+    }
+
+    #[test]
+    fn daemon_refresh_uses_filesystem_monitor_to_pick_up_external_note_changes() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+
+            let command = Commands::Doc {
+                command: DocCommands::List(VaultPathArgs {
+                    vault_root: Some(vault_root.to_string_lossy().to_string()),
+                    db_path: None,
+                }),
+            };
+
+            let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
+            maybe_refresh_daemon_state(&command, &mut runtime).expect("prime daemon refresh");
+            let first = dispatch_with_runtime(command.clone(), false, &mut runtime)
+                .expect("dispatch first daemon list");
+            assert_eq!(first.args.get("total").and_then(JsonValue::as_u64), Some(1));
+
+            let resolved = resolve_command_vault_paths(&command)
+                .expect("resolve paths")
+                .expect("resolved args");
+            let runtime_key = runtime_cache_key(&resolved);
+            if let RuntimeMode::Daemon(cache) = &mut runtime {
+                let cache_key = serde_json::to_string(&command).expect("cache key");
+                cache.command_results.insert(
+                    cache_key,
+                    super::CachedCommandResult {
+                        runtime_key,
+                        result: first,
+                    },
+                );
+            }
+
+            fs::write(vault_root.join("notes/b.md"), "# B").expect("write b");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut refreshed = false;
+            while std::time::Instant::now() < deadline {
+                if maybe_refresh_daemon_state(&command, &mut runtime).expect("refresh daemon state")
+                {
+                    refreshed = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            assert!(
+                refreshed,
+                "expected daemon refresh after external note change"
+            );
+
+            if let RuntimeMode::Daemon(cache) = &runtime {
+                assert!(
+                    cache.command_results.is_empty(),
+                    "stale cached command results should be invalidated"
+                );
+            }
+
+            let second = dispatch_with_runtime(command, false, &mut runtime)
+                .expect("dispatch refreshed daemon list");
+            assert_eq!(
+                second.args.get("total").and_then(JsonValue::as_u64),
+                Some(2)
+            );
+        });
     }
 
     fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {

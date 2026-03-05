@@ -17,7 +17,8 @@ Checks (daemon warm path, profile 10k by default):
   - graph walk
   - meta tags
 
-The gate fails when any command p50 exceeds --budget-ms (default 10).
+The gate fails when any command p50 exceeds its configured case budget.
+Use --budget-ms to override all case budgets with one shared threshold.
 USAGE
 }
 
@@ -27,7 +28,9 @@ RUNS="20"
 WARMUP="5"
 OUTPUT_ROOT=".benchmarks/reports"
 BUDGET_MS=""
+BUDGET_OVERRIDE_SET=0
 BUDGET_CONFIG="plan/perf-budgets.json"
+CASE_BUDGETS_JSON="{}"
 SKIP_GENERATE=0
 FIXTURE_ROOT="vault/generated"
 FIXTURE_VAULT=""
@@ -68,6 +71,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --budget-ms)
       BUDGET_MS="${2:-}"
+      BUDGET_OVERRIDE_SET=1
       shift 2
       ;;
     --budget-config)
@@ -97,6 +101,7 @@ load_budget_defaults() {
   if [[ ! -f "$config_path" ]]; then
     PROFILE="${PROFILE:-$fallback_profile}"
     BUDGET_MS="${BUDGET_MS:-$fallback_budget}"
+    CASE_BUDGETS_JSON="{}"
     return
   fi
 
@@ -106,22 +111,58 @@ load_budget_defaults() {
     const [configPath, fallbackProfile, fallbackBudget] = process.argv.slice(1);
     let profile = fallbackProfile;
     let budget = fallbackBudget;
+    let caseBudgets = {};
     try {
       const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
       if (typeof raw.profile === "string" && raw.profile.length > 0) {
         profile = raw.profile;
       }
-      if (typeof raw.warm_read_p50_ms === "number" && Number.isFinite(raw.warm_read_p50_ms)) {
-        budget = String(raw.warm_read_p50_ms);
+      const warmBudget =
+        typeof raw.warm_read_p50_ms === "number" && Number.isFinite(raw.warm_read_p50_ms)
+          ? raw.warm_read_p50_ms
+          : Number(fallbackBudget);
+      const graphBudget =
+        typeof raw.graph_read_p50_ms === "number" && Number.isFinite(raw.graph_read_p50_ms)
+          ? raw.graph_read_p50_ms
+          : warmBudget;
+      const baseBudget =
+        typeof raw.base_read_p50_ms === "number" && Number.isFinite(raw.base_read_p50_ms)
+          ? raw.base_read_p50_ms
+          : warmBudget;
+      const queryBudget =
+        typeof raw.query_read_p50_ms === "number" && Number.isFinite(raw.query_read_p50_ms)
+          ? raw.query_read_p50_ms
+          : warmBudget;
+      budget = String(warmBudget);
+      caseBudgets = {
+        "query-docs": queryBudget,
+        "query-base": baseBudget,
+        "query-graph": graphBudget,
+        "graph-neighbors": graphBudget,
+        "graph-path": graphBudget,
+        "graph-walk": graphBudget,
+        "meta-tags": warmBudget
+      };
+      if (raw.case_budgets_p50_ms && typeof raw.case_budgets_p50_ms === "object") {
+        caseBudgets = {
+          ...caseBudgets,
+          ...Object.fromEntries(
+            Object.entries(raw.case_budgets_p50_ms).filter(
+              ([, value]) => typeof value === "number" && Number.isFinite(value)
+            )
+          )
+        };
       }
     } catch (_) {}
-    process.stdout.write(`${profile}\n${budget}\n`);
+    process.stdout.write(`${profile}\n${budget}\n${JSON.stringify(caseBudgets)}\n`);
   ' "$config_path" "$fallback_profile" "$fallback_budget")
-  local default_profile default_budget
+  local default_profile default_budget default_case_budgets
   default_profile="$(printf '%s\n' "$defaults" | sed -n '1p')"
   default_budget="$(printf '%s\n' "$defaults" | sed -n '2p')"
+  default_case_budgets="$(printf '%s\n' "$defaults" | sed -n '3p')"
   PROFILE="${PROFILE:-$default_profile}"
   BUDGET_MS="${BUDGET_MS:-$default_budget}"
+  CASE_BUDGETS_JSON="${default_case_budgets:-{}}"
 }
 
 load_budget_defaults "${BUDGET_CONFIG}"
@@ -160,10 +201,12 @@ FIXTURE_VAULT="${FIXTURE_ROOT}/vault-${PROFILE}"
 REPORT_DIR="${OUTPUT_ROOT}/${RUN_STAMP}/budgets"
 SUMMARY_JSON="${REPORT_DIR}/summary.json"
 SUMMARY_MD="${REPORT_DIR}/summary.md"
-mkdir -p "${REPORT_DIR}"
-ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 assert_safe_path "${OUTPUT_ROOT}" "budget output root"
 assert_safe_path "${FIXTURE_ROOT}" "fixture root"
+assert_safe_path "${REPORT_DIR}" "budget report dir"
+assert_safe_path "${OUTPUT_ROOT}/latest" "budget latest symlink"
+mkdir -p "${REPORT_DIR}"
+ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
@@ -255,8 +298,15 @@ bun --eval '
   const fs = require("node:fs");
   const path = require("node:path");
 
-  const [reportDir, summaryJsonPath, summaryMdPath, budgetRaw] = process.argv.slice(1);
-  const budgetMs = Number(budgetRaw);
+  const [reportDir, summaryJsonPath, summaryMdPath, budgetRaw, overrideFlagRaw, caseBudgetsRaw] = process.argv.slice(1);
+  const defaultBudgetMs = Number(budgetRaw);
+  const overrideAll = overrideFlagRaw === "1";
+  let caseBudgets = {};
+  try {
+    caseBudgets = JSON.parse(caseBudgetsRaw);
+  } catch (_) {
+    caseBudgets = {};
+  }
   const files = fs
     .readdirSync(reportDir)
     .filter((file) => file.endsWith(".json") && file !== "summary.json");
@@ -275,8 +325,13 @@ bun --eval '
       const timesSec = result.times ?? [];
       const p50Ms = percentile(timesSec, 50) * 1000;
       const p95Ms = percentile(timesSec, 95) * 1000;
+      const id = file.replace(/\.json$/, "");
+      const budgetMs = overrideAll
+        ? defaultBudgetMs
+        : (typeof caseBudgets[id] === "number" ? caseBudgets[id] : defaultBudgetMs);
       return {
-        id: file.replace(/\.json$/, ""),
+        id,
+        budget_p50_ms: Number(budgetMs.toFixed(3)),
         p50_ms: Number(p50Ms.toFixed(3)),
         p95_ms: Number(p95Ms.toFixed(3)),
         mean_ms: Number(((result.mean ?? 0) * 1000).toFixed(3)),
@@ -288,7 +343,8 @@ bun --eval '
   const status = checks.every((check) => check.pass) ? "pass" : "fail";
   const summary = {
     generated_at: new Date().toISOString(),
-    budget_p50_ms: budgetMs,
+    default_budget_p50_ms: defaultBudgetMs,
+    override_budget_p50_ms: overrideAll ? defaultBudgetMs : null,
     status,
     checks,
   };
@@ -298,23 +354,24 @@ bun --eval '
     "# Phase23 Read Budget Report",
     "",
     `- generated_at: \`${summary.generated_at}\``,
-    `- budget_p50_ms: \`${budgetMs}\``,
+    `- default_budget_p50_ms: \`${defaultBudgetMs}\``,
+    `- override_budget_p50_ms: \`${overrideAll ? defaultBudgetMs : "none"}\``,
     `- status: \`${status}\``,
     "",
-    "| command | p50_ms | p95_ms | mean_ms | status |",
-    "| --- | ---: | ---: | ---: | --- |",
+    "| command | budget_p50_ms | p50_ms | p95_ms | mean_ms | status |",
+    "| --- | ---: | ---: | ---: | ---: | --- |",
     ...checks.map((check) =>
-      `| ${check.id} | ${check.p50_ms.toFixed(3)} | ${check.p95_ms.toFixed(3)} | ${check.mean_ms.toFixed(3)} | ${check.pass ? "pass" : "fail"} |`
+      `| ${check.id} | ${check.budget_p50_ms.toFixed(3)} | ${check.p50_ms.toFixed(3)} | ${check.p95_ms.toFixed(3)} | ${check.mean_ms.toFixed(3)} | ${check.pass ? "pass" : "fail"} |`
     ),
     "",
   ].join("\n");
   fs.writeFileSync(summaryMdPath, `${markdown}\n`);
 
   if (status !== "pass") {
-    console.error(`budget gate failed: one or more checks exceeded ${budgetMs}ms p50`);
+    console.error("budget gate failed: one or more checks exceeded configured p50 budgets");
     process.exit(1);
   }
-  console.log(`budget gate passed: all checks <= ${budgetMs}ms p50`);
-' "${REPORT_DIR}" "${SUMMARY_JSON}" "${SUMMARY_MD}" "${BUDGET_MS}"
+  console.log("budget gate passed: all checks satisfied configured p50 budgets");
+' "${REPORT_DIR}" "${SUMMARY_JSON}" "${SUMMARY_MD}" "${BUDGET_MS}" "${BUDGET_OVERRIDE_SET}" "${CASE_BUDGETS_JSON}"
 
 echo "budget reports written under ${REPORT_DIR}"

@@ -153,11 +153,14 @@ STREAM_COMPARE_SUMMARY="${REPORT_DIR}/query-docs-stream-vs-standard.summary.json
 DAEMON_SOCKET=""
 DAEMON_RUNNING=0
 
-mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
-ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
-
 assert_safe_path "${OUTPUT_ROOT}" "benchmark output root"
 assert_safe_path "${FIXTURE_ROOT}" "fixture root"
+assert_safe_path "${REPORT_DIR}" "benchmark report dir"
+assert_safe_path "${CLI_MATRIX_REPORT_DIR}" "benchmark cli matrix report dir"
+assert_safe_path "${OUTPUT_ROOT}/latest" "benchmark latest symlink"
+
+mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
+ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then

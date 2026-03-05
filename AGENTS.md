@@ -134,8 +134,8 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 
 - Compact command surface:
     - `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
-- Compatibility aliases remain supported:
-    - `note`, `links`, `properties`, `bases`, `search`
+- Legacy aliases are removed from the public CLI:
+    - `note`, `links`, `properties`, `bases`, `search` must return unknown-command errors
 - JSON envelope contract for all `--json` commands:
     - `{ ok, value: { command, summary, args }, error }`
     - failures return `ok=false`, `value=null`, structured `error`.

@@ -28,6 +28,9 @@ jobs:
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
 
+      - name: safety
+        run: ./scripts/safety.sh --check-repo && ./scripts/tests/safety_test.sh
+
       - name: format
         run: cargo fmt --all -- --check
 

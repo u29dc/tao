@@ -21,7 +21,7 @@ mod tracing_hooks;
 
 pub use config::{
     SdkBootstrapError, SdkBootstrapService, SdkBootstrapSnapshot, SdkConfig, SdkConfigError,
-    SdkConfigLoader, SdkConfigOverrides,
+    SdkConfigLoader, SdkConfigOverrides, ensure_runtime_paths,
 };
 pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use import_export::{
@@ -265,6 +265,7 @@ pub struct NoteCrudResult {
 pub struct NoteCrudService {
     coordinator: SdkTransactionCoordinator,
     events: DomainEventBus,
+    case_policy: CasePolicy,
 }
 
 impl Default for NoteCrudService {
@@ -272,11 +273,21 @@ impl Default for NoteCrudService {
         Self {
             coordinator: SdkTransactionCoordinator,
             events: DomainEventBus::new(),
+            case_policy: CasePolicy::Sensitive,
         }
     }
 }
 
 impl NoteCrudService {
+    /// Create one service with explicit path case policy.
+    #[must_use]
+    pub fn with_case_policy(case_policy: CasePolicy) -> Self {
+        Self {
+            case_policy,
+            ..Self::default()
+        }
+    }
+
     /// Create a note file and persist corresponding file metadata.
     pub fn create_note(
         &self,
@@ -303,7 +314,8 @@ impl NoteCrudService {
                 source,
             })?;
 
-        let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
+        let record =
+            fingerprint_to_file_record(file_id, vault_root, relative_path, self.case_policy)?;
         if let Err(source) = self.coordinator.insert_file_metadata(connection, &record) {
             match fs::remove_file(&absolute) {
                 Ok(_) => {
@@ -357,7 +369,8 @@ impl NoteCrudService {
             source,
         })?;
 
-        let record = fingerprint_to_file_record(file_id, vault_root, relative_path)?;
+        let record =
+            fingerprint_to_file_record(file_id, vault_root, relative_path, self.case_policy)?;
         if let Err(source) = self
             .coordinator
             .replace_file_metadata(connection, file_id, &record)
@@ -492,7 +505,8 @@ impl NoteCrudService {
             source,
         })?;
 
-        let record = fingerprint_to_file_record(file_id, vault_root, new_relative_path)?;
+        let record =
+            fingerprint_to_file_record(file_id, vault_root, new_relative_path, self.case_policy)?;
         if let Err(source) = self
             .coordinator
             .replace_file_metadata(connection, file_id, &record)
@@ -758,8 +772,9 @@ fn fingerprint_to_file_record(
     file_id: &str,
     vault_root: &Path,
     relative_path: &Path,
+    case_policy: CasePolicy,
 ) -> Result<FileRecordInput, NoteCrudError> {
-    let fingerprint_service = FileFingerprintService::from_root(vault_root, CasePolicy::Sensitive)
+    let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
         .map_err(|source| NoteCrudError::FingerprintPath { source })?;
     let fingerprint = fingerprint_service
         .fingerprint(relative_path)

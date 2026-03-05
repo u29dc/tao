@@ -267,6 +267,35 @@ mod tests {
     }
 
     #[test]
+    fn query_supports_non_ascii_terms_with_unicode_casing() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(vault.join("notes")).expect("create notes");
+        fs::write(vault.join("notes/cafe.md"), "# Cafe\nCafé au lait").expect("write cafe");
+
+        let mut connection = Connection::open(temp.path().join("index.sqlite")).expect("open db");
+        run_migrations(&mut connection).expect("migrate");
+        FullIndexService::default()
+            .rebuild(&vault, &mut connection, CasePolicy::Sensitive)
+            .expect("rebuild");
+
+        let result = SearchQueryService
+            .query(
+                &vault,
+                &connection,
+                SearchQueryRequest {
+                    query: "CAFÉ".to_string(),
+                    limit: 50,
+                    offset: 0,
+                },
+            )
+            .expect("query non ascii");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].path, "notes/cafe.md");
+        assert!(result.items[0].matched_in.contains(&"content".to_string()));
+    }
+
+    #[test]
     fn query_applies_offset_and_limit() {
         let temp = tempdir().expect("tempdir");
         let vault = temp.path().join("vault");

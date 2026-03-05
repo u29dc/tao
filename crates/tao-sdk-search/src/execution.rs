@@ -45,7 +45,7 @@ pub fn execute_projected_query(
             value: request.offset,
         })?;
 
-    let needle = query.to_ascii_lowercase();
+    let needle = query.to_lowercase();
     let fts_query = parser::build_fts_query(query);
     let mut statement = connection
         .prepare_cached(
@@ -377,24 +377,17 @@ fn scalar_to_string(field: &str, value: &JsonValue) -> Result<String, QueryEvalE
 }
 
 fn value_contains_text(value: &JsonValue, needle: &str) -> bool {
+    let lowered_needle = needle.to_lowercase();
     match value {
         JsonValue::Array(values) => values
             .iter()
-            .any(|entry| value_contains_text(entry, needle)),
+            .any(|entry| value_contains_text(entry, &lowered_needle)),
         JsonValue::Object(values) => values
             .values()
-            .any(|entry| value_contains_text(entry, needle)),
-        JsonValue::String(value) => value
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase()),
-        JsonValue::Number(value) => value
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase()),
-        JsonValue::Bool(value) => value
-            .to_string()
-            .to_ascii_lowercase()
-            .contains(&needle.to_ascii_lowercase()),
+            .any(|entry| value_contains_text(entry, &lowered_needle)),
+        JsonValue::String(value) => value.to_lowercase().contains(&lowered_needle),
+        JsonValue::Number(value) => value.to_string().to_lowercase().contains(&lowered_needle),
+        JsonValue::Bool(value) => value.to_string().to_lowercase().contains(&lowered_needle),
         JsonValue::Null => false,
     }
 }

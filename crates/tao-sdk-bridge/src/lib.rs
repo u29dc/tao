@@ -16,12 +16,12 @@ use tao_sdk_bases::{
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, IncrementalIndexService,
-    NoteCrudService, WatcherStatus,
+    NoteCrudService, ReconciliationScannerService, WatcherStatus,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, run_migrations,
 };
-use tao_sdk_vault::CasePolicy;
+use tao_sdk_vault::{CasePolicy, validate_relative_vault_path};
 use thiserror::Error;
 
 pub use runtime::{BridgeStartupBundle, TaoBridgeRuntime, TaoBridgeRuntimeError};
@@ -90,6 +90,8 @@ pub const BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED: &str = "bridge.note_put.event_
 pub const BRIDGE_ERROR_EVENTS_POLL_INVALID_LIMIT: &str = "bridge.events_poll.invalid_limit";
 /// Bridge error code when events-poll database query fails.
 pub const BRIDGE_ERROR_EVENTS_POLL_FAILED: &str = "bridge.events_poll.failed";
+/// Bridge error code when startup bundle sync or query fails.
+pub const BRIDGE_ERROR_STARTUP_BUNDLE_FAILED: &str = "bridge.startup_bundle.failed";
 /// Bridge error code when serialization fails.
 pub const BRIDGE_ERROR_SERIALIZE_FAILED: &str = "bridge.serialize.failed";
 
@@ -372,6 +374,12 @@ pub struct BridgeWriteAck {
     pub file_id: String,
     /// Write action label.
     pub action: String,
+    /// Whether index refresh completed successfully.
+    pub index_synced: bool,
+    /// Whether event logging completed successfully.
+    pub event_logged: bool,
+    /// Follow-up warnings emitted after the file write succeeded.
+    pub warnings: Vec<String>,
 }
 
 /// Bridge event item exposed to Swift subscribers.
@@ -404,6 +412,7 @@ pub struct BridgeEventBatch {
 #[derive(Debug)]
 pub struct BridgeKernel {
     vault_root: PathBuf,
+    case_policy: CasePolicy,
     connection: Connection,
     parser: MarkdownParser,
 }
@@ -414,11 +423,26 @@ impl BridgeKernel {
         vault_root: impl AsRef<Path>,
         db_path: impl AsRef<Path>,
     ) -> Result<Self, BridgeInitError> {
+        Self::open_with_case_policy(vault_root, db_path, CasePolicy::Sensitive)
+    }
+
+    /// Open bridge runtime with explicit path case policy.
+    pub fn open_with_case_policy(
+        vault_root: impl AsRef<Path>,
+        db_path: impl AsRef<Path>,
+        case_policy: CasePolicy,
+    ) -> Result<Self, BridgeInitError> {
         let vault_root = vault_root.as_ref().to_path_buf();
         if !vault_root.exists() {
             return Err(BridgeInitError::VaultRootMissing { vault_root });
         }
 
+        if let Some(parent) = db_path.as_ref().parent() {
+            fs::create_dir_all(parent).map_err(|source| BridgeInitError::CreateDbParent {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
         let mut connection =
             Connection::open(db_path).map_err(|source| BridgeInitError::OpenDb { source })?;
         run_migrations(&mut connection)
@@ -428,6 +452,7 @@ impl BridgeKernel {
 
         Ok(Self {
             vault_root,
+            case_policy,
             connection,
             parser: MarkdownParser,
         })
@@ -439,7 +464,7 @@ impl BridgeKernel {
         BRIDGE_SCHEMA_VERSION
     }
 
-    /// Ensure bridge index contains at least one scan pass for the current vault.
+    /// Ensure bridge index is synchronized with the current vault filesystem.
     pub fn ensure_indexed(&mut self) -> Result<bool, BridgeEnsureIndexError> {
         let existing_markdown_rows = self
             .connection
@@ -451,15 +476,19 @@ impl BridgeKernel {
             .map_err(|source| BridgeEnsureIndexError::CountIndexedFiles { source })?;
 
         if existing_markdown_rows > 0 {
-            return Ok(false);
+            let reconcile = ReconciliationScannerService::default()
+                .scan_and_repair(
+                    &self.vault_root,
+                    &mut self.connection,
+                    self.case_policy,
+                    128,
+                )
+                .map_err(|source| BridgeEnsureIndexError::ReconcileIndex { source })?;
+            return Ok(reconcile.drift_paths > 0);
         }
 
         FullIndexService::default()
-            .rebuild(
-                &self.vault_root,
-                &mut self.connection,
-                CasePolicy::Sensitive,
-            )
+            .rebuild(&self.vault_root, &mut self.connection, self.case_policy)
             .map_err(|source| BridgeEnsureIndexError::RebuildIndex { source })?;
 
         Ok(true)
@@ -952,7 +981,7 @@ impl BridgeKernel {
             return BridgeEnvelope::failure(error);
         }
 
-        let note_service = NoteCrudService::default();
+        let note_service = NoteCrudService::with_case_policy(self.case_policy);
         let relative = Path::new(normalized_path);
         let existing =
             match FilesRepository::get_by_normalized_path(&self.connection, normalized_path) {
@@ -1079,40 +1108,53 @@ fn complete_note_put(
     result: tao_sdk_service::NoteCrudResult,
     action: &str,
 ) -> BridgeEnvelope<BridgeWriteAck> {
+    let mut warnings = Vec::new();
+    let mut index_synced = true;
     if let Err(source) = IncrementalIndexService::default().apply_changes_force(
         &kernel.vault_root,
         &mut kernel.connection,
         &[PathBuf::from(result.normalized_path.clone())],
-        CasePolicy::Sensitive,
+        kernel.case_policy,
     ) {
-        return BridgeEnvelope::failure(
-            BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_INDEX_FAILED, source.to_string())
-                .with_hint("run `vault reindex` to recover index state and retry")
-                .with_context("path", JsonValue::String(result.normalized_path))
-                .with_context("file_id", JsonValue::String(result.file_id))
-                .with_context("action", JsonValue::String(action.to_string())),
-        );
+        index_synced = false;
+        warnings.push(format!(
+            "incremental index refresh failed after write: {source}"
+        ));
+        if let Ok(reconcile) = ReconciliationScannerService::default().scan_and_repair(
+            &kernel.vault_root,
+            &mut kernel.connection,
+            kernel.case_policy,
+            128,
+        ) {
+            index_synced = true;
+            warnings.push(format!(
+                "recovered index state via scan_and_repair (drift_paths={})",
+                reconcile.drift_paths
+            ));
+        }
     }
 
-    match append_bridge_note_changed_event(
+    let event_logged = match append_bridge_note_changed_event(
         &kernel.connection,
         &result.file_id,
         &result.normalized_path,
         action,
     ) {
-        Ok(()) => BridgeEnvelope::success(BridgeWriteAck {
-            path: result.normalized_path,
-            file_id: result.file_id,
-            action: action.to_string(),
-        }),
-        Err(source) => BridgeEnvelope::failure(
-            BridgeError::with_code(BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED, source.to_string())
-                .with_hint("note write succeeded but event logging failed")
-                .with_context("path", JsonValue::String(result.normalized_path))
-                .with_context("file_id", JsonValue::String(result.file_id))
-                .with_context("action", JsonValue::String(action.to_string())),
-        ),
-    }
+        Ok(()) => true,
+        Err(source) => {
+            warnings.push(format!("event logging failed after write: {source}"));
+            false
+        }
+    };
+
+    BridgeEnvelope::success(BridgeWriteAck {
+        path: result.normalized_path,
+        file_id: result.file_id,
+        action: action.to_string(),
+        index_synced,
+        event_logged,
+        warnings,
+    })
 }
 
 fn resolve_bridge_note_read_path(
@@ -1170,24 +1212,13 @@ fn validate_bridge_relative_note_path(
     code: &'static str,
     hint: &'static str,
 ) -> Result<(), BridgeError> {
-    let trimmed = normalized_path.trim();
-    if trimmed.is_empty() {
-        return Err(
-            BridgeError::with_code(code, "normalized path must not be empty").with_hint(hint),
-        );
-    }
-
-    let path = Path::new(trimmed);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(
-            BridgeError::with_code(code, "normalized path must be vault-relative")
-                .with_hint(hint)
-                .with_context("path", JsonValue::String(trimmed.to_string())),
-        );
+    if let Err(source) = validate_relative_vault_path(normalized_path) {
+        return Err(BridgeError::with_code(code, source.to_string())
+            .with_hint(hint)
+            .with_context(
+                "path",
+                JsonValue::String(normalized_path.trim().to_string()),
+            ));
     }
 
     Ok(())
@@ -1372,6 +1403,15 @@ pub enum BridgeInitError {
         /// Vault root path.
         vault_root: PathBuf,
     },
+    /// Creating sqlite parent directory failed.
+    #[error("failed to create bridge sqlite parent directory '{path}': {source}")]
+    CreateDbParent {
+        /// Parent directory path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
     /// Opening sqlite db failed.
     #[error("failed to open bridge sqlite database: {source}")]
     OpenDb {
@@ -1411,6 +1451,13 @@ pub enum BridgeEnsureIndexError {
         /// Full index service error.
         #[source]
         source: tao_sdk_service::FullIndexError,
+    },
+    /// Reconciliation refresh failed during bootstrap.
+    #[error("failed to reconcile index state: {source}")]
+    ReconcileIndex {
+        /// Reconciliation scanner error.
+        #[source]
+        source: tao_sdk_service::ReconciliationScanError,
     },
 }
 

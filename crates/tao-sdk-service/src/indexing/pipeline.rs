@@ -19,8 +19,9 @@ use tao_sdk_properties::{
 };
 use tao_sdk_storage::{
     BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
-    IndexStateRepository, LinkRecordInput, PropertiesRepository, PropertyRecordInput,
-    SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput, TasksRepository,
+    IndexStateRepository, LinkRecordInput, LinkWithPaths, PropertiesRepository,
+    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput,
+    TasksRepository,
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
@@ -328,6 +329,13 @@ impl IncrementalIndexService {
         let mut properties_reindexed = 0_u64;
         let mut bases_reindexed = 0_u64;
         let mut pending_link_records = Vec::<LinkRecordInput>::new();
+        let existing_link_rows = tao_sdk_storage::LinksRepository::list_all_with_paths(
+            &transaction,
+        )
+        .map_err(|source| FullIndexError::InsertLink {
+            source: Box::new(source),
+        })?;
+        let mut changed_markdown_paths = std::collections::BTreeSet::<String>::new();
 
         let existing_records = FilesRepository::list_all(&transaction).map_err(|source| {
             FullIndexError::UpsertFileMetadata {
@@ -362,6 +370,9 @@ impl IncrementalIndexService {
         for changed_path in changed_paths {
             let normalized = normalize_changed_path(changed_path)?;
             let absolute = vault_root.join(changed_path);
+            if normalized.ends_with(".md") {
+                changed_markdown_paths.insert(normalized.clone());
+            }
             let existing = FilesRepository::get_by_normalized_path(&transaction, &normalized)
                 .map_err(|source| FullIndexError::UpsertFileMetadata {
                     source: Box::new(source),
@@ -497,9 +508,9 @@ impl IncrementalIndexService {
                         &SearchIndexRecordInput {
                             file_id: file_id.clone(),
                             normalized_path: normalized.clone(),
-                            normalized_path_lc: normalized.to_ascii_lowercase(),
-                            title_lc: title_from_normalized_path(&normalized).to_ascii_lowercase(),
-                            content_lc: markdown.to_ascii_lowercase(),
+                            normalized_path_lc: normalized.to_lowercase(),
+                            title_lc: title_from_normalized_path(&normalized).to_lowercase(),
+                            content_lc: markdown.to_lowercase(),
                         },
                     )
                     .map_err(|source| FullIndexError::UpsertSearchIndex {
@@ -528,72 +539,20 @@ impl IncrementalIndexService {
                     heading_index.insert(normalized.clone(), heading_slugs);
                     block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
 
-                    for (index, indexed_link) in extract_index_links(&markdown, &parsed.body)
-                        .iter()
-                        .enumerate()
-                    {
-                        let link = &indexed_link.link;
-                        let resolution =
-                            resolve_target(&link.raw, Some(&normalized), &markdown_candidates);
-                        let mut resolved_file_id = resolution
-                            .resolved_path
-                            .as_ref()
-                            .and_then(|path| file_id_by_path.get(path).cloned());
-                        let mut heading_slug = link.heading.as_deref().map(slugify_heading);
-                        let mut block_id = link.block.clone();
-                        let heading_resolution = resolve_heading_target(
-                            link.heading.as_deref(),
-                            resolution.resolved_path.as_deref(),
-                            &heading_index,
-                        );
-                        if let Some(resolved_heading_slug) =
-                            heading_resolution.resolved_heading_slug
-                        {
-                            heading_slug = Some(resolved_heading_slug);
-                        }
-                        if link.heading.is_some() && !heading_resolution.is_resolved {
-                            resolved_file_id = None;
-                        }
-                        let block_resolution = resolve_block_target(
-                            link.block.as_deref(),
-                            resolution.resolved_path.as_deref(),
-                            &block_index,
-                        );
-                        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
-                            block_id = Some(resolved_block_id);
-                        }
-                        if link.block.is_some() && !block_resolution.is_resolved {
-                            resolved_file_id = None;
-                        }
-
-                        let is_unresolved = resolved_file_id.is_none();
-                        let unresolved_reason = if is_unresolved {
-                            classify_unresolved_reason(
-                                link,
-                                resolution.resolved_path.as_deref(),
-                                heading_resolution.is_resolved,
-                                block_resolution.is_resolved,
-                            )
-                        } else {
-                            None
-                        };
-
-                        pending_link_records.push(LinkRecordInput {
-                            link_id: deterministic_id(
-                                "link",
-                                &format!("{file_id}:{index}:{}:{}", indexed_link.source, link.raw),
-                            ),
-                            source_file_id: file_id.clone(),
-                            raw_target: link.target.clone(),
-                            resolved_file_id,
-                            heading_slug,
-                            block_id,
-                            is_unresolved,
-                            unresolved_reason,
-                            source_field: indexed_link.source.clone(),
-                        });
-                        links_reindexed += 1;
-                    }
+                    let link_records = build_incremental_link_records(
+                        &LinkResolutionContext {
+                            markdown_candidates: &markdown_candidates,
+                            file_id_by_path: &file_id_by_path,
+                            heading_index: &heading_index,
+                            block_index: &block_index,
+                        },
+                        &file_id,
+                        &normalized,
+                        &markdown,
+                        &parsed.body,
+                    );
+                    links_reindexed += link_records.len() as u64;
+                    pending_link_records.extend(link_records);
                 } else if normalized.ends_with(".base") {
                     let raw = fs::read_to_string(&absolute).map_err(|source| {
                         FullIndexError::ReadFile {
@@ -638,6 +597,73 @@ impl IncrementalIndexService {
                 file_id_by_path.remove(&normalized);
                 removed_files += 1;
             }
+        }
+
+        let affected_sources = existing_link_rows
+            .iter()
+            .filter(|link| !changed_markdown_paths.contains(&link.source_path))
+            .filter(|link| {
+                stored_link_requires_refresh(
+                    link,
+                    &markdown_candidates,
+                    &file_id_by_path,
+                    &heading_index,
+                    &block_index,
+                )
+            })
+            .map(|link| link.source_path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for source_path in affected_sources {
+            let Some(source_record) =
+                FilesRepository::get_by_normalized_path(&transaction, &source_path).map_err(
+                    |source| FullIndexError::UpsertFileMetadata {
+                        source: Box::new(source),
+                    },
+                )?
+            else {
+                continue;
+            };
+            let absolute = vault_root.join(&source_path);
+            let markdown =
+                fs::read_to_string(&absolute).map_err(|source| FullIndexError::ReadFile {
+                    path: absolute.clone(),
+                    source,
+                })?;
+            let parsed = self
+                .parser
+                .parse(MarkdownParseRequest {
+                    normalized_path: source_path.clone(),
+                    raw: markdown.clone(),
+                })
+                .map_err(|source| FullIndexError::ParseMarkdown {
+                    path: absolute,
+                    source: Box::new(source),
+                })?;
+
+            transaction
+                .execute(
+                    "DELETE FROM links WHERE source_file_id = ?1",
+                    params![source_record.file_id],
+                )
+                .map_err(|source| FullIndexError::ExecuteSql {
+                    operation: "delete_links_for_dependent_source",
+                    source: Box::new(source),
+                })?;
+            let link_records = build_incremental_link_records(
+                &LinkResolutionContext {
+                    markdown_candidates: &markdown_candidates,
+                    file_id_by_path: &file_id_by_path,
+                    heading_index: &heading_index,
+                    block_index: &block_index,
+                },
+                &source_record.file_id,
+                &source_path,
+                &markdown,
+                &parsed.body,
+            );
+            links_reindexed += link_records.len() as u64;
+            pending_link_records.extend(link_records);
         }
 
         insert_links_batch(&transaction, &pending_link_records)?;
@@ -2290,14 +2316,148 @@ fn build_task_records(file_id: &str, source_path: &str, markdown: &str) -> Vec<T
                 task_id: deterministic_id("task", &format!("{file_id}:{line_number}")),
                 file_id: file_id.to_string(),
                 file_path: source_path.to_string(),
-                file_path_lc: source_path.to_ascii_lowercase(),
+                file_path_lc: source_path.to_lowercase(),
                 line_number,
                 state: state.to_string(),
                 text: text.to_string(),
-                text_lc: text.to_ascii_lowercase(),
+                text_lc: text.to_lowercase(),
             })
         })
         .collect()
+}
+
+struct LinkResolutionContext<'a> {
+    markdown_candidates: &'a [String],
+    file_id_by_path: &'a HashMap<String, String>,
+    heading_index: &'a HashMap<String, Vec<String>>,
+    block_index: &'a HashMap<String, Vec<String>>,
+}
+
+fn build_incremental_link_records(
+    context: &LinkResolutionContext<'_>,
+    file_id: &str,
+    source_path: &str,
+    markdown: &str,
+    parsed_body: &str,
+) -> Vec<LinkRecordInput> {
+    let mut records = Vec::new();
+    for (index, indexed_link) in extract_index_links(markdown, parsed_body)
+        .iter()
+        .enumerate()
+    {
+        let link = &indexed_link.link;
+        let resolution = resolve_target(&link.raw, Some(source_path), context.markdown_candidates);
+        let mut resolved_file_id = resolution
+            .resolved_path
+            .as_ref()
+            .and_then(|path| context.file_id_by_path.get(path).cloned());
+        let mut heading_slug = link.heading.as_deref().map(slugify_heading);
+        let mut block_id = link.block.clone();
+        let heading_resolution = resolve_heading_target(
+            link.heading.as_deref(),
+            resolution.resolved_path.as_deref(),
+            context.heading_index,
+        );
+        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
+            heading_slug = Some(resolved_heading_slug);
+        }
+        if link.heading.is_some() && !heading_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+        let block_resolution = resolve_block_target(
+            link.block.as_deref(),
+            resolution.resolved_path.as_deref(),
+            context.block_index,
+        );
+        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
+            block_id = Some(resolved_block_id);
+        }
+        if link.block.is_some() && !block_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+
+        let is_unresolved = resolved_file_id.is_none();
+        let unresolved_reason = if is_unresolved {
+            classify_unresolved_reason(
+                link,
+                resolution.resolved_path.as_deref(),
+                heading_resolution.is_resolved,
+                block_resolution.is_resolved,
+            )
+        } else {
+            None
+        };
+
+        records.push(LinkRecordInput {
+            link_id: deterministic_id(
+                "link",
+                &format!("{file_id}:{index}:{}:{}", indexed_link.source, link.raw),
+            ),
+            source_file_id: file_id.to_string(),
+            raw_target: link.target.clone(),
+            resolved_file_id,
+            heading_slug,
+            block_id,
+            is_unresolved,
+            unresolved_reason,
+            source_field: indexed_link.source.clone(),
+        });
+    }
+    records
+}
+
+fn stored_link_requires_refresh(
+    link: &LinkWithPaths,
+    markdown_candidates: &[String],
+    file_id_by_path: &HashMap<String, String>,
+    heading_index: &HashMap<String, Vec<String>>,
+    block_index: &HashMap<String, Vec<String>>,
+) -> bool {
+    let resolution = resolve_target(
+        &link.raw_target,
+        Some(&link.source_path),
+        markdown_candidates,
+    );
+    let mut resolved_file_id = resolution
+        .resolved_path
+        .as_ref()
+        .and_then(|path| file_id_by_path.get(path).cloned());
+    let mut heading_slug = link.heading_slug.clone();
+    let mut block_id = link.block_id.clone();
+
+    if heading_slug.is_some() {
+        let heading_resolution = resolve_heading_target(
+            heading_slug.as_deref(),
+            resolution.resolved_path.as_deref(),
+            heading_index,
+        );
+        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
+            heading_slug = Some(resolved_heading_slug);
+        }
+        if !heading_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+    }
+
+    if block_id.is_some() {
+        let block_resolution = resolve_block_target(
+            block_id.as_deref(),
+            resolution.resolved_path.as_deref(),
+            block_index,
+        );
+        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
+            block_id = Some(resolved_block_id);
+        }
+        if !block_resolution.is_resolved {
+            resolved_file_id = None;
+        }
+    }
+
+    let is_unresolved = resolved_file_id.is_none();
+    resolved_file_id != link.resolved_file_id
+        || heading_slug != link.heading_slug
+        || block_id != link.block_id
+        || is_unresolved != link.is_unresolved
 }
 
 fn parse_task_line(line: &str) -> Option<(&'static str, &str)> {
@@ -2465,9 +2625,9 @@ fn build_prepared_index_entry(
         let search_record = SearchIndexRecordInput {
             file_id: file_id.clone(),
             normalized_path: entry.normalized.clone(),
-            normalized_path_lc: entry.normalized.to_ascii_lowercase(),
-            title_lc: title_from_normalized_path(&entry.normalized).to_ascii_lowercase(),
-            content_lc: markdown.to_ascii_lowercase(),
+            normalized_path_lc: entry.normalized.to_lowercase(),
+            title_lc: title_from_normalized_path(&entry.normalized).to_lowercase(),
+            content_lc: markdown.to_lowercase(),
         };
         let markdown_doc = MarkdownIndexDocument {
             file_id,
@@ -3837,6 +3997,132 @@ mod tests {
                 .expect("get deleted file")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn incremental_apply_changes_refreshes_links_when_target_note_is_created() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/source.md"), "# Source\n[[target]]")
+            .expect("write source");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/source.md")
+            .expect("get source")
+            .expect("source exists");
+        let before = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing before");
+        assert_eq!(before.len(), 1);
+        assert!(before[0].is_unresolved);
+
+        fs::write(temp.path().join("notes/target.md"), "# Target").expect("write target");
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/target.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental create target");
+
+        let after = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing after");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].resolved_path.as_deref(), Some("notes/target.md"));
+        assert!(!after[0].is_unresolved);
+    }
+
+    #[test]
+    fn incremental_apply_changes_marks_backlinks_unresolved_when_target_is_deleted() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/source.md"), "# Source\n[[target]]")
+            .expect("write source");
+        fs::write(temp.path().join("notes/target.md"), "# Target").expect("write target");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/source.md")
+            .expect("get source")
+            .expect("source exists");
+        fs::remove_file(temp.path().join("notes/target.md")).expect("remove target");
+
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/target.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental delete target");
+
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing after delete");
+        assert_eq!(outgoing.len(), 1);
+        assert!(outgoing[0].is_unresolved);
+        assert_eq!(outgoing[0].resolved_path, None);
+        assert_eq!(
+            outgoing[0].unresolved_reason.as_deref(),
+            Some("missing-note")
+        );
+        assert_eq!(
+            LinksRepository::count_unresolved(&connection).expect("count unresolved"),
+            1
+        );
+    }
+
+    #[test]
+    fn incremental_apply_changes_refreshes_anchor_links_when_target_heading_changes() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/source.md"),
+            "# Source\n[[target#Known Heading]]",
+        )
+        .expect("write source");
+        fs::write(temp.path().join("notes/target.md"), "# Known Heading\nbody")
+            .expect("write target");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/source.md")
+            .expect("get source")
+            .expect("source exists");
+        fs::write(
+            temp.path().join("notes/target.md"),
+            "# Renamed Heading\nbody",
+        )
+        .expect("rewrite target");
+
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/target.md")],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental heading change");
+
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing after heading change");
+        assert_eq!(outgoing.len(), 1);
+        assert!(outgoing[0].is_unresolved);
+        assert_eq!(outgoing[0].resolved_path, None);
+        assert_eq!(outgoing[0].heading_slug.as_deref(), Some("known-heading"));
+        assert_eq!(outgoing[0].unresolved_reason.as_deref(), Some("bad-anchor"));
     }
 
     #[test]

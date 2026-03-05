@@ -1,11 +1,18 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde::Serialize;
 use tao_sdk_service::{SdkConfigLoader, SdkConfigOverrides};
+use tao_sdk_watch::VaultChangeMonitor;
 use thiserror::Error;
 
-use crate::{BridgeEnvelope, BridgeKernel, BridgeNoteListPage, BridgeVaultStats};
+use crate::{
+    BRIDGE_ERROR_STARTUP_BUNDLE_FAILED, BridgeEnvelope, BridgeError, BridgeKernel,
+    BridgeNoteListPage, BridgeVaultStats,
+};
 
 const DEFAULT_WINDOW_LIMIT: u64 = 128;
 const MAX_WINDOW_LIMIT: u64 = 1_000;
@@ -25,6 +32,9 @@ pub struct BridgeStartupBundle {
 #[derive(uniffi::Object)]
 pub struct TaoBridgeRuntime {
     kernel: Mutex<BridgeKernel>,
+    monitor: VaultChangeMonitor,
+    last_synced_generation: AtomicU64,
+    read_only: bool,
     vault_root: String,
     db_path: String,
 }
@@ -42,12 +52,25 @@ impl TaoBridgeRuntime {
             TaoBridgeRuntimeError::Runtime(format!("resolve config failed: {source}"))
         })?;
 
-        let kernel = BridgeKernel::open(&config.vault_root, &config.db_path).map_err(|source| {
+        let kernel = BridgeKernel::open_with_case_policy(
+            &config.vault_root,
+            &config.db_path,
+            config.case_policy,
+        )
+        .map_err(|source| {
             TaoBridgeRuntimeError::Runtime(format!("open bridge kernel failed: {source}"))
+        })?;
+        let monitor = VaultChangeMonitor::start(&config.vault_root).map_err(|source| {
+            TaoBridgeRuntimeError::Runtime(format!(
+                "start bridge filesystem monitor failed: {source}"
+            ))
         })?;
 
         Ok(Self {
             kernel: Mutex::new(kernel),
+            monitor,
+            last_synced_generation: AtomicU64::new(u64::MAX),
+            read_only: config.read_only,
             vault_root: config.vault_root.to_string_lossy().to_string(),
             db_path: config.db_path.to_string_lossy().to_string(),
         })
@@ -69,10 +92,12 @@ impl TaoBridgeRuntime {
     }
 
     pub fn vault_stats_json(&self) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| envelope_json(kernel.vault_stats()))
     }
 
     pub fn note_get_json(&self, normalized_path: String) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| {
             envelope_json(kernel.note_get(&normalized_path))
         })
@@ -82,6 +107,7 @@ impl TaoBridgeRuntime {
         &self,
         normalized_path: String,
     ) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| {
             envelope_json(kernel.note_context(&normalized_path))
         })
@@ -92,6 +118,7 @@ impl TaoBridgeRuntime {
         after_path: Option<String>,
         limit: Option<u64>,
     ) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| {
             envelope_json(kernel.notes_list(after_path.as_deref(), normalize_window_limit(limit)))
         })
@@ -107,7 +134,7 @@ impl TaoBridgeRuntime {
             envelope_json(kernel.note_put_with_policy(
                 &normalized_path,
                 &content,
-                allow_writes.unwrap_or(false),
+                allow_writes.unwrap_or(false) || !self.read_only,
             ))
         })
     }
@@ -116,12 +143,14 @@ impl TaoBridgeRuntime {
         &self,
         normalized_path: String,
     ) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| {
             envelope_json(kernel.note_links(&normalized_path))
         })
     }
 
     pub fn bases_list_json(&self) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| envelope_json(kernel.bases_list()))
     }
 
@@ -134,6 +163,7 @@ impl TaoBridgeRuntime {
     ) -> Result<String, TaoBridgeRuntimeError> {
         let page = page.unwrap_or(1);
         let page_size = page_size.unwrap_or(50);
+        self.sync_index_if_needed()?;
         with_kernel(&self.kernel, |kernel| {
             envelope_json(kernel.bases_view(&path_or_id, &view_name, page, page_size))
         })
@@ -150,21 +180,44 @@ impl TaoBridgeRuntime {
     }
 
     pub fn startup_bundle_json(&self, limit: Option<u64>) -> Result<String, TaoBridgeRuntimeError> {
+        self.sync_index_if_needed()?;
+        with_kernel(&self.kernel, |kernel| {
+            let result = (|| {
+                let stats = extract_envelope_value(kernel.vault_stats(), "vault_stats")?;
+                let notes = extract_envelope_value(
+                    kernel.notes_list(None, normalize_window_limit(limit)),
+                    "notes_list",
+                )?;
+                Ok::<BridgeStartupBundle, String>(BridgeStartupBundle { stats, notes })
+            })();
+
+            let envelope = match result {
+                Ok(payload) => BridgeEnvelope::success(payload),
+                Err(message) => BridgeEnvelope::failure(
+                    BridgeError::with_code(BRIDGE_ERROR_STARTUP_BUNDLE_FAILED, message).with_hint(
+                        "ensure vault root and bridge database are readable, then retry startup",
+                    ),
+                ),
+            };
+            envelope_json(envelope)
+        })
+    }
+
+    fn sync_index_if_needed(&self) -> Result<(), TaoBridgeRuntimeError> {
+        let generation = self.monitor.generation();
+        if self.last_synced_generation.load(Ordering::Relaxed) == generation {
+            return Ok(());
+        }
+
         with_kernel(&self.kernel, |kernel| {
             kernel.ensure_indexed().map_err(|source| {
-                TaoBridgeRuntimeError::Runtime(format!("startup index bootstrap failed: {source}"))
+                TaoBridgeRuntimeError::Runtime(format!("sync bridge index failed: {source}"))
             })?;
-
-            let stats = expect_envelope_value(kernel.vault_stats(), "vault_stats")?;
-            let notes = expect_envelope_value(
-                kernel.notes_list(None, normalize_window_limit(limit)),
-                "notes_list",
-            )?;
-            let payload = BridgeStartupBundle { stats, notes };
-            serde_json::to_string(&payload).map_err(|source| {
-                TaoBridgeRuntimeError::Runtime(format!("serialize startup bundle failed: {source}"))
-            })
-        })
+            Ok(())
+        })?;
+        self.last_synced_generation
+            .store(generation, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -183,21 +236,18 @@ where
     })
 }
 
-fn expect_envelope_value<T>(
-    envelope: BridgeEnvelope<T>,
-    operation: &str,
-) -> Result<T, TaoBridgeRuntimeError> {
+fn extract_envelope_value<T>(envelope: BridgeEnvelope<T>, operation: &str) -> Result<T, String> {
     if envelope.ok {
-        return envelope.value.ok_or_else(|| {
-            TaoBridgeRuntimeError::Runtime(format!("{operation} returned success without payload"))
-        });
+        return envelope
+            .value
+            .ok_or_else(|| format!("{operation} returned success without payload"));
     }
 
     let message = envelope
         .error
         .map(|error| format!("{operation} failed [{}]: {}", error.code, error.message))
         .unwrap_or_else(|| format!("{operation} failed without error payload"));
-    Err(TaoBridgeRuntimeError::Runtime(message))
+    Err(message)
 }
 
 fn with_kernel<T>(
@@ -213,6 +263,10 @@ fn with_kernel<T>(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::thread;
+    use std::time::Duration;
+
+    use serde_json::Value as JsonValue;
 
     use super::TaoBridgeRuntime;
 
@@ -234,9 +288,64 @@ mod tests {
             .startup_bundle_json(Some(32))
             .expect("startup bundle json");
 
-        assert!(startup.contains("\"stats\""));
-        assert!(startup.contains("\"notes\""));
+        let envelope: JsonValue = serde_json::from_str(&startup).expect("parse startup envelope");
+        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(true));
+        assert!(
+            envelope
+                .get("value")
+                .and_then(|value| value.get("stats"))
+                .is_some(),
+            "startup bundle should use standard envelope value payload"
+        );
         assert!(startup.contains("notes/alpha.md"));
         assert!(runtime.db_path().ends_with("index.sqlite"));
+    }
+
+    #[test]
+    fn runtime_refreshes_index_after_external_vault_change() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(vault_root.join("notes/alpha.md"), "# Alpha").expect("seed alpha");
+
+        let runtime = TaoBridgeRuntime::new(vault_root.to_string_lossy().to_string(), None)
+            .expect("create runtime");
+        runtime
+            .startup_bundle_json(Some(32))
+            .expect("seed startup bundle");
+
+        fs::write(vault_root.join("notes/beta.md"), "# Beta").expect("seed beta");
+        thread::sleep(Duration::from_millis(300));
+        let payload = runtime
+            .notes_window_json(None, Some(64))
+            .expect("notes window json");
+        assert!(
+            payload.contains("notes/beta.md"),
+            "runtime should surface externally added note after periodic refresh"
+        );
+    }
+
+    #[test]
+    fn runtime_note_put_respects_configured_read_only_policy_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(
+            vault_root.join("config.toml"),
+            "[security]\nread_only = false\n",
+        )
+        .expect("write vault config");
+
+        let runtime = TaoBridgeRuntime::new(vault_root.to_string_lossy().to_string(), None)
+            .expect("create runtime");
+        let response = runtime
+            .note_put_json(
+                "notes/runtime.md".to_string(),
+                "# Runtime".to_string(),
+                None,
+            )
+            .expect("note_put json");
+        let envelope: JsonValue = serde_json::from_str(&response).expect("parse note_put");
+        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(true));
     }
 }

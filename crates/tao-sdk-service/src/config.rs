@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, load_from_path, load_or_bootstrap};
+use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, config_path, load_from_path};
 use tao_sdk_storage::{MigrationRunnerError, preflight_migrations, run_migrations};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
@@ -102,11 +102,7 @@ impl SdkConfigLoader {
         )
         .ok_or(SdkConfigError::VaultRootUnconfigured)?;
         let vault_root = canonicalize_existing_directory(vault_root_input)?;
-        let vault_config =
-            load_or_bootstrap(&vault_root).map_err(|source| SdkConfigError::VaultConfig {
-                path: vault_root.join("config.toml"),
-                source,
-            })?;
+        let vault_config = load_vault_config_or_defaults(&vault_root)?;
 
         let effective_config = TaoConfig::defaults()
             .merge(&global_config)
@@ -137,10 +133,6 @@ impl SdkConfigLoader {
             configured_data_dir,
         );
         let data_dir = absolutize_from(&vault_root, data_dir_input);
-        fs::create_dir_all(&data_dir).map_err(|source| SdkConfigError::CreateDataDir {
-            path: data_dir.clone(),
-            source,
-        })?;
 
         let configured_db_path =
             vault_config
@@ -171,13 +163,6 @@ impl SdkConfigLoader {
                 path: db_path,
                 reason: "database path must include a filename".to_string(),
             });
-        }
-
-        if let Some(parent) = db_path.parent() {
-            fs::create_dir_all(parent).map_err(|source| SdkConfigError::CreateDbParent {
-                path: parent.to_path_buf(),
-                source,
-            })?;
         }
 
         let case_policy = if let Some(value) = overrides.case_policy {
@@ -230,11 +215,11 @@ impl SdkConfigLoader {
 
 fn load_root_config_or_defaults(root_dir: Option<&Path>) -> Result<TaoConfig, SdkConfigError> {
     let Some(root_dir) = root_dir else {
-        return Ok(TaoConfig::defaults());
+        return Ok(TaoConfig::default());
     };
     let path = root_dir.join("config.toml");
     if !path.exists() {
-        return Ok(TaoConfig::defaults());
+        return Ok(TaoConfig::default());
     }
     load_from_path(&path).map_err(|source| SdkConfigError::RootConfig { path, source })
 }
@@ -243,15 +228,23 @@ fn load_global_config_or_defaults(
     global_config_path: Option<&Path>,
 ) -> Result<TaoConfig, SdkConfigError> {
     let Some(path) = global_config_path else {
-        return Ok(TaoConfig::defaults());
+        return Ok(TaoConfig::default());
     };
     if !path.exists() {
-        return Ok(TaoConfig::defaults());
+        return Ok(TaoConfig::default());
     }
     load_from_path(path).map_err(|source| SdkConfigError::GlobalConfig {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn load_vault_config_or_defaults(vault_root: &Path) -> Result<TaoConfig, SdkConfigError> {
+    let path = config_path(vault_root);
+    if !path.exists() {
+        return Ok(TaoConfig::default());
+    }
+    load_from_path(&path).map_err(|source| SdkConfigError::VaultConfig { path, source })
 }
 
 fn resolve_global_config_path(env: &HashMap<String, String>) -> Option<PathBuf> {
@@ -311,6 +304,8 @@ impl SdkBootstrapService {
         let root_dir = resolve_root_config_dir(cwd);
         let config = SdkConfigLoader::load_from_map(overrides, env, cwd)
             .map_err(|source| SdkBootstrapError::LoadConfig { source })?;
+        ensure_runtime_paths(&config)
+            .map_err(|source| SdkBootstrapError::PrepareRuntime { source })?;
 
         let mut connection = Connection::open(&config.db_path).map_err(|source| {
             SdkBootstrapError::OpenDatabase {
@@ -391,6 +386,22 @@ fn resolve_root_config_dir(cwd: &Path) -> Option<PathBuf> {
         cursor = path.parent();
     }
     None
+}
+
+pub fn ensure_runtime_paths(config: &SdkConfig) -> Result<(), SdkConfigError> {
+    fs::create_dir_all(&config.data_dir).map_err(|source| SdkConfigError::CreateDataDir {
+        path: config.data_dir.clone(),
+        source,
+    })?;
+
+    if let Some(parent) = config.db_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| SdkConfigError::CreateDbParent {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    Ok(())
 }
 
 fn canonicalize_existing_directory(path: PathBuf) -> Result<PathBuf, SdkConfigError> {
@@ -575,6 +586,13 @@ pub enum SdkBootstrapError {
         #[source]
         source: SdkConfigError,
     },
+    /// Preparing runtime directories failed.
+    #[error("failed to prepare runtime paths during bootstrap: {source}")]
+    PrepareRuntime {
+        /// Config loader/runtime path error.
+        #[source]
+        source: SdkConfigError,
+    },
     /// Opening sqlite database failed.
     #[error("failed to open sqlite database '{path}' during bootstrap: {source}")]
     OpenDatabase {
@@ -614,6 +632,7 @@ mod tests {
 
     use super::{
         CasePolicy, SdkBootstrapService, SdkConfigError, SdkConfigLoader, SdkConfigOverrides,
+        ensure_runtime_paths,
     };
 
     #[test]
@@ -774,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_map_bootstraps_vault_config_when_missing() {
+    fn load_from_map_does_not_bootstrap_vault_config_when_missing() {
         let temp = tempdir().expect("tempdir");
         let vault = temp.path().join("vault");
         fs::create_dir_all(&vault).expect("create vault");
@@ -790,12 +809,60 @@ mod tests {
 
         let loaded =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
-                .expect("load config with vault bootstrap");
+                .expect("load config without vault bootstrap");
         assert_eq!(
             loaded.vault_root,
             fs::canonicalize(vault).expect("canonical vault")
         );
-        assert!(vault_config.exists(), "vault config should be bootstrapped");
+        assert!(
+            !vault_config.exists(),
+            "vault config should remain probe-only during config resolution"
+        );
+    }
+
+    #[test]
+    fn load_from_map_does_not_create_runtime_directories() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect("load config without side effects");
+        assert!(!loaded.data_dir.exists(), "data dir should not be created");
+        assert!(
+            !loaded.db_path.parent().expect("db parent").exists(),
+            "db parent should not be created"
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_paths_creates_data_and_db_parent_directories() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "TAO_VAULT_ROOT".to_string(),
+            vault.to_string_lossy().to_string(),
+        );
+
+        let loaded =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect("load config");
+        ensure_runtime_paths(&loaded).expect("prepare runtime paths");
+        assert!(loaded.data_dir.exists(), "data dir should be created");
+        assert!(
+            loaded.db_path.parent().expect("db parent").exists(),
+            "db parent should be created"
+        );
     }
 
     #[test]
@@ -917,6 +984,10 @@ read_only = true
             !snapshot.root_config_path.exists(),
             "root config is probe-only and should not be created implicitly"
         );
-        assert!(snapshot.vault_config_path.exists());
+        assert!(
+            !snapshot.vault_config_path.exists(),
+            "vault config should remain absent until explicitly created"
+        );
+        assert!(snapshot.config.data_dir.exists());
     }
 }

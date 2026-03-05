@@ -26,6 +26,49 @@ pub struct CanonicalPath {
     pub match_key: String,
 }
 
+/// Validate one vault-relative path string before filesystem access.
+pub fn validate_relative_vault_path(input: &str) -> Result<(), RelativeVaultPathError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(RelativeVaultPathError::Empty);
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(RelativeVaultPathError::AbsolutePath {
+            path: trimmed.to_string(),
+        });
+    }
+
+    let mut saw_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => saw_component = true,
+            Component::CurDir => {
+                return Err(RelativeVaultPathError::CurrentDirectoryComponent {
+                    path: trimmed.to_string(),
+                });
+            }
+            Component::ParentDir => {
+                return Err(RelativeVaultPathError::ParentTraversal {
+                    path: trimmed.to_string(),
+                });
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(RelativeVaultPathError::AbsolutePath {
+                    path: trimmed.to_string(),
+                });
+            }
+        }
+    }
+
+    if !saw_component {
+        return Err(RelativeVaultPathError::Empty);
+    }
+
+    Ok(())
+}
+
 /// Canonicalizes vault paths and enforces vault boundary rules.
 #[derive(Debug, Clone)]
 pub struct PathCanonicalizationService {
@@ -195,6 +238,32 @@ pub enum PathCanonicalizationError {
     },
 }
 
+/// Relative vault path validation failures.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RelativeVaultPathError {
+    /// Path was blank after trimming.
+    #[error("path must not be empty")]
+    Empty,
+    /// Path was absolute.
+    #[error("path '{path}' must be vault-relative")]
+    AbsolutePath {
+        /// Raw path value.
+        path: String,
+    },
+    /// Path contained `..`.
+    #[error("path '{path}' must not traverse to parent directories")]
+    ParentTraversal {
+        /// Raw path value.
+        path: String,
+    },
+    /// Path contained `.` components.
+    #[error("path '{path}' must not contain '.' path components")]
+    CurrentDirectoryComponent {
+        /// Raw path value.
+        path: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -203,7 +272,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, PathCanonicalizationError, PathCanonicalizationService, normalize_component,
+        CasePolicy, PathCanonicalizationError, PathCanonicalizationService, RelativeVaultPathError,
+        normalize_component, validate_relative_vault_path,
     };
 
     #[cfg(unix)]
@@ -242,6 +312,32 @@ mod tests {
         assert_eq!(sensitive_path.normalized, "Notes/Daily.md");
         assert_eq!(sensitive_path.match_key, "Notes/Daily.md");
         assert_eq!(insensitive_path.match_key, "notes/daily.md");
+    }
+
+    #[test]
+    fn validate_relative_vault_path_accepts_normalized_relative_paths() {
+        assert!(validate_relative_vault_path("notes/daily.md").is_ok());
+        assert!(validate_relative_vault_path("views/projects.base").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_vault_path_rejects_absolute_and_traversal_inputs() {
+        assert!(matches!(
+            validate_relative_vault_path("/etc/hosts"),
+            Err(RelativeVaultPathError::AbsolutePath { .. })
+        ));
+        assert!(matches!(
+            validate_relative_vault_path("../notes/a.md"),
+            Err(RelativeVaultPathError::ParentTraversal { .. })
+        ));
+        assert!(matches!(
+            validate_relative_vault_path("./notes/a.md"),
+            Err(RelativeVaultPathError::CurrentDirectoryComponent { .. })
+        ));
+        assert!(matches!(
+            validate_relative_vault_path("   "),
+            Err(RelativeVaultPathError::Empty)
+        ));
     }
 
     #[cfg(unix)]

@@ -179,6 +179,9 @@ private struct TaoRootSplitView: View {
 
                 spinnerTask.cancel()
                 await MainActor.run {
+                    guard normalizedVaultRoot == requestVault, selectedPath == requestPath else {
+                        return
+                    }
                     selectedNoteContext = context
                     isLoadingNote = false
                     showNoteLoading = false
@@ -186,6 +189,9 @@ private struct TaoRootSplitView: View {
             } catch {
                 spinnerTask.cancel()
                 await MainActor.run {
+                    guard normalizedVaultRoot == requestVault, selectedPath == requestPath else {
+                        return
+                    }
                     noteError = "Unable to open note: \(error)"
                     isLoadingNote = false
                     showNoteLoading = false

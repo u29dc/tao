@@ -12,6 +12,7 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+notify.workspace = true
 tao-sdk-service = { path = "../tao-sdk-service" }
 tao-sdk-vault = { path = "../tao-sdk-vault" }
 rusqlite.workspace = true

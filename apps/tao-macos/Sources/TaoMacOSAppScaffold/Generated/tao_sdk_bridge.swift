@@ -521,6 +521,8 @@ public protocol TaoBridgeRuntimeProtocol: AnyObject, Sendable {
     
     func startupBundleJson(limit: UInt64?) throws  -> String
     
+    func syncIndexIfNeeded() throws 
+    
     func vaultRoot()  -> String
     
     func vaultStatsJson() throws  -> String
@@ -677,6 +679,12 @@ open func startupBundleJson(limit: UInt64?)throws  -> String  {
         FfiConverterOptionUInt64.lower(limit),$0
     )
 })
+}
+    
+open func syncIndexIfNeeded()throws   {try rustCallWithError(FfiConverterTypeTaoBridgeRuntimeError_lift) {
+    uniffi_tao_sdk_bridge_fn_method_taobridgeruntime_sync_index_if_needed(self.uniffiClonePointer(),$0
+    )
+}
 }
     
 open func vaultRoot() -> String  {
@@ -966,6 +974,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_startup_bundle_json() != 27094) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_sync_index_if_needed() != 19470) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_tao_sdk_bridge_checksum_method_taobridgeruntime_vault_root() != 46349) {

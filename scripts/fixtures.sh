@@ -79,8 +79,8 @@ if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-mkdir -p "$OUTPUT_ROOT"
 assert_safe_path "$OUTPUT_ROOT" "fixture output root"
+mkdir -p "$OUTPUT_ROOT"
 
 fail_validation() {
   echo "fixture validation failed: $1" >&2
@@ -412,6 +412,7 @@ generate_profile() {
   local seed="$3"
   local root="$OUTPUT_ROOT/$name"
 
+  assert_safe_path "$root" "generated fixture root"
   rm -rf "$root"
   mkdir -p "$root/notes/projects" "$root/notes/contacts" "$root/notes/companies" "$root/notes/meetings" "$root/daily" "$root/templates"
 
@@ -465,6 +466,9 @@ generate_parity_fixtures() {
   local graph_root="$root/graph-parity"
   local base_root="$root/base-parity"
 
+  assert_safe_path "$root" "parity fixture root"
+  assert_safe_path "$graph_root" "graph parity fixture root"
+  assert_safe_path "$base_root" "base parity fixture root"
   rm -rf "$graph_root" "$base_root"
   mkdir -p "$graph_root/notes" "$graph_root/expected"
   mkdir -p "$base_root/notes/projects" "$base_root/notes/meetings" "$base_root/views"
