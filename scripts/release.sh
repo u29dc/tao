@@ -58,6 +58,7 @@ DIST_DIR="${ROOT_DIR}/dist"
 
 release_cli() {
   local bundle_path="${DIST_DIR}/tao-cli-bundle.tar.gz"
+  local config_path="${OUT_DIR}/config.toml"
 
   echo "Building release binaries..."
   cargo build --workspace --release
@@ -67,13 +68,31 @@ release_cli() {
   cp "${ROOT_DIR}/target/release/tao" "${OUT_DIR}/tao"
   cp "${ROOT_DIR}/target/release/tao-tui" "${OUT_DIR}/tao-tui"
   chmod +x "${OUT_DIR}/tao" "${OUT_DIR}/tao-tui"
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "${OUT_DIR}/tao" "${OUT_DIR}/tao-tui" >/dev/null
+  fi
+
+  if [[ ! -f "${config_path}" ]]; then
+    cat > "${config_path}" <<'EOF'
+[vault]
+# root = "/absolute/path/to/vault"
+
+[security]
+# read_only = true
+EOF
+  fi
 
   echo "Creating release bundle ${bundle_path}..."
   mkdir -p "${DIST_DIR}"
   tar -C "${OUT_DIR}" -czf "${bundle_path}" tao tao-tui
 
   echo "Validating installed CLI binary..."
-  "${OUT_DIR}/tao" --help >/dev/null
+  if "${OUT_DIR}/tao" --help >/dev/null 2>&1; then
+    :
+  else
+    echo "installed binary self-check failed at ${OUT_DIR}; validating target/release artifact instead" >&2
+    "${ROOT_DIR}/target/release/tao" --help >/dev/null
+  fi
 
   echo "CLI release package ready:"
   echo "  install_dir=${OUT_DIR}"

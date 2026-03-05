@@ -76,8 +76,10 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
     - CLI is a minimal adapter over SDK service calls.
     - macOS app is a native UI shell that consumes generated bindings.
 - Runtime bootstrap:
-    - Config precedence: defaults < root `config.toml` < vault `config.toml` < env < explicit overrides.
+    - Config precedence: defaults < global `~/.tools/tao/config.toml` < root `config.toml` < vault `config.toml` < env < explicit overrides.
+    - Root config is probe-only (loaded when present) and is not auto-created outside repository contexts.
     - Vault-only startup path is supported; sqlite path auto-resolves and bootstraps.
+    - CLI `--vault-root` is optional; default vault can be set via `~/.tools/tao/config.toml` `[vault].root`.
 - Bridge strategy:
     - `tao-sdk-bridge` exposes `TaoBridgeRuntime` with persistent in-process handle semantics.
     - Swift client caches runtime handles per `(vault_root, db_path)` key to avoid per-call process startup.

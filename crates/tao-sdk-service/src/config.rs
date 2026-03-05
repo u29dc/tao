@@ -1,20 +1,21 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
-use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, load_or_bootstrap};
+use tao_sdk_config::{Merge, PathCasePolicy, TaoConfig, load_from_path, load_or_bootstrap};
 use tao_sdk_storage::{MigrationRunnerError, preflight_migrations, run_migrations};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
 const ENV_VAULT_ROOT: &str = "TAO_VAULT_ROOT";
+const ENV_CONFIG_PATH: &str = "TAO_CONFIG_PATH";
 const ENV_DATA_DIR: &str = "TAO_DATA_DIR";
 const ENV_DB_PATH: &str = "TAO_DB_PATH";
 const ENV_CASE_POLICY: &str = "TAO_CASE_POLICY";
 const ENV_TRACING_ENABLED: &str = "TAO_TRACING_ENABLED";
 const ENV_FEATURE_FLAGS: &str = "TAO_FEATURE_FLAGS";
+const ENV_READ_ONLY: &str = "TAO_READ_ONLY";
 
 /// Runtime SDK configuration loaded from defaults, environment, and explicit overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub struct SdkConfig {
     pub tracing_enabled: bool,
     /// Enabled feature flags by canonical key.
     pub feature_flags: Vec<String>,
+    /// Effective write policy gate.
+    pub read_only: bool,
 }
 
 /// Explicit override values with highest precedence.
@@ -48,6 +51,8 @@ pub struct SdkConfigOverrides {
     pub tracing_enabled: Option<bool>,
     /// Override enabled feature flags.
     pub feature_flags: Option<Vec<String>>,
+    /// Override read-only gate.
+    pub read_only: Option<bool>,
 }
 
 /// Loader for SDK configuration with deterministic precedence.
@@ -70,13 +75,32 @@ impl SdkConfigLoader {
         cwd: &Path,
     ) -> Result<SdkConfig, SdkConfigError> {
         let root_dir = resolve_root_config_dir(cwd);
-        let root_config = load_root_config_or_defaults(&root_dir)?;
+        let root_config = load_root_config_or_defaults(root_dir.as_deref())?;
+        let global_config_path = resolve_global_config_path(env);
+        let global_config = load_global_config_or_defaults(global_config_path.as_deref())?;
+        let global_config_dir = global_config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
 
-        let vault_root_input = choose_path(
+        let configured_vault_root =
+            root_config
+                .vault
+                .root
+                .clone()
+                .map(|path| absolutize_with_optional_base(root_dir.as_deref(), path))
+                .or_else(|| {
+                    global_config.vault.root.clone().map(|path| {
+                        absolutize_with_optional_base(global_config_dir.as_deref(), path)
+                    })
+                });
+
+        let vault_root_input = choose_optional_path(
             overrides.vault_root,
             env.get(ENV_VAULT_ROOT).map(PathBuf::from),
-            cwd.to_path_buf(),
-        );
+            configured_vault_root,
+        )
+        .ok_or(SdkConfigError::VaultRootUnconfigured)?;
         let vault_root = canonicalize_existing_directory(vault_root_input)?;
         let vault_config =
             load_or_bootstrap(&vault_root).map_err(|source| SdkConfigError::VaultConfig {
@@ -85,22 +109,27 @@ impl SdkConfigLoader {
             })?;
 
         let effective_config = TaoConfig::defaults()
+            .merge(&global_config)
             .merge(&root_config)
             .merge(&vault_config);
 
-        let configured_data_dir = vault_config
-            .storage
-            .data_dir
-            .as_ref()
-            .map(|path| absolutize_from(&vault_root, path.clone()))
-            .or_else(|| {
-                root_config
-                    .storage
-                    .data_dir
-                    .as_ref()
-                    .map(|path| absolutize_from(&root_dir, path.clone()))
-            })
-            .unwrap_or_else(|| vault_root.join(".tao"));
+        let configured_data_dir =
+            vault_config
+                .storage
+                .data_dir
+                .as_ref()
+                .map(|path| absolutize_from(&vault_root, path.clone()))
+                .or_else(|| {
+                    root_config.storage.data_dir.as_ref().map(|path| {
+                        absolutize_with_optional_base(root_dir.as_deref(), path.clone())
+                    })
+                })
+                .or_else(|| {
+                    global_config.storage.data_dir.as_ref().map(|path| {
+                        absolutize_with_optional_base(global_config_dir.as_deref(), path.clone())
+                    })
+                })
+                .unwrap_or_else(|| vault_root.join(".tao"));
 
         let data_dir_input = choose_path(
             overrides.data_dir,
@@ -113,19 +142,23 @@ impl SdkConfigLoader {
             source,
         })?;
 
-        let configured_db_path = vault_config
-            .storage
-            .db_path
-            .as_ref()
-            .map(|path| absolutize_from(&vault_root, path.clone()))
-            .or_else(|| {
-                root_config
-                    .storage
-                    .db_path
-                    .as_ref()
-                    .map(|path| absolutize_from(&root_dir, path.clone()))
-            })
-            .unwrap_or_else(|| data_dir.join("index.sqlite"));
+        let configured_db_path =
+            vault_config
+                .storage
+                .db_path
+                .as_ref()
+                .map(|path| absolutize_from(&vault_root, path.clone()))
+                .or_else(|| {
+                    root_config.storage.db_path.as_ref().map(|path| {
+                        absolutize_with_optional_base(root_dir.as_deref(), path.clone())
+                    })
+                })
+                .or_else(|| {
+                    global_config.storage.db_path.as_ref().map(|path| {
+                        absolutize_with_optional_base(global_config_dir.as_deref(), path.clone())
+                    })
+                })
+                .unwrap_or_else(|| data_dir.join("index.sqlite"));
 
         let db_path_input = choose_path(
             overrides.db_path,
@@ -162,7 +195,7 @@ impl SdkConfigLoader {
         let tracing_enabled = if let Some(value) = overrides.tracing_enabled {
             value
         } else if let Some(value) = env.get(ENV_TRACING_ENABLED) {
-            parse_bool(value)?
+            parse_bool(ENV_TRACING_ENABLED, value)?
         } else {
             effective_config.runtime.tracing_enabled.unwrap_or(true)
         };
@@ -175,6 +208,14 @@ impl SdkConfigLoader {
             normalize_feature_flags(effective_config.runtime.feature_flags.unwrap_or_default())
         };
 
+        let read_only = if let Some(value) = overrides.read_only {
+            value
+        } else if let Some(value) = env.get(ENV_READ_ONLY) {
+            parse_bool(ENV_READ_ONLY, value)?
+        } else {
+            effective_config.security.read_only.unwrap_or(true)
+        };
+
         Ok(SdkConfig {
             vault_root,
             data_dir,
@@ -182,51 +223,47 @@ impl SdkConfigLoader {
             case_policy,
             tracing_enabled,
             feature_flags,
+            read_only,
         })
     }
 }
 
-fn load_root_config_or_defaults(root_dir: &Path) -> Result<TaoConfig, SdkConfigError> {
-    if should_skip_root_bootstrap(root_dir) {
+fn load_root_config_or_defaults(root_dir: Option<&Path>) -> Result<TaoConfig, SdkConfigError> {
+    let Some(root_dir) = root_dir else {
+        return Ok(TaoConfig::defaults());
+    };
+    let path = root_dir.join("config.toml");
+    if !path.exists() {
         return Ok(TaoConfig::defaults());
     }
-
-    match load_or_bootstrap(root_dir) {
-        Ok(config) => Ok(config),
-        Err(source @ tao_sdk_config::TaoConfigError::CreateParent { .. })
-        | Err(source @ tao_sdk_config::TaoConfigError::Write { .. }) => {
-            Ok(root_config_fallback(&source))
-        }
-        Err(
-            ref source @ tao_sdk_config::TaoConfigError::Read {
-                source: ref read_source,
-                ..
-            },
-        ) if matches!(
-            read_source.kind(),
-            ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
-        ) =>
-        {
-            Ok(root_config_fallback(source))
-        }
-        Err(source) => Err(SdkConfigError::RootConfig {
-            path: root_dir.join("config.toml"),
-            source,
-        }),
-    }
+    load_from_path(&path).map_err(|source| SdkConfigError::RootConfig { path, source })
 }
 
-fn root_config_fallback(_source: &tao_sdk_config::TaoConfigError) -> TaoConfig {
-    TaoConfig::defaults()
+fn load_global_config_or_defaults(
+    global_config_path: Option<&Path>,
+) -> Result<TaoConfig, SdkConfigError> {
+    let Some(path) = global_config_path else {
+        return Ok(TaoConfig::defaults());
+    };
+    if !path.exists() {
+        return Ok(TaoConfig::defaults());
+    }
+    load_from_path(path).map_err(|source| SdkConfigError::GlobalConfig {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
-fn should_skip_root_bootstrap(root_dir: &Path) -> bool {
-    if root_dir.join("config.toml").exists() {
-        return false;
-    }
+fn resolve_global_config_path(env: &HashMap<String, String>) -> Option<PathBuf> {
+    env.get(ENV_CONFIG_PATH)
+        .map(PathBuf::from)
+        .or_else(|| resolve_home_dir(env).map(|home| home.join(".tools/tao/config.toml")))
+}
 
-    // App bundles launched from Finder can run with cwd `/`; never bootstrap `/config.toml`.
-    root_dir.parent().is_none()
+fn resolve_home_dir(env: &HashMap<String, String>) -> Option<PathBuf> {
+    env.get("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env.get("USERPROFILE").map(PathBuf::from))
 }
 
 /// Bootstrap snapshot returned after config resolution and migration readiness checks.
@@ -234,7 +271,7 @@ fn should_skip_root_bootstrap(root_dir: &Path) -> bool {
 pub struct SdkBootstrapSnapshot {
     /// Final resolved SDK configuration.
     pub config: SdkConfig,
-    /// Root config path (`<cwd>/config.toml`).
+    /// Resolved root config probe path.
     pub root_config_path: PathBuf,
     /// Vault config path (`<vault>/config.toml`).
     pub vault_config_path: PathBuf,
@@ -294,7 +331,9 @@ impl SdkBootstrapService {
             })?;
 
         Ok(SdkBootstrapSnapshot {
-            root_config_path: root_dir.join("config.toml"),
+            root_config_path: root_dir
+                .unwrap_or_else(|| cwd.to_path_buf())
+                .join("config.toml"),
             vault_config_path: config.vault_root.join("config.toml"),
             db_path: config.db_path.clone(),
             db_ready: true,
@@ -314,6 +353,14 @@ fn choose_path(
     override_value.or(env_value).unwrap_or(default)
 }
 
+fn choose_optional_path(
+    override_value: Option<PathBuf>,
+    env_value: Option<PathBuf>,
+    default: Option<PathBuf>,
+) -> Option<PathBuf> {
+    override_value.or(env_value).or(default)
+}
+
 fn absolutize_from(base: &Path, path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -322,15 +369,28 @@ fn absolutize_from(base: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
-fn resolve_root_config_dir(cwd: &Path) -> PathBuf {
+fn absolutize_with_optional_base(base: Option<&Path>, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    if let Some(base) = base {
+        return base.join(path);
+    }
+    path
+}
+
+fn resolve_root_config_dir(cwd: &Path) -> Option<PathBuf> {
     let mut cursor = Some(cwd);
     while let Some(path) = cursor {
         if path.join(".git").exists() {
-            return path.to_path_buf();
+            return Some(path.to_path_buf());
+        }
+        if path.join("config.toml").exists() {
+            return Some(path.to_path_buf());
         }
         cursor = path.parent();
     }
-    cwd.to_path_buf()
+    None
 }
 
 fn canonicalize_existing_directory(path: PathBuf) -> Result<PathBuf, SdkConfigError> {
@@ -364,14 +424,14 @@ fn parse_case_policy(value: &str) -> Result<CasePolicy, SdkConfigError> {
     }
 }
 
-fn parse_bool(value: &str) -> Result<bool, SdkConfigError> {
+fn parse_bool(key: &'static str, value: &str) -> Result<bool, SdkConfigError> {
     if value.eq_ignore_ascii_case("true") || value == "1" {
         Ok(true)
     } else if value.eq_ignore_ascii_case("false") || value == "0" {
         Ok(false)
     } else {
         Err(SdkConfigError::InvalidBool {
-            key: ENV_TRACING_ENABLED,
+            key,
             value: value.to_string(),
         })
     }
@@ -407,6 +467,15 @@ pub enum SdkConfigError {
     #[error("failed to load root config '{path}': {source}")]
     RootConfig {
         /// Root config path.
+        path: PathBuf,
+        /// Config decode/bootstrap error.
+        #[source]
+        source: tao_sdk_config::TaoConfigError,
+    },
+    /// Loading global config failed.
+    #[error("failed to load global config '{path}': {source}")]
+    GlobalConfig {
+        /// Global config path.
         path: PathBuf,
         /// Config decode/bootstrap error.
         #[source]
@@ -482,6 +551,11 @@ pub enum SdkConfigError {
         /// Raw env value.
         value: String,
     },
+    /// Vault root was not configured through any supported source.
+    #[error(
+        "vault root is not configured; pass --vault-root, set TAO_VAULT_ROOT, or set [vault].root in ~/.tools/tao/config.toml"
+    )]
+    VaultRootUnconfigured,
 }
 
 /// SDK bootstrap service failures.
@@ -534,7 +608,6 @@ pub enum SdkBootstrapError {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
 
     use tao_sdk_storage::known_migrations;
     use tempfile::tempdir;
@@ -608,6 +681,10 @@ mod tests {
 
         assert_eq!(config.case_policy, CasePolicy::Insensitive);
         assert!(config.db_path.ends_with("index.sqlite"));
+        assert!(
+            config.read_only,
+            "default security policy should be read-only"
+        );
         assert_eq!(
             config.feature_flags,
             vec![
@@ -618,7 +695,19 @@ mod tests {
     }
 
     #[test]
-    fn load_from_map_rejects_missing_vault_root() {
+    fn load_from_map_rejects_unconfigured_vault_root() {
+        let temp = tempdir().expect("tempdir");
+        let env = HashMap::new();
+
+        let error =
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
+                .expect_err("unconfigured root should fail");
+
+        assert!(matches!(error, SdkConfigError::VaultRootUnconfigured));
+    }
+
+    #[test]
+    fn load_from_map_rejects_missing_vault_root_path() {
         let temp = tempdir().expect("tempdir");
         let mut env = HashMap::new();
         env.insert(
@@ -657,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_map_bootstraps_root_config_when_missing() {
+    fn load_from_map_does_not_bootstrap_root_config_when_missing() {
         let temp = tempdir().expect("tempdir");
         let vault = temp.path().join("vault");
         fs::create_dir_all(&vault).expect("create vault");
@@ -673,12 +762,15 @@ mod tests {
 
         let loaded =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
-                .expect("load config with bootstrap");
+                .expect("load config without root bootstrap");
         assert_eq!(
             loaded.vault_root,
             fs::canonicalize(vault).expect("canonical vault")
         );
-        assert!(root_config.exists(), "root config should be bootstrapped");
+        assert!(
+            !root_config.exists(),
+            "root config should not be bootstrapped outside repo roots"
+        );
     }
 
     #[test]
@@ -758,24 +850,41 @@ db_path = ".vault.sqlite"
     }
 
     #[test]
-    fn load_from_map_skips_root_bootstrap_when_cwd_is_filesystem_root() {
+    fn load_from_map_uses_global_config_defaults_when_env_and_override_missing() {
         let temp = tempdir().expect("tempdir");
         let vault = temp.path().join("vault");
         fs::create_dir_all(&vault).expect("create vault");
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join(".tools/tao")).expect("create global config dir");
+        fs::write(
+            home.join(".tools/tao/config.toml"),
+            format!(
+                r#"[vault]
+root = "{}"
+
+[security]
+read_only = true
+"#,
+                vault.display()
+            ),
+        )
+        .expect("write global config");
 
         let mut env = HashMap::new();
-        env.insert(
-            "TAO_VAULT_ROOT".to_string(),
-            vault.to_string_lossy().to_string(),
-        );
+        env.insert("HOME".to_string(), home.to_string_lossy().to_string());
+        env.insert("TAO_READ_ONLY".to_string(), "0".to_string());
 
         let loaded =
-            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, Path::new("/"))
+            SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
                 .expect("load config");
 
         assert_eq!(
             loaded.vault_root,
             fs::canonicalize(vault).expect("canonical vault")
+        );
+        assert!(
+            !loaded.read_only,
+            "TAO_READ_ONLY=0 should override global read_only=true"
         );
         assert!(loaded.db_path.ends_with("index.sqlite"));
     }
@@ -804,7 +913,10 @@ db_path = ".vault.sqlite"
         assert_eq!(snapshot.pending_migrations, 0);
         assert_eq!(snapshot.applied_migrations, known_migrations().len() as u64);
         assert_eq!(snapshot.db_path, snapshot.config.db_path);
-        assert!(snapshot.root_config_path.exists());
+        assert!(
+            !snapshot.root_config_path.exists(),
+            "root config is probe-only and should not be created implicitly"
+        );
         assert!(snapshot.vault_config_path.exists());
     }
 }

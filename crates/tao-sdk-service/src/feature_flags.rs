@@ -145,6 +145,7 @@ mod tests {
             case_policy: CasePolicy::Sensitive,
             tracing_enabled: true,
             feature_flags,
+            read_only: true,
         }
     }
 

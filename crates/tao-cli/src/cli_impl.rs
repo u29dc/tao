@@ -39,7 +39,8 @@ use tao_sdk_watch::WatchReconcileService;
 
 mod commands;
 
-const DEFAULT_DAEMON_SOCKET: &str = "/tmp/tao-daemon.sock";
+const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_DAEMON_SOCKET_DIR: &str = ".tools/tao/daemons";
 const QUERY_DOCS_POST_FILTER_PAGE_LIMIT: u64 = 1_000;
 
 #[derive(Debug, Clone, Parser, Serialize, Deserialize)]
@@ -189,13 +190,15 @@ enum DaemonCommands {
     Status(DaemonSocketArgs),
     /// Stop daemon and terminate warm runtime.
     Stop(DaemonSocketArgs),
+    /// Stop all managed daemons and prune stale socket files.
+    StopAll(DaemonStopAllArgs),
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct VaultPathArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -203,9 +206,9 @@ struct VaultPathArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct NotePathArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -216,9 +219,9 @@ struct NotePathArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct NotePutArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -232,9 +235,9 @@ struct NotePutArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct BaseViewArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -254,9 +257,9 @@ struct BaseViewArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct BaseSchemaArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -267,9 +270,9 @@ struct BaseSchemaArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphWindowArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -283,9 +286,9 @@ struct GraphWindowArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphWalkArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -308,9 +311,9 @@ struct GraphWalkArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphComponentsArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -333,9 +336,9 @@ struct GraphComponentsArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphNeighborsArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -355,9 +358,9 @@ struct GraphNeighborsArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphPathArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -377,9 +380,9 @@ struct GraphPathArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct TaskListArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -399,9 +402,9 @@ struct TaskListArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct TaskSetStateArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -418,9 +421,9 @@ struct TaskSetStateArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct QueryArgs {
-    /// Absolute vault root path.
+    /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
-    vault_root: String,
+    vault_root: Option<String>,
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
@@ -461,99 +464,138 @@ struct QueryArgs {
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct DaemonSocketArgs {
-    /// Unix domain socket path for tao daemon.
-    #[arg(long, default_value = DEFAULT_DAEMON_SOCKET)]
-    socket: String,
+    /// Optional unix domain socket path override for tao daemon.
+    #[arg(long)]
+    socket: Option<String>,
+    /// Optional absolute vault root path used to derive deterministic daemon socket.
+    #[arg(long)]
+    vault_root: Option<String>,
+    /// Optional sqlite database file path override used with `--vault-root`.
+    #[arg(long)]
+    db_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct DaemonStartArgs {
-    /// Unix domain socket path for tao daemon.
-    #[arg(long, default_value = DEFAULT_DAEMON_SOCKET)]
-    socket: String,
+    /// Optional unix domain socket path override for tao daemon.
+    #[arg(long)]
+    socket: Option<String>,
+    /// Optional absolute vault root path used to derive deterministic daemon socket.
+    #[arg(long)]
+    vault_root: Option<String>,
+    /// Optional sqlite database file path override used with `--vault-root`.
+    #[arg(long)]
+    db_path: Option<String>,
     /// Run daemon in foreground (blocks current process).
     #[arg(long, default_value_t = false)]
     foreground: bool,
     /// Maximum wait window for daemon startup when backgrounded.
-    #[arg(long, default_value_t = 5_000)]
+    #[arg(long, default_value_t = DEFAULT_DAEMON_STARTUP_TIMEOUT_MS)]
     startup_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct DaemonStopAllArgs {
+    /// Optional daemon socket directory override.
+    #[arg(long)]
+    socket_dir: Option<String>,
 }
 
 impl VaultPathArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl NotePathArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl NotePutArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl BaseViewArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl BaseSchemaArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl GraphWindowArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl GraphWalkArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl GraphComponentsArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl GraphNeighborsArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl GraphPathArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl TaskListArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl TaskSetStateArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
 impl QueryArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
+    }
+}
+
+impl DaemonSocketArgs {
+    fn resolve_socket(&self) -> Result<String> {
+        resolve_daemon_socket(
+            self.socket.as_deref(),
+            self.vault_root.as_deref(),
+            self.db_path.as_deref(),
+        )
+    }
+}
+
+impl DaemonStartArgs {
+    fn resolve_socket(&self) -> Result<String> {
+        resolve_daemon_socket(
+            self.socket.as_deref(),
+            self.vault_root.as_deref(),
+            self.db_path.as_deref(),
+        )
     }
 }
 
@@ -917,6 +959,7 @@ struct CommandResult {
 struct ResolvedVaultPathArgs {
     vault_root: String,
     db_path: String,
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1058,7 +1101,7 @@ fn classify_cli_error(error: &anyhow::Error) -> JsonError {
     } else if message.contains("connect daemon socket") {
         (
             "daemon_unavailable",
-            Some("start daemon first or remove --daemon-socket".to_string()),
+            Some("daemon auto-start failed; check socket path permissions or override --daemon-socket".to_string()),
         )
     } else if message.contains("unsupported query scope")
         || message.contains("requires --view-name")
@@ -1191,8 +1234,8 @@ fn handle_doc(
             })
         }
         DocCommands::Write(args) => {
-            ensure_writes_enabled(allow_writes, "doc.write")?;
             let resolved = args.resolve()?;
+            ensure_writes_enabled(allow_writes, resolved.read_only, "doc.write")?;
             let ack = with_kernel(runtime, &resolved, |kernel| {
                 expect_bridge_value(
                     kernel.note_put_with_policy(&args.path, &args.content, true),
@@ -1922,8 +1965,8 @@ fn handle_task(
             })
         }
         TaskCommands::SetState(args) => {
-            ensure_writes_enabled(allow_writes, "task.set-state")?;
             let resolved = args.resolve()?;
+            ensure_writes_enabled(allow_writes, resolved.read_only, "task.set-state")?;
             let absolute = Path::new(&resolved.vault_root).join(&args.path);
             let markdown = fs::read_to_string(&absolute)
                 .with_context(|| format!("read markdown note '{}'", absolute.display()))?;
@@ -2494,12 +2537,13 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         VaultCommands::Daemon { command } => handle_daemon(command),
         VaultCommands::DaemonServe(args) => {
-            run_daemon_server(&args.socket)?;
+            let socket = args.resolve_socket()?;
+            run_daemon_server(&socket)?;
             Ok(CommandResult {
                 command: "vault.daemon.serve".to_string(),
                 summary: "vault daemon serve stopped".to_string(),
                 args: serde_json::json!({
-                    "socket": args.socket,
+                    "socket": socket,
                     "stopped": true,
                 }),
             })
@@ -2508,34 +2552,112 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
 }
 
 fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
-    let Some(socket) = cli.daemon_socket.as_deref() else {
-        return Ok(None);
-    };
     if is_daemon_control_command(&cli.command) {
         return Ok(None);
     }
 
-    let response = daemon_request(
-        socket,
-        &DaemonRequest::Execute {
+    #[cfg(not(unix))]
+    {
+        let _ = cli;
+        return Ok(None);
+    }
+
+    #[cfg(unix)]
+    {
+        let Some(socket) = resolve_daemon_socket_for_cli(cli)? else {
+            return Ok(None);
+        };
+        let request = DaemonRequest::Execute {
             payload: Box::new(DaemonExecuteRequest {
                 command: cli.command.clone(),
                 allow_writes: cli.allow_writes,
                 json: cli.json,
                 json_stream: cli.json_stream,
             }),
-        },
-    )?;
-    if !response.ok {
-        let message = response
-            .error
-            .unwrap_or_else(|| "daemon returned unknown failure".to_string());
-        return Err(anyhow!(message));
+        };
+        let mut auto_start_attempted = false;
+
+        loop {
+            let response = match daemon_request(&socket, &request) {
+                Ok(response) => response,
+                Err(source) => {
+                    if daemon_socket_is_unavailable(&source) && !auto_start_attempted {
+                        ensure_daemon_running(&socket, DEFAULT_DAEMON_STARTUP_TIMEOUT_MS)?;
+                        auto_start_attempted = true;
+                        continue;
+                    }
+                    return Err(source);
+                }
+            };
+            if !response.ok {
+                let message = response
+                    .error
+                    .unwrap_or_else(|| "daemon returned unknown failure".to_string());
+                return Err(anyhow!(message));
+            }
+            return response
+                .output
+                .map(Some)
+                .ok_or_else(|| anyhow!("daemon execute response missing output payload"));
+        }
     }
-    response
-        .output
-        .map(Some)
-        .ok_or_else(|| anyhow!("daemon execute response missing output payload"))
+}
+
+fn resolve_daemon_socket_for_cli(cli: &Cli) -> Result<Option<String>> {
+    if let Some(socket) = cli.daemon_socket.as_ref() {
+        return Ok(Some(socket.clone()));
+    }
+    let Some(vault) = resolve_command_vault_paths(&cli.command)? else {
+        return Ok(None);
+    };
+    Ok(Some(derive_daemon_socket_for_vault(&vault.vault_root)?))
+}
+
+fn resolve_command_vault_paths(command: &Commands) -> Result<Option<ResolvedVaultPathArgs>> {
+    let resolved = match command {
+        Commands::Doc { command } => match command {
+            DocCommands::Read(args) => args.resolve()?,
+            DocCommands::Write(args) => args.resolve()?,
+            DocCommands::List(args) => args.resolve()?,
+        },
+        Commands::Base { command } => match command {
+            BaseCommands::List(args) => args.resolve()?,
+            BaseCommands::View(args) => args.resolve()?,
+            BaseCommands::Schema(args) => args.resolve()?,
+        },
+        Commands::Graph { command } => match command {
+            GraphCommands::Outgoing(args) => args.resolve()?,
+            GraphCommands::Backlinks(args) => args.resolve()?,
+            GraphCommands::Unresolved(args) => args.resolve()?,
+            GraphCommands::Deadends(args) => args.resolve()?,
+            GraphCommands::Orphans(args) => args.resolve()?,
+            GraphCommands::Components(args) => args.resolve()?,
+            GraphCommands::Neighbors(args) => args.resolve()?,
+            GraphCommands::Path(args) => args.resolve()?,
+            GraphCommands::Walk(args) => args.resolve()?,
+        },
+        Commands::Meta { command } => match command {
+            MetaCommands::Properties(args) => args.resolve()?,
+            MetaCommands::Tags(args) => args.resolve()?,
+            MetaCommands::Aliases(args) => args.resolve()?,
+            MetaCommands::Tasks(args) => args.resolve()?,
+        },
+        Commands::Task { command } => match command {
+            TaskCommands::List(args) => args.resolve()?,
+            TaskCommands::SetState(args) => args.resolve()?,
+        },
+        Commands::Query(args) => args.resolve()?,
+        Commands::Vault { command } => match command {
+            VaultCommands::Open(args) => args.resolve()?,
+            VaultCommands::Stats(args) => args.resolve()?,
+            VaultCommands::Preflight(args) => args.resolve()?,
+            VaultCommands::Reindex(args) => args.resolve()?,
+            VaultCommands::Reconcile(args) => args.resolve()?,
+            VaultCommands::Daemon { .. } | VaultCommands::DaemonServe(_) => return Ok(None),
+        },
+    };
+
+    Ok(Some(resolved))
 }
 
 fn is_daemon_control_command(command: &Commands) -> bool {
@@ -2566,67 +2688,98 @@ fn command_is_cacheable(command: &Commands) -> bool {
     }
 }
 
+fn resolve_daemon_socket(
+    socket_override: Option<&str>,
+    vault_root_override: Option<&str>,
+    db_path_override: Option<&str>,
+) -> Result<String> {
+    if let Some(socket) = socket_override {
+        return Ok(socket.to_string());
+    }
+    let resolved = resolve_vault_paths(vault_root_override, db_path_override)?;
+    derive_daemon_socket_for_vault(&resolved.vault_root)
+}
+
+fn derive_daemon_socket_for_vault(vault_root: &str) -> Result<String> {
+    let socket_dir = default_daemon_socket_dir()?;
+    let hash = blake3::hash(vault_root.as_bytes()).to_hex().to_string();
+    let file_name = format!("vault-{}.sock", &hash[..16]);
+    Ok(socket_dir.join(file_name).to_string_lossy().to_string())
+}
+
+fn default_daemon_socket_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(DEFAULT_DAEMON_SOCKET_DIR));
+    }
+    let cwd = std::env::current_dir().context("resolve cwd for daemon socket dir fallback")?;
+    Ok(cwd.join(".tao/daemons"))
+}
+
+fn ensure_daemon_running(socket: &str, startup_timeout_ms: u64) -> Result<Option<u32>> {
+    if daemon_status_probe(socket)?.is_some() {
+        return Ok(None);
+    }
+
+    let current_exe = std::env::current_exe().context("resolve current executable path")?;
+    let child = ProcessCommand::new(current_exe)
+        .arg("vault")
+        .arg("daemon-serve")
+        .arg("--socket")
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn background daemon at '{socket}'"))?;
+    let pid = child.id();
+    wait_for_daemon_startup(socket, startup_timeout_ms)?;
+    Ok(Some(pid))
+}
+
 fn handle_daemon(command: DaemonCommands) -> Result<CommandResult> {
     match command {
         DaemonCommands::Start(args) => {
+            let socket = args.resolve_socket()?;
             if args.foreground {
-                run_daemon_server(&args.socket)?;
+                run_daemon_server(&socket)?;
                 return Ok(CommandResult {
                     command: "vault.daemon.start".to_string(),
                     summary: "vault daemon foreground session stopped".to_string(),
                     args: serde_json::json!({
-                        "socket": args.socket,
+                        "socket": socket,
                         "foreground": true,
                         "stopped": true,
                     }),
                 });
             }
 
-            let status = daemon_status_probe(&args.socket)?;
-            if status.is_some() {
-                return Ok(CommandResult {
-                    command: "vault.daemon.start".to_string(),
-                    summary: "vault daemon already running".to_string(),
-                    args: serde_json::json!({
-                        "socket": args.socket,
-                        "started": false,
-                        "already_running": true,
-                    }),
-                });
-            }
-
-            let current_exe = std::env::current_exe().context("resolve current executable path")?;
-            let child = ProcessCommand::new(current_exe)
-                .arg("vault")
-                .arg("daemon-serve")
-                .arg("--socket")
-                .arg(&args.socket)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .with_context(|| format!("spawn background daemon at '{}'", args.socket))?;
-            let pid = child.id();
-            wait_for_daemon_startup(&args.socket, args.startup_timeout_ms)?;
+            let pid = ensure_daemon_running(&socket, args.startup_timeout_ms)?;
+            let started = pid.is_some();
 
             Ok(CommandResult {
                 command: "vault.daemon.start".to_string(),
-                summary: "vault daemon started".to_string(),
+                summary: if started {
+                    "vault daemon started".to_string()
+                } else {
+                    "vault daemon already running".to_string()
+                },
                 args: serde_json::json!({
-                    "socket": args.socket,
-                    "started": true,
+                    "socket": socket,
+                    "started": started,
+                    "already_running": !started,
                     "pid": pid,
                 }),
             })
         }
         DaemonCommands::Status(args) => {
-            let status = daemon_status_probe(&args.socket)?;
+            let socket = args.resolve_socket()?;
+            let status = daemon_status_probe(&socket)?;
             match status {
                 Some(status) => Ok(CommandResult {
                     command: "vault.daemon.status".to_string(),
                     summary: "vault daemon status completed".to_string(),
                     args: serde_json::json!({
-                        "socket": args.socket,
+                        "socket": socket,
                         "running": true,
                         "state": "running",
                         "uptime_ms": status.uptime_ms,
@@ -2639,28 +2792,29 @@ fn handle_daemon(command: DaemonCommands) -> Result<CommandResult> {
                     command: "vault.daemon.status".to_string(),
                     summary: "vault daemon status completed".to_string(),
                     args: serde_json::json!({
-                        "socket": args.socket,
+                        "socket": socket,
                         "running": false,
-                        "state": daemon_socket_state_label(&args.socket),
+                        "state": daemon_socket_state_label(&socket),
                     }),
                 }),
             }
         }
         DaemonCommands::Stop(args) => {
-            let status = daemon_status_probe(&args.socket)?;
+            let socket = args.resolve_socket()?;
+            let status = daemon_status_probe(&socket)?;
             if status.is_none() {
                 return Ok(CommandResult {
                     command: "vault.daemon.stop".to_string(),
                     summary: "vault daemon stop completed".to_string(),
                     args: serde_json::json!({
-                        "socket": args.socket,
+                        "socket": socket,
                         "stopped": false,
                         "running": false,
                     }),
                 });
             }
 
-            let response = daemon_request(&args.socket, &DaemonRequest::Shutdown)?;
+            let response = daemon_request(&socket, &DaemonRequest::Shutdown)?;
             if !response.ok {
                 let message = response
                     .error
@@ -2671,12 +2825,101 @@ fn handle_daemon(command: DaemonCommands) -> Result<CommandResult> {
                 command: "vault.daemon.stop".to_string(),
                 summary: "vault daemon stop completed".to_string(),
                 args: serde_json::json!({
-                    "socket": args.socket,
+                    "socket": socket,
                     "stopped": true,
                 }),
             })
         }
+        DaemonCommands::StopAll(args) => handle_daemon_stop_all(args),
     }
+}
+
+fn handle_daemon_stop_all(args: DaemonStopAllArgs) -> Result<CommandResult> {
+    let socket_dir = match args.socket_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => default_daemon_socket_dir()?,
+    };
+    let sockets = list_managed_daemon_sockets(&socket_dir)?;
+    let discovered_sockets = sockets.len();
+    let mut running_before_stop = 0usize;
+    let mut stopped = 0usize;
+    let mut pruned = 0usize;
+    let mut failed = Vec::new();
+
+    for socket in sockets {
+        let socket_label = socket.to_string_lossy().to_string();
+        let status = match daemon_status_probe(&socket_label) {
+            Ok(status) => status,
+            Err(source) => {
+                failed.push(format!("{socket_label}: {source}"));
+                continue;
+            }
+        };
+
+        if status.is_some() {
+            running_before_stop += 1;
+            match daemon_request(&socket_label, &DaemonRequest::Shutdown) {
+                Ok(response) if response.ok => {
+                    stopped += 1;
+                }
+                Ok(response) => {
+                    let message = response
+                        .error
+                        .unwrap_or_else(|| "daemon returned unknown failure".to_string());
+                    failed.push(format!("{socket_label}: {message}"));
+                }
+                Err(source) => failed.push(format!("{socket_label}: {source}")),
+            }
+            continue;
+        }
+
+        let state = daemon_socket_state_label(&socket_label);
+        if matches!(state, "stale" | "dead") {
+            match fs::remove_file(&socket) {
+                Ok(()) => pruned += 1,
+                Err(source) => failed.push(format!(
+                    "{}: failed to remove stale socket: {}",
+                    socket_label, source
+                )),
+            }
+        }
+    }
+
+    Ok(CommandResult {
+        command: "vault.daemon.stop_all".to_string(),
+        summary: "vault daemon stop-all completed".to_string(),
+        args: serde_json::json!({
+            "socket_dir": socket_dir.to_string_lossy(),
+            "discovered_sockets": discovered_sockets,
+            "running_before_stop": running_before_stop,
+            "stopped": stopped,
+            "pruned_stale": pruned,
+            "failed": failed,
+        }),
+    })
+}
+
+fn list_managed_daemon_sockets(socket_dir: &Path) -> Result<Vec<PathBuf>> {
+    if !socket_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(socket_dir)
+        .with_context(|| format!("read daemon socket directory '{}'", socket_dir.display()))?;
+    let mut sockets = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "read daemon socket directory entry from '{}'",
+                socket_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("sock") {
+            sockets.push(path);
+        }
+    }
+    sockets.sort();
+    Ok(sockets)
 }
 
 fn daemon_status_probe(socket: &str) -> Result<Option<DaemonStatus>> {
@@ -2973,12 +3216,12 @@ fn prepare_daemon_socket_path(socket: &str) -> Result<PathBuf> {
     Ok(socket_path.to_path_buf())
 }
 
-fn ensure_writes_enabled(allow_writes: bool, command: &str) -> Result<()> {
-    if allow_writes {
+fn ensure_writes_enabled(allow_writes: bool, read_only: bool, command: &str) -> Result<()> {
+    if allow_writes || !read_only {
         return Ok(());
     }
     Err(anyhow!(
-        "{command} is disabled by default; pass --allow-writes to enable vault content mutations"
+        "{command} is disabled by default; pass --allow-writes or set [security].read_only=false to enable vault content mutations"
     ))
 }
 
@@ -3177,11 +3420,11 @@ fn with_kernel<T>(
 }
 
 fn resolve_vault_paths(
-    vault_root: &str,
+    vault_root_override: Option<&str>,
     db_path_override: Option<&str>,
 ) -> Result<ResolvedVaultPathArgs> {
     let config = SdkConfigLoader::load(SdkConfigOverrides {
-        vault_root: Some(PathBuf::from(vault_root)),
+        vault_root: vault_root_override.map(PathBuf::from),
         db_path: db_path_override.map(PathBuf::from),
         ..SdkConfigOverrides::default()
     })
@@ -3190,6 +3433,7 @@ fn resolve_vault_paths(
     Ok(ResolvedVaultPathArgs {
         vault_root: config.vault_root.to_string_lossy().to_string(),
         db_path: config.db_path.to_string_lossy().to_string(),
+        read_only: config.read_only,
     })
 }
 
@@ -3302,10 +3546,11 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        Cli, Commands, DaemonCommands, DaemonSocketArgs, DocCommands, NotePutArgs, QueryArgs,
-        command_is_cacheable, dispatch, handle_daemon, maybe_forward_to_daemon,
-        maybe_render_streaming_output, prepare_daemon_socket_path, render_error_output,
-        render_output,
+        Cli, Commands, DaemonCommands, DaemonSocketArgs, DaemonStopAllArgs, DocCommands,
+        NotePutArgs, QueryArgs, command_is_cacheable, derive_daemon_socket_for_vault, dispatch,
+        handle_daemon, maybe_forward_to_daemon, maybe_render_streaming_output,
+        prepare_daemon_socket_path, render_error_output, render_output,
+        resolve_command_vault_paths, resolve_daemon_socket_for_cli,
     };
     use clap::{CommandFactory, Parser};
     use serde_json::Value as JsonValue;
@@ -3892,6 +4137,91 @@ mod tests {
             let task_error = dispatch(task_set_state.command, task_set_state.allow_writes)
                 .expect_err("task.set-state should require --allow-writes");
             assert!(task_error.to_string().contains("--allow-writes"));
+        });
+    }
+
+    #[test]
+    fn vault_commands_use_configured_default_root_when_vault_root_arg_is_omitted() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A\n").expect("write note");
+
+            fs::write(
+                Path::new("config.toml"),
+                format!(
+                    r#"[vault]
+root = "{}"
+
+[security]
+read_only = true
+"#,
+                    vault_root.display()
+                ),
+            )
+            .expect("write root config");
+
+            let cli = Cli::parse_from(["tao", "--json", "vault", "stats"]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let resolved_root = envelope
+                .get("value")
+                .and_then(|raw| raw.get("args"))
+                .and_then(|raw| raw.get("vault_root"))
+                .and_then(JsonValue::as_str)
+                .expect("resolved vault root");
+
+            assert_eq!(
+                Path::new(resolved_root),
+                fs::canonicalize(vault_root)
+                    .expect("canonical vault")
+                    .as_path()
+            );
+        });
+    }
+
+    #[test]
+    fn write_commands_are_enabled_when_read_only_policy_is_disabled_in_config() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A\n").expect("write note");
+
+            fs::write(
+                Path::new("config.toml"),
+                format!(
+                    r#"[vault]
+root = "{}"
+
+[security]
+read_only = false
+"#,
+                    vault_root.display()
+                ),
+            )
+            .expect("write root config");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "doc",
+                "write",
+                "--path",
+                "notes/policy-write.md",
+                "--content",
+                "# policy",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch doc write");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(true));
+            assert!(
+                vault_root.join("notes/policy-write.md").exists(),
+                "write should succeed when read_only=false"
+            );
         });
     }
 
@@ -5162,22 +5492,50 @@ links fixture
     }
 
     #[test]
-    fn daemon_forwarding_reports_missing_socket_for_non_control_commands() {
+    fn daemon_socket_resolution_prefers_explicit_override() {
         let cli = Cli::parse_from([
             "tao",
             "--json",
             "--daemon-socket",
-            "/tmp/does-not-exist.sock",
+            "/tmp/tao-explicit.sock",
             "vault",
             "open",
             "--vault-root",
             "/tmp",
         ]);
-        let error = maybe_forward_to_daemon(&cli).expect_err("forwarding should fail");
-        assert!(
-            error.to_string().contains("connect daemon socket"),
-            "unexpected error: {error}"
-        );
+        let socket = resolve_daemon_socket_for_cli(&cli)
+            .expect("resolve socket")
+            .expect("socket should be resolved");
+        assert_eq!(socket, "/tmp/tao-explicit.sock");
+    }
+
+    #[test]
+    fn daemon_socket_resolution_derives_deterministic_per_vault_path() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(&vault_root).expect("create vault root");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+
+            let socket = resolve_daemon_socket_for_cli(&cli)
+                .expect("resolve socket")
+                .expect("socket should be resolved");
+            let resolved = resolve_command_vault_paths(&cli.command)
+                .expect("resolve command vault paths")
+                .expect("vault path should resolve");
+            let expected =
+                derive_daemon_socket_for_vault(&resolved.vault_root).expect("derive socket");
+            assert_eq!(socket, expected);
+            assert!(socket.ends_with(".sock"));
+        });
     }
 
     #[test]
@@ -5190,7 +5548,9 @@ links fixture
             drop(listener);
         }
         let stale = handle_daemon(DaemonCommands::Status(DaemonSocketArgs {
-            socket: stale_socket.to_string_lossy().to_string(),
+            socket: Some(stale_socket.to_string_lossy().to_string()),
+            vault_root: None,
+            db_path: None,
         }))
         .expect("daemon status");
         assert_eq!(
@@ -5205,7 +5565,9 @@ links fixture
         let dead_path = tempdir.path().join("dead.sock");
         fs::write(&dead_path, "not-a-socket").expect("write dead socket placeholder");
         let dead = handle_daemon(DaemonCommands::Status(DaemonSocketArgs {
-            socket: dead_path.to_string_lossy().to_string(),
+            socket: Some(dead_path.to_string_lossy().to_string()),
+            vault_root: None,
+            db_path: None,
         }))
         .expect("daemon status");
         assert_eq!(
@@ -5231,9 +5593,36 @@ links fixture
     }
 
     #[test]
+    fn daemon_stop_all_prunes_stale_socket_files() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let socket_dir = tempdir.path().join("daemons");
+        fs::create_dir_all(&socket_dir).expect("create daemon socket dir");
+        let dead_socket = socket_dir.join("dead.sock");
+        fs::write(&dead_socket, "stale").expect("write dead socket marker");
+        assert!(dead_socket.exists(), "test precondition");
+
+        let result = handle_daemon(DaemonCommands::StopAll(DaemonStopAllArgs {
+            socket_dir: Some(socket_dir.to_string_lossy().to_string()),
+        }))
+        .expect("daemon stop-all");
+        assert_eq!(
+            result
+                .args
+                .get("discovered_sockets")
+                .and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            result.args.get("pruned_stale").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        assert!(!dead_socket.exists(), "stale socket should be removed");
+    }
+
+    #[test]
     fn daemon_cacheability_matrix_blocks_mutating_commands() {
         let cacheable_query = Commands::Query(QueryArgs {
-            vault_root: "/tmp".to_string(),
+            vault_root: Some("/tmp".to_string()),
             db_path: None,
             from: "docs".to_string(),
             query: Some("project".to_string()),
@@ -5251,7 +5640,7 @@ links fixture
 
         let doc_write = Commands::Doc {
             command: DocCommands::Write(NotePutArgs {
-                vault_root: "/tmp".to_string(),
+                vault_root: Some("/tmp".to_string()),
                 db_path: None,
                 path: "notes/x.md".to_string(),
                 content: "# x".to_string(),

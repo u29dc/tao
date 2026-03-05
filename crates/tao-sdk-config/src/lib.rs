@@ -17,6 +17,10 @@ pub struct TaoConfig {
     pub runtime: RuntimeConfig,
     /// Path-level overrides for runtime storage artifacts.
     pub storage: StorageConfig,
+    /// Vault root defaults.
+    pub vault: VaultConfig,
+    /// Security policy toggles.
+    pub security: SecurityConfig,
 }
 
 /// Runtime configuration settings.
@@ -39,6 +43,22 @@ pub struct StorageConfig {
     pub data_dir: Option<PathBuf>,
     /// Optional override for sqlite database path.
     pub db_path: Option<PathBuf>,
+}
+
+/// Vault path defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VaultConfig {
+    /// Optional default vault root.
+    pub root: Option<PathBuf>,
+}
+
+/// Security policy settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityConfig {
+    /// Enforce read-only mode for write commands.
+    pub read_only: Option<bool>,
 }
 
 /// Case-sensitivity policy for path handling.
@@ -64,6 +84,8 @@ impl Merge for TaoConfig {
         Self {
             runtime: self.runtime.merge(&overlay.runtime),
             storage: self.storage.merge(&overlay.storage),
+            vault: self.vault.merge(&overlay.vault),
+            security: self.security.merge(&overlay.security),
         }
     }
 }
@@ -90,6 +112,22 @@ impl Merge for StorageConfig {
     }
 }
 
+impl Merge for VaultConfig {
+    fn merge(&self, overlay: &Self) -> Self {
+        Self {
+            root: overlay.root.clone().or_else(|| self.root.clone()),
+        }
+    }
+}
+
+impl Merge for SecurityConfig {
+    fn merge(&self, overlay: &Self) -> Self {
+        Self {
+            read_only: overlay.read_only.or(self.read_only),
+        }
+    }
+}
+
 impl TaoConfig {
     /// Return canonical config defaults used for precedence resolution.
     pub fn defaults() -> Self {
@@ -100,6 +138,10 @@ impl TaoConfig {
                 feature_flags: Some(Vec::new()),
             },
             storage: StorageConfig::default(),
+            vault: VaultConfig::default(),
+            security: SecurityConfig {
+                read_only: Some(true),
+            },
         }
     }
 
@@ -186,6 +228,12 @@ pub fn default_template() -> &'static str {
 [storage]
 # data_dir = ".tao"
 # db_path = ".tao.sqlite"
+
+[vault]
+# root = "/absolute/path/to/vault"
+
+[security]
+# read_only = true
 "#
 }
 
@@ -237,9 +285,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, StorageConfig, TaoConfig,
-        TaoConfigError, bootstrap_default_file, config_path, default_template, load_from_path,
-        load_or_bootstrap, parse_toml,
+        CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, SecurityConfig, StorageConfig,
+        TaoConfig, TaoConfigError, VaultConfig, bootstrap_default_file, config_path,
+        default_template, load_from_path, load_or_bootstrap, parse_toml,
     };
 
     #[test]
@@ -254,6 +302,12 @@ mod tests {
             [storage]
             data_dir = ".tao"
             db_path = ".tao.sqlite"
+
+            [vault]
+            root = "/tmp/vault"
+
+            [security]
+            read_only = false
             "#,
         )
         .expect("parse config");
@@ -276,6 +330,18 @@ mod tests {
                 db_path: Some(".tao.sqlite".into()),
             }
         );
+        assert_eq!(
+            config.vault,
+            VaultConfig {
+                root: Some("/tmp/vault".into()),
+            }
+        );
+        assert_eq!(
+            config.security,
+            SecurityConfig {
+                read_only: Some(false),
+            }
+        );
     }
 
     #[test]
@@ -290,6 +356,12 @@ mod tests {
                 data_dir: Some(".tao".into()),
                 db_path: Some(".tao.sqlite".into()),
             },
+            vault: VaultConfig {
+                root: Some("/tmp/low-vault".into()),
+            },
+            security: SecurityConfig {
+                read_only: Some(true),
+            },
         };
 
         let high = TaoConfig {
@@ -301,6 +373,10 @@ mod tests {
             storage: StorageConfig {
                 data_dir: None,
                 db_path: Some(".tao/custom.sqlite".into()),
+            },
+            vault: VaultConfig { root: None },
+            security: SecurityConfig {
+                read_only: Some(false),
             },
         };
 
@@ -316,6 +392,8 @@ mod tests {
         );
         assert_eq!(merged.storage.data_dir, Some(".tao".into()));
         assert_eq!(merged.storage.db_path, Some(".tao/custom.sqlite".into()));
+        assert_eq!(merged.vault.root, Some("/tmp/low-vault".into()));
+        assert_eq!(merged.security.read_only, Some(false));
     }
 
     #[test]
@@ -357,6 +435,8 @@ mod tests {
         assert_eq!(defaults.runtime.tracing_enabled, Some(true));
         assert_eq!(defaults.runtime.feature_flags, Some(Vec::new()));
         assert_eq!(defaults.storage, StorageConfig::default());
+        assert_eq!(defaults.vault, VaultConfig::default());
+        assert_eq!(defaults.security.read_only, Some(true));
     }
 
     #[test]
