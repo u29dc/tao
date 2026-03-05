@@ -31,6 +31,7 @@
 		"bench:all": "./scripts/bench.sh --suite all",
 		"bench:sdk": "./scripts/bench.sh --suite sdk",
 		"bench:cli": "./scripts/bench.sh --suite cli",
+		"bench:daemon": "./scripts/bench.sh --suite daemon",
 		"bench:bridge": "./scripts/bench.sh --suite bridge",
 		"bench:ffi": "./scripts/bench.sh --suite ffi",
 		"bench:startup": "./scripts/bench.sh --suite startup"

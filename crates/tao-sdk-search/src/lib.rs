@@ -79,7 +79,7 @@ impl SearchQueryService {
         let needle = query.to_ascii_lowercase();
         let fts_query = build_fts_query(query);
         let mut statement = connection
-            .prepare(
+            .prepare_cached(
                 r#"
 WITH matches AS (
   SELECT

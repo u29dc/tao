@@ -11,6 +11,7 @@ Suites:
   all      Run sdk + full read-only cli matrix (default)
   sdk      Run parse/resolve/search/bridge/ffi/startup + baseline query/graph budgets
   cli      Run full read-only CLI command matrix
+  daemon   Run one-shot vs daemon warm-runtime comparison
   bridge   Run bridge scenario only
   ffi      Run ffi scenario only
   startup  Run startup scenario only
@@ -38,6 +39,7 @@ OUTPUT_ROOT=".benchmarks/reports"
 SKIP_GENERATE=0
 FIXTURE_ROOT="vault/generated"
 CLI_BUDGET_MS="10"
+DAEMON_MIN_IMPROVEMENT_PCT="40"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,10 +104,10 @@ case "$FIXTURE_PROFILE" in
     ;;
 esac
 case "$SUITE" in
-  all|sdk|cli|bridge|ffi|startup|parse|resolve|search|core)
+  all|sdk|cli|daemon|bridge|ffi|startup|parse|resolve|search|core)
     ;;
   *)
-    echo "--suite must be one of: all|sdk|cli|bridge|ffi|startup|parse|resolve|search|core" >&2
+    echo "--suite must be one of: all|sdk|cli|daemon|bridge|ffi|startup|parse|resolve|search|core" >&2
     exit 1
     ;;
 esac
@@ -133,18 +135,24 @@ FFI_REPORT="${REPORT_DIR}/ffi-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 HYPERFINE_QUERY_REPORT="${REPORT_DIR}/query-docs-hyperfine.json"
 HYPERFINE_GRAPH_REPORT="${REPORT_DIR}/graph-unresolved-hyperfine.json"
+DAEMON_REPORT="${REPORT_DIR}/daemon-query-docs-hyperfine.json"
+DAEMON_SOCKET="${FIXTURE_VAULT}/.tao/taod.sock"
+DAEMON_RUNNING=0
 
 mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
 
+cleanup_daemon() {
+  if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
+    "${CLI_BIN}" --json vault daemon stop --socket "${DAEMON_SOCKET}" >/dev/null 2>&1 || true
+    DAEMON_RUNNING=0
+  fi
+}
+
+trap cleanup_daemon EXIT
+
 build_bins_if_needed() {
-  if [[ ! -x "${BENCH_BIN}" ]]; then
-    echo "Building release benchmark binary..."
-    cargo build --release -p tao-bench
-  fi
-  if [[ ! -x "${CLI_BIN}" ]]; then
-    echo "Building release CLI binary..."
-    cargo build --release -p tao-cli
-  fi
+  echo "Building release binaries (tao-cli + tao-bench)..."
+  cargo build --release -p tao-cli -p tao-bench
 }
 
 require_hyperfine() {
@@ -176,6 +184,12 @@ prepare_fixture() {
   echo "Seeding index for CLI benchmarks..."
   "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
   "${CLI_BIN}" --json vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+}
+
+start_daemon() {
+  cleanup_daemon
+  "${CLI_BIN}" --json vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
+  DAEMON_RUNNING=1
 }
 
 run_tao_bench_scenario() {
@@ -213,13 +227,14 @@ validate_startup_budget() {
 
 run_baseline_cli_budgets() {
   require_hyperfine
+  start_daemon
 
-  echo "Running baseline query/docs hyperfine budget..."
+  echo "Running baseline query/docs hyperfine budget (daemon warm path)..."
   hyperfine \
     --warmup "${WARMUP}" \
     --runs "${RUNS}" \
     --export-json "${HYPERFINE_QUERY_REPORT}" \
-    "${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+    "${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
 
   echo "Running baseline graph/unresolved hyperfine budget..."
   hyperfine \
@@ -250,6 +265,54 @@ run_baseline_cli_budgets() {
     console.log(`query budget passed: ${queryMeanMs.toFixed(3)}ms <= ${threshold}ms`);
     console.log(`graph budget passed: ${graphMeanMs.toFixed(3)}ms <= ${threshold}ms`);
   ' "${HYPERFINE_QUERY_REPORT}" "${HYPERFINE_GRAPH_REPORT}" "${CLI_BUDGET_MS}"
+}
+
+run_daemon_query_benchmark() {
+  require_hyperfine
+  start_daemon
+
+  echo "Running one-shot vs daemon query/docs benchmark..."
+  hyperfine \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --export-json "${DAEMON_REPORT}" \
+    "${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null" \
+    "${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+
+  bun --eval '
+    const fs = require("node:fs");
+    const [reportPath, minImprovementRaw] = process.argv.slice(1);
+    const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    const [oneShot, daemon] = report.results ?? [];
+    if (!oneShot || !daemon) {
+      console.error("daemon benchmark missing one-shot or daemon result rows");
+      process.exit(1);
+    }
+    const oneShotMeanMs = Number((oneShot.mean * 1000).toFixed(3));
+    const daemonMeanMs = Number((daemon.mean * 1000).toFixed(3));
+    const improvementPct = oneShotMeanMs <= 0
+      ? 0
+      : Number((((oneShotMeanMs - daemonMeanMs) / oneShotMeanMs) * 100).toFixed(2));
+    const minImprovementPct = Number(minImprovementRaw);
+    const summary = {
+      one_shot_mean_ms: oneShotMeanMs,
+      daemon_mean_ms: daemonMeanMs,
+      improvement_pct: improvementPct,
+      min_expected_improvement_pct: minImprovementPct,
+      pass: improvementPct >= minImprovementPct,
+    };
+    const outPath = reportPath.replace(/\.json$/, ".summary.json");
+    fs.writeFileSync(outPath, `${JSON.stringify(summary, null, 2)}\n`);
+    if (improvementPct < minImprovementPct) {
+      console.error(
+        `daemon improvement gate failed: ${improvementPct}% < ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
+      );
+      process.exit(1);
+    }
+    console.log(
+      `daemon improvement gate passed: ${improvementPct}% >= ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
+    );
+  ' "${DAEMON_REPORT}" "${DAEMON_MIN_IMPROVEMENT_PCT}"
 }
 
 cli_matrix_benchmark() {
@@ -348,6 +411,7 @@ run_sdk_suite() {
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
   validate_startup_budget
   run_baseline_cli_budgets
+  run_daemon_query_benchmark
 }
 
 build_bins_if_needed
@@ -365,6 +429,10 @@ case "${SUITE}" in
   cli)
     prepare_fixture
     run_cli_matrix
+    ;;
+  daemon)
+    prepare_fixture
+    run_daemon_query_benchmark
     ;;
   bridge)
     run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120

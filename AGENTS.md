@@ -58,7 +58,8 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 - `bun run bench` / `bun run bench:all` -> full benchmark suite (`sdk` + read-only CLI matrix).
 - `bun run bench:sdk` -> SDK/bridge/startup scenarios + baseline query/graph budgets.
 - `bun run bench:cli` -> comprehensive read-only CLI benchmark matrix.
-- `./scripts/bench.sh` -> unified benchmark driver (`--suite all|sdk|cli|bridge|ffi|startup|parse|resolve|search`).
+- `bun run bench:daemon` -> one-shot vs daemon query latency comparison with improvement gate.
+- `./scripts/bench.sh` -> unified benchmark driver (`--suite all|sdk|cli|daemon|bridge|ffi|startup|parse|resolve|search`).
 - `./scripts/fixtures.sh [output-root]` -> deterministic synthetic vault generation (default `vault/generated`).
 - `./scripts/fixtures.sh --skip-validate` -> opt out of built-in fixture validation.
 - `bun run dev -- --json vault open --vault-root <path>` -> CLI open/bootstrap using vault-root only.

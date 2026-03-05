@@ -1,32 +1,37 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
     BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest,
     parse_base_document,
 };
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
-use tao_sdk_properties::TypedPropertyValue;
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphWalkDirection,
-    GraphWalkRequest, HealthSnapshotService, PropertyUpdateService, SdkConfigLoader,
-    SdkConfigOverrides, WatcherStatus,
+    GraphWalkRequest, HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
-    BasesRepository, FilesRepository, PropertiesRepository, TasksRepository, preflight_migrations,
-    run_migrations,
+    BasesRepository, PropertiesRepository, TasksRepository, preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::CasePolicy;
 use tao_sdk_watch::WatchReconcileService;
 
-#[derive(Debug, Parser)]
+const DEFAULT_DAEMON_SOCKET: &str = "/tmp/tao-daemon.sock";
+
+#[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 #[command(name = "tao", version, about = "tao cli")]
 struct Cli {
     /// Emit one JSON envelope to stdout.
@@ -35,11 +40,14 @@ struct Cli {
     /// Allow vault content write operations (disabled by default).
     #[arg(long, global = true, default_value_t = false)]
     allow_writes: bool,
+    /// Route command execution through a warm daemon socket.
+    #[arg(long, global = true)]
+    daemon_socket: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum Commands {
     /// Compact document operations.
     Doc {
@@ -73,34 +81,9 @@ enum Commands {
         #[command(subcommand)]
         command: VaultCommands,
     },
-    /// Note read/write and listing operations.
-    Note {
-        #[command(subcommand)]
-        command: NoteCommands,
-    },
-    /// Link graph operations.
-    Links {
-        #[command(subcommand)]
-        command: LinksCommands,
-    },
-    /// Frontmatter property operations.
-    Properties {
-        #[command(subcommand)]
-        command: PropertiesCommands,
-    },
-    /// Base metadata and table operations.
-    Bases {
-        #[command(subcommand)]
-        command: BasesCommands,
-    },
-    /// Search operations.
-    Search {
-        #[command(subcommand)]
-        command: SearchCommands,
-    },
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum DocCommands {
     /// Return one note by normalized path.
     Read(NotePathArgs),
@@ -110,7 +93,7 @@ enum DocCommands {
     List(VaultPathArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum BaseCommands {
     /// List indexed bases.
     List(VaultPathArgs),
@@ -120,7 +103,7 @@ enum BaseCommands {
     Schema(BaseSchemaArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum GraphCommands {
     /// Return outgoing links for one note.
     Outgoing(NotePathArgs),
@@ -138,7 +121,7 @@ enum GraphCommands {
     Walk(GraphWalkArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum MetaCommands {
     /// Aggregate property keys across vault.
     Properties(GraphWindowArgs),
@@ -150,7 +133,7 @@ enum MetaCommands {
     Tasks(TaskListArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum TaskCommands {
     /// List extracted markdown tasks.
     List(TaskListArgs),
@@ -158,7 +141,7 @@ enum TaskCommands {
     SetState(TaskSetStateArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum VaultCommands {
     /// Open one vault path and initialize sqlite state.
     Open(VaultPathArgs),
@@ -170,49 +153,27 @@ enum VaultCommands {
     Reindex(VaultPathArgs),
     /// Apply incremental reconcile pass.
     Reconcile(VaultPathArgs),
+    /// Manage persistent warm-runtime daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+    /// Internal daemon server loop.
+    #[command(hide = true)]
+    DaemonServe(DaemonSocketArgs),
 }
 
-#[derive(Debug, Subcommand)]
-enum NoteCommands {
-    /// Return one note by normalized path.
-    Get(NotePathArgs),
-    /// Create or update one note.
-    Put(NotePutArgs),
-    /// List markdown note windows.
-    List(VaultPathArgs),
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+enum DaemonCommands {
+    /// Start daemon in background process.
+    Start(DaemonStartArgs),
+    /// Query daemon runtime status.
+    Status(DaemonSocketArgs),
+    /// Stop daemon and terminate warm runtime.
+    Stop(DaemonSocketArgs),
 }
 
-#[derive(Debug, Subcommand)]
-enum LinksCommands {
-    /// Return outgoing links for one note.
-    Outgoing(NotePathArgs),
-    /// Return backlinks for one note.
-    Backlinks(NotePathArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum PropertiesCommands {
-    /// Return parsed properties for one note.
-    Get(NotePathArgs),
-    /// Set one property key/value for one note.
-    Set(PropertySetArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum BasesCommands {
-    /// List indexed bases.
-    List(VaultPathArgs),
-    /// Query one base table view.
-    View(BaseViewArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum SearchCommands {
-    /// Run one search query over indexed content.
-    Query(SearchQueryArgs),
-}
-
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct VaultPathArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -222,7 +183,7 @@ struct VaultPathArgs {
     db_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct NotePathArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -235,7 +196,7 @@ struct NotePathArgs {
     path: String,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct NotePutArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -251,26 +212,7 @@ struct NotePutArgs {
     content: String,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
-struct PropertySetArgs {
-    /// Absolute vault root path.
-    #[arg(long)]
-    vault_root: String,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    db_path: Option<String>,
-    /// Vault-relative normalized note path.
-    #[arg(long)]
-    path: String,
-    /// Property key.
-    #[arg(long)]
-    key: String,
-    /// Property value payload as string.
-    #[arg(long)]
-    value: String,
-}
-
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct BaseViewArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -292,26 +234,7 @@ struct BaseViewArgs {
     page_size: u32,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
-struct SearchQueryArgs {
-    /// Absolute vault root path.
-    #[arg(long)]
-    vault_root: String,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    db_path: Option<String>,
-    /// Query text.
-    #[arg(long)]
-    query: String,
-    /// Window size.
-    #[arg(long, default_value_t = 50)]
-    limit: u32,
-    /// Window offset.
-    #[arg(long, default_value_t = 0)]
-    offset: u32,
-}
-
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct BaseSchemaArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -324,7 +247,7 @@ struct BaseSchemaArgs {
     path_or_id: String,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphWindowArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -340,7 +263,7 @@ struct GraphWindowArgs {
     offset: u32,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphWalkArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -362,7 +285,7 @@ struct GraphWalkArgs {
     include_unresolved: bool,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct GraphComponentsArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -384,7 +307,7 @@ struct GraphComponentsArgs {
     sample_size: u32,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct TaskListArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -406,7 +329,7 @@ struct TaskListArgs {
     offset: u32,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct TaskSetStateArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -425,7 +348,7 @@ struct TaskSetStateArgs {
     state: String,
 }
 
-#[derive(Debug, Clone, Args, Serialize)]
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 struct QueryArgs {
     /// Absolute vault root path.
     #[arg(long)]
@@ -453,6 +376,26 @@ struct QueryArgs {
     offset: u32,
 }
 
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct DaemonSocketArgs {
+    /// Unix domain socket path for tao daemon.
+    #[arg(long, default_value = DEFAULT_DAEMON_SOCKET)]
+    socket: String,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct DaemonStartArgs {
+    /// Unix domain socket path for tao daemon.
+    #[arg(long, default_value = DEFAULT_DAEMON_SOCKET)]
+    socket: String,
+    /// Run daemon in foreground (blocks current process).
+    #[arg(long, default_value_t = false)]
+    foreground: bool,
+    /// Maximum wait window for daemon startup when backgrounded.
+    #[arg(long, default_value_t = 5_000)]
+    startup_timeout_ms: u64,
+}
+
 impl VaultPathArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
@@ -471,19 +414,7 @@ impl NotePutArgs {
     }
 }
 
-impl PropertySetArgs {
-    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
-    }
-}
-
 impl BaseViewArgs {
-    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
-    }
-}
-
-impl SearchQueryArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
     }
@@ -531,7 +462,7 @@ impl QueryArgs {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommandResult {
     command: String,
     summary: String,
@@ -552,6 +483,19 @@ struct ExtractedTask {
     text: String,
 }
 
+#[derive(Debug, Default)]
+struct RuntimeCache {
+    kernels: HashMap<String, BridgeKernel>,
+    connections: HashMap<String, Connection>,
+    command_results: HashMap<String, CommandResult>,
+}
+
+#[derive(Debug)]
+enum RuntimeMode {
+    OneShot,
+    Daemon(RuntimeCache),
+}
+
 #[derive(Debug, Serialize)]
 struct JsonEnvelope<T: Serialize> {
     ok: bool,
@@ -567,6 +511,37 @@ struct JsonError {
     context: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonExecuteRequest {
+    command: Commands,
+    allow_writes: bool,
+    json: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DaemonRequest {
+    Execute { payload: DaemonExecuteRequest },
+    Status,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonStatus {
+    uptime_ms: u128,
+    cached_connections: usize,
+    cached_kernels: usize,
+    cached_results: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonResponse {
+    ok: bool,
+    output: Option<String>,
+    error: Option<String>,
+    status: Option<DaemonStatus>,
+}
+
 impl<T: Serialize> JsonEnvelope<T> {
     fn success(value: T) -> Self {
         Self {
@@ -579,6 +554,11 @@ impl<T: Serialize> JsonEnvelope<T> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(output) = maybe_forward_to_daemon(&cli)? {
+        println!("{output}");
+        return Ok(());
+    }
+
     let result = dispatch(cli.command, cli.allow_writes)?;
     let output = render_output(cli.json, &result)?;
     println!("{output}");
@@ -586,19 +566,23 @@ fn main() -> Result<()> {
 }
 
 fn dispatch(command: Commands, allow_writes: bool) -> Result<CommandResult> {
+    let mut runtime = RuntimeMode::OneShot;
+    dispatch_with_runtime(command, allow_writes, &mut runtime)
+}
+
+fn dispatch_with_runtime(
+    command: Commands,
+    allow_writes: bool,
+    runtime: &mut RuntimeMode,
+) -> Result<CommandResult> {
     match command {
-        Commands::Doc { command } => handle_doc(command, allow_writes),
-        Commands::Base { command } => handle_base(command),
-        Commands::Graph { command } => handle_graph(command),
-        Commands::Meta { command } => handle_meta(command),
-        Commands::Task { command } => handle_task(command, allow_writes),
-        Commands::Query(args) => handle_query(args),
-        Commands::Vault { command } => handle_vault(command),
-        Commands::Note { command } => handle_note(command, allow_writes),
-        Commands::Links { command } => handle_links(command),
-        Commands::Properties { command } => handle_properties(command, allow_writes),
-        Commands::Bases { command } => handle_bases(command),
-        Commands::Search { command } => handle_search(command),
+        Commands::Doc { command } => handle_doc(command, allow_writes, runtime),
+        Commands::Base { command } => handle_base(command, runtime),
+        Commands::Graph { command } => handle_graph(command, runtime),
+        Commands::Meta { command } => handle_meta(command, runtime),
+        Commands::Task { command } => handle_task(command, allow_writes, runtime),
+        Commands::Query(args) => handle_query(args, runtime),
+        Commands::Vault { command } => handle_vault(command, runtime),
     }
 }
 
@@ -616,46 +600,183 @@ fn retag_result(mut result: CommandResult, command: &str, summary: &str) -> Comm
     result
 }
 
-fn handle_doc(command: DocCommands, allow_writes: bool) -> Result<CommandResult> {
+fn handle_doc(
+    command: DocCommands,
+    allow_writes: bool,
+    runtime: &mut RuntimeMode,
+) -> Result<CommandResult> {
     match command {
-        DocCommands::Read(args) => Ok(retag_result(
-            handle_note(NoteCommands::Get(args), allow_writes)?,
-            "doc.read",
-            "doc read completed",
-        )),
-        DocCommands::Write(args) => Ok(retag_result(
-            handle_note(NoteCommands::Put(args), allow_writes)?,
-            "doc.write",
-            "doc write completed",
-        )),
-        DocCommands::List(args) => Ok(retag_result(
-            handle_note(NoteCommands::List(args), allow_writes)?,
-            "doc.list",
-            "doc list completed",
-        )),
+        DocCommands::Read(args) => {
+            let resolved = args.resolve()?;
+            let note = with_kernel(runtime, &resolved, |kernel| {
+                expect_bridge_value(kernel.note_get(&args.path), "doc.read")
+            })?;
+            Ok(CommandResult {
+                command: "doc.read".to_string(),
+                summary: "doc read completed".to_string(),
+                args: serde_json::json!({
+                    "path": note.path,
+                    "title": note.title,
+                    "front_matter": note.front_matter,
+                    "body": note.body,
+                    "headings_total": note.headings_total,
+                }),
+            })
+        }
+        DocCommands::Write(args) => {
+            ensure_writes_enabled(allow_writes, "doc.write")?;
+            let resolved = args.resolve()?;
+            let ack = with_kernel(runtime, &resolved, |kernel| {
+                expect_bridge_value(
+                    kernel.note_put_with_policy(&args.path, &args.content, true),
+                    "doc.write",
+                )
+            })?;
+            Ok(CommandResult {
+                command: "doc.write".to_string(),
+                summary: "doc write completed".to_string(),
+                args: serde_json::json!({
+                    "path": ack.path,
+                    "file_id": ack.file_id,
+                    "action": ack.action,
+                }),
+            })
+        }
+        DocCommands::List(args) => {
+            let resolved = args.resolve()?;
+            let mut after_path: Option<String> = None;
+            let mut items = Vec::new();
+            loop {
+                let page = with_kernel(runtime, &resolved, |kernel| {
+                    expect_bridge_value(kernel.notes_list(after_path.as_deref(), 1000), "doc.list")
+                })?;
+                after_path = page.next_cursor;
+                items.extend(page.items.into_iter().map(|item| {
+                    serde_json::json!({
+                        "file_id": item.file_id,
+                        "path": item.path,
+                        "title": item.title,
+                        "updated_at": item.updated_at,
+                    })
+                }));
+                if after_path.is_none() {
+                    break;
+                }
+            }
+            Ok(CommandResult {
+                command: "doc.list".to_string(),
+                summary: "doc list completed".to_string(),
+                args: serde_json::json!({
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
     }
 }
 
-fn handle_base(command: BaseCommands) -> Result<CommandResult> {
+fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
-        BaseCommands::List(args) => Ok(retag_result(
-            handle_bases(BasesCommands::List(args))?,
-            "base.list",
-            "base list completed",
-        )),
-        BaseCommands::View(args) => Ok(retag_result(
-            handle_bases(BasesCommands::View(args))?,
-            "base.view",
-            "base view completed",
-        )),
+        BaseCommands::List(args) => {
+            let resolved = args.resolve()?;
+            let bases = with_connection(runtime, &resolved, |connection| {
+                Ok(BasesRepository::list_with_paths(connection)?)
+            })
+            .map_err(|source| anyhow!("query bases failed: {source}"))?;
+            let items = bases
+                .into_iter()
+                .map(|base| -> Result<JsonValue> {
+                    let document = decode_base_document(&base.config_json)?;
+                    Ok(serde_json::json!({
+                        "base_id": base.base_id,
+                        "file_path": base.file_path,
+                        "views": document
+                            .views
+                            .into_iter()
+                            .map(|view| view.name)
+                            .collect::<Vec<_>>(),
+                        "updated_at": base.updated_at,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(CommandResult {
+                command: "base.list".to_string(),
+                summary: "base list completed".to_string(),
+                args: serde_json::json!({
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
+        BaseCommands::View(args) => {
+            let resolved = args.resolve()?;
+            let base = with_connection(runtime, &resolved, |connection| {
+                Ok(BasesRepository::list_with_paths(connection)?)
+            })
+            .map_err(|source| anyhow!("query bases failed: {source}"))?
+            .into_iter()
+            .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
+            .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
+            let document = decode_base_document(&base.config_json)?;
+            let registry = BaseViewRegistry::from_document(&document)
+                .map_err(|source| anyhow!("decode base view registry failed: {source}"))?;
+            let plan = BaseTableQueryPlanner
+                .compile(
+                    &registry,
+                    &TableQueryPlanRequest {
+                        view_name: args.view_name.clone(),
+                        page: args.page,
+                        page_size: args.page_size,
+                    },
+                )
+                .map_err(|source| anyhow!("compile base table query plan failed: {source}"))?;
+            let page = with_connection(runtime, &resolved, |connection| {
+                Ok(BaseTableExecutorService.execute_with_options(
+                    connection,
+                    &plan,
+                    BaseTableExecutionOptions {
+                        include_summaries: false,
+                    },
+                )?)
+            })
+            .map_err(|source| anyhow!("execute base table query failed: {source}"))?;
+            let has_more = (args.page as usize * args.page_size as usize) < page.total as usize;
+            let rows = page
+                .rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "file_id": row.file_id,
+                        "file_path": row.file_path,
+                        "values": row.values,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "base.view".to_string(),
+                summary: "base view completed".to_string(),
+                args: serde_json::json!({
+                    "base_id": base.base_id,
+                    "file_path": base.file_path,
+                    "view_name": plan.view_name,
+                    "page": args.page,
+                    "page_size": args.page_size,
+                    "total": page.total,
+                    "has_more": has_more,
+                    "columns": plan.columns,
+                    "rows": rows,
+                }),
+            })
+        }
         BaseCommands::Schema(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let base = BasesRepository::list_with_paths(&connection)
-                .map_err(|source| anyhow!("query bases failed: {source}"))?
-                .into_iter()
-                .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
-                .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
+            let base = with_connection(runtime, &resolved, |connection| {
+                Ok(BasesRepository::list_with_paths(connection)?)
+            })
+            .map_err(|source| anyhow!("query bases failed: {source}"))?
+            .into_iter()
+            .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
+            .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
             let document = decode_base_document(&base.config_json)?;
             let views = document
                 .views
@@ -691,24 +812,78 @@ fn handle_base(command: BaseCommands) -> Result<CommandResult> {
     }
 }
 
-fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
+fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
-        GraphCommands::Outgoing(args) => Ok(retag_result(
-            handle_links(LinksCommands::Outgoing(args))?,
-            "graph.outgoing",
-            "graph outgoing completed",
-        )),
-        GraphCommands::Backlinks(args) => Ok(retag_result(
-            handle_links(LinksCommands::Backlinks(args))?,
-            "graph.backlinks",
-            "graph backlinks completed",
-        )),
+        GraphCommands::Outgoing(args) => {
+            let resolved = args.resolve()?;
+            let panels = with_kernel(runtime, &resolved, |kernel| {
+                expect_bridge_value(kernel.note_links(&args.path), "graph.outgoing")
+            })?;
+            let items = panels
+                .outgoing
+                .into_iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "graph.outgoing".to_string(),
+                summary: "graph outgoing completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Backlinks(args) => {
+            let resolved = args.resolve()?;
+            let panels = with_kernel(runtime, &resolved, |kernel| {
+                expect_bridge_value(kernel.note_links(&args.path), "graph.backlinks")
+            })?;
+            let items = panels
+                .backlinks
+                .into_iter()
+                .map(|link| {
+                    serde_json::json!({
+                        "source_path": link.source_path,
+                        "target_path": link.target_path,
+                        "heading": link.heading,
+                        "block_id": link.block_id,
+                        "display_text": link.display_text,
+                        "kind": link.kind,
+                        "resolved": link.resolved,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "graph.backlinks".to_string(),
+                summary: "graph backlinks completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
         GraphCommands::Unresolved(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let (total, rows) = BacklinkGraphService
-                .unresolved_links_page(&connection, args.limit, args.offset)
-                .map_err(|source| anyhow!("query unresolved links failed: {source}"))?;
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.unresolved_links_page(
+                    connection,
+                    args.limit,
+                    args.offset,
+                )?)
+            })
+            .map_err(|source| anyhow!("query unresolved links failed: {source}"))?;
             let items = rows.into_iter().map(link_edge_to_json).collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "graph.unresolved".to_string(),
@@ -723,10 +898,10 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         }
         GraphCommands::Deadends(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let (total, rows) = BacklinkGraphService
-                .deadends_page(&connection, args.limit, args.offset)
-                .map_err(|source| anyhow!("query deadends failed: {source}"))?;
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.deadends_page(connection, args.limit, args.offset)?)
+            })
+            .map_err(|source| anyhow!("query deadends failed: {source}"))?;
             let items = rows
                 .into_iter()
                 .map(|row| {
@@ -751,10 +926,10 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         }
         GraphCommands::Orphans(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let (total, rows) = BacklinkGraphService
-                .orphans_page(&connection, args.limit, args.offset)
-                .map_err(|source| anyhow!("query orphans failed: {source}"))?;
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.orphans_page(connection, args.limit, args.offset)?)
+            })
+            .map_err(|source| anyhow!("query orphans failed: {source}"))?;
             let items = rows
                 .into_iter()
                 .map(|row| {
@@ -779,16 +954,16 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         }
         GraphCommands::Components(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let (total, rows) = BacklinkGraphService
-                .components_page(
-                    &connection,
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.components_page(
+                    connection,
                     args.limit,
                     args.offset,
                     args.include_members,
                     args.sample_size as usize,
-                )
-                .map_err(|source| anyhow!("query graph components failed: {source}"))?;
+                )?)
+            })
+            .map_err(|source| anyhow!("query graph components failed: {source}"))?;
             let items = rows
                 .into_iter()
                 .map(|row| {
@@ -814,18 +989,18 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
         }
         GraphCommands::Walk(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let traversed = BacklinkGraphService
-                .walk(
-                    &connection,
+            let traversed = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.walk(
+                    connection,
                     &GraphWalkRequest {
                         path: args.path.clone(),
                         depth: args.depth,
                         limit: args.limit,
                         include_unresolved: args.include_unresolved,
                     },
-                )
-                .map_err(|source| anyhow!("graph walk failed: {source}"))?;
+                )?)
+            })
+            .map_err(|source| anyhow!("graph walk failed: {source}"))?;
             let items = traversed
                 .into_iter()
                 .map(|step| {
@@ -858,28 +1033,30 @@ fn handle_graph(command: GraphCommands) -> Result<CommandResult> {
     }
 }
 
-fn handle_meta(command: MetaCommands) -> Result<CommandResult> {
+fn handle_meta(command: MetaCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
         MetaCommands::Properties(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT key, COUNT(*) AS total FROM properties GROUP BY key ORDER BY key ASC",
-                )
-                .context("prepare properties aggregate query")?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok(serde_json::json!({
-                        "key": row.get::<_, String>(0)?,
-                        "total": row.get::<_, u64>(1)?,
-                    }))
-                })
-                .context("query properties aggregate rows")?;
-            let mut items = Vec::new();
-            for row in rows {
-                items.push(row.context("map properties aggregate row")?);
-            }
+            let items = with_connection(runtime, &resolved, |connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT key, COUNT(*) AS total FROM properties GROUP BY key ORDER BY key ASC",
+                    )
+                    .context("prepare properties aggregate query")?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok(serde_json::json!({
+                            "key": row.get::<_, String>(0)?,
+                            "total": row.get::<_, u64>(1)?,
+                        }))
+                    })
+                    .context("query properties aggregate rows")?;
+                let mut items = Vec::new();
+                for row in rows {
+                    items.push(row.context("map properties aggregate row")?);
+                }
+                Ok(items)
+            })?;
             let total = items.len();
             let items = paginate_json_items(items, args.limit, args.offset);
             Ok(CommandResult {
@@ -893,20 +1070,25 @@ fn handle_meta(command: MetaCommands) -> Result<CommandResult> {
                 }),
             })
         }
-        MetaCommands::Tags(args) => handle_meta_token_aggregate(args, "tags", "meta.tags"),
-        MetaCommands::Aliases(args) => handle_meta_token_aggregate(args, "aliases", "meta.aliases"),
+        MetaCommands::Tags(args) => handle_meta_token_aggregate(args, "tags", "meta.tags", runtime),
+        MetaCommands::Aliases(args) => {
+            handle_meta_token_aggregate(args, "aliases", "meta.aliases", runtime)
+        }
         MetaCommands::Tasks(args) => {
-            let result = handle_task(TaskCommands::List(args), false)?;
+            let result = handle_task(TaskCommands::List(args), false, runtime)?;
             Ok(retag_result(result, "meta.tasks", "meta tasks completed"))
         }
     }
 }
 
-fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResult> {
+fn handle_task(
+    command: TaskCommands,
+    allow_writes: bool,
+    runtime: &mut RuntimeMode,
+) -> Result<CommandResult> {
     match command {
         TaskCommands::List(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
             let state = args
                 .state
                 .as_deref()
@@ -917,17 +1099,20 @@ fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResul
                 .as_deref()
                 .map(str::trim)
                 .filter(|query| !query.is_empty());
-            let total = TasksRepository::count_with_paths(&connection, state, query, None)
-                .map_err(|source| anyhow!("count tasks failed: {source}"))?;
-            let rows = TasksRepository::list_with_paths(
-                &connection,
-                state,
-                query,
-                None,
-                args.limit,
-                args.offset,
-            )
-            .map_err(|source| anyhow!("list tasks failed: {source}"))?;
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                let total = TasksRepository::count_with_paths(connection, state, query, None)
+                    .map_err(|source| anyhow!("count tasks failed: {source}"))?;
+                let rows = TasksRepository::list_with_paths(
+                    connection,
+                    state,
+                    query,
+                    None,
+                    args.limit,
+                    args.offset,
+                )
+                .map_err(|source| anyhow!("list tasks failed: {source}"))?;
+                Ok((total, rows))
+            })?;
             let items = rows
                 .into_iter()
                 .map(|row| {
@@ -976,14 +1161,15 @@ fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResul
             fs::write(&absolute, rebuilt)
                 .with_context(|| format!("write markdown note '{}'", absolute.display()))?;
 
-            let mut connection = open_initialized_connection(&resolved)?;
-            WatchReconcileService::default()
-                .reconcile_once(
-                    Path::new(&resolved.vault_root),
-                    &mut connection,
-                    CasePolicy::Sensitive,
-                )
-                .map_err(|source| anyhow!("reconcile after task state update failed: {source}"))?;
+            with_connection(runtime, &resolved, |connection| {
+                WatchReconcileService::default()
+                    .reconcile_once(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        CasePolicy::Sensitive,
+                    )
+                    .map_err(|source| anyhow!("reconcile after task state update failed: {source}"))
+            })?;
 
             Ok(CommandResult {
                 command: "task.set-state".to_string(),
@@ -998,23 +1184,23 @@ fn handle_task(command: TaskCommands, allow_writes: bool) -> Result<CommandResul
     }
 }
 
-fn handle_query(args: QueryArgs) -> Result<CommandResult> {
+fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     let from = args.from.trim();
     let limit = args.limit.max(1);
     if from.eq_ignore_ascii_case("docs") {
         let resolved = args.resolve()?;
-        let connection = open_initialized_connection(&resolved)?;
-        let page = SearchQueryService
-            .query(
+        let page = with_connection(runtime, &resolved, |connection| {
+            Ok(SearchQueryService.query(
                 Path::new(&resolved.vault_root),
-                &connection,
+                connection,
                 SearchQueryRequest {
                     query: args.query.clone().unwrap_or_default(),
                     limit: u64::from(limit),
                     offset: u64::from(args.offset),
                 },
-            )
-            .map_err(|source| anyhow!("query docs failed: {source}"))?;
+            )?)
+        })
+        .map_err(|source| anyhow!("query docs failed: {source}"))?;
         let rows = page
             .items
             .into_iter()
@@ -1046,31 +1232,40 @@ fn handle_query(args: QueryArgs) -> Result<CommandResult> {
             .view_name
             .clone()
             .ok_or_else(|| anyhow!("query base scope requires --view-name"))?;
-        let result = handle_base(BaseCommands::View(BaseViewArgs {
-            vault_root: args.vault_root.clone(),
-            db_path: args.db_path.clone(),
-            path_or_id: base_id_or_path.to_string(),
-            view_name,
-            page: (args.offset / limit) + 1,
-            page_size: limit,
-        }))?;
+        let result = handle_base(
+            BaseCommands::View(BaseViewArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                path_or_id: base_id_or_path.to_string(),
+                view_name,
+                page: (args.offset / limit) + 1,
+                page_size: limit,
+            }),
+            runtime,
+        )?;
         return Ok(retag_result(result, "query.run", "query run completed"));
     }
 
     if from.eq_ignore_ascii_case("graph") {
         let graph_result = if let Some(path) = &args.path {
-            handle_graph(GraphCommands::Outgoing(NotePathArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-                path: path.clone(),
-            }))?
+            handle_graph(
+                GraphCommands::Outgoing(NotePathArgs {
+                    vault_root: args.vault_root.clone(),
+                    db_path: args.db_path.clone(),
+                    path: path.clone(),
+                }),
+                runtime,
+            )?
         } else {
-            handle_graph(GraphCommands::Unresolved(GraphWindowArgs {
-                vault_root: args.vault_root.clone(),
-                db_path: args.db_path.clone(),
-                limit: args.limit,
-                offset: args.offset,
-            }))?
+            handle_graph(
+                GraphCommands::Unresolved(GraphWindowArgs {
+                    vault_root: args.vault_root.clone(),
+                    db_path: args.db_path.clone(),
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                runtime,
+            )?
         };
         return Ok(retag_result(
             graph_result,
@@ -1090,6 +1285,7 @@ fn handle_query(args: QueryArgs) -> Result<CommandResult> {
                 offset: args.offset,
             }),
             false,
+            runtime,
         )?;
         return Ok(retag_result(
             task_result,
@@ -1099,32 +1295,41 @@ fn handle_query(args: QueryArgs) -> Result<CommandResult> {
     }
 
     if from.eq_ignore_ascii_case("meta:tags") {
-        let result = handle_meta(MetaCommands::Tags(GraphWindowArgs {
-            vault_root: args.vault_root.clone(),
-            db_path: args.db_path.clone(),
-            limit: args.limit,
-            offset: args.offset,
-        }))?;
+        let result = handle_meta(
+            MetaCommands::Tags(GraphWindowArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                limit: args.limit,
+                offset: args.offset,
+            }),
+            runtime,
+        )?;
         return Ok(retag_result(result, "query.run", "query run completed"));
     }
 
     if from.eq_ignore_ascii_case("meta:aliases") {
-        let result = handle_meta(MetaCommands::Aliases(GraphWindowArgs {
-            vault_root: args.vault_root.clone(),
-            db_path: args.db_path.clone(),
-            limit: args.limit,
-            offset: args.offset,
-        }))?;
+        let result = handle_meta(
+            MetaCommands::Aliases(GraphWindowArgs {
+                vault_root: args.vault_root.clone(),
+                db_path: args.db_path.clone(),
+                limit: args.limit,
+                offset: args.offset,
+            }),
+            runtime,
+        )?;
         return Ok(retag_result(result, "query.run", "query run completed"));
     }
 
     if from.eq_ignore_ascii_case("meta:properties") {
-        let result = handle_meta(MetaCommands::Properties(GraphWindowArgs {
-            vault_root: args.vault_root,
-            db_path: args.db_path,
-            limit: args.limit,
-            offset: args.offset,
-        }))?;
+        let result = handle_meta(
+            MetaCommands::Properties(GraphWindowArgs {
+                vault_root: args.vault_root,
+                db_path: args.db_path,
+                limit: args.limit,
+                offset: args.offset,
+            }),
+            runtime,
+        )?;
         return Ok(retag_result(result, "query.run", "query run completed"));
     }
 
@@ -1134,16 +1339,17 @@ fn handle_query(args: QueryArgs) -> Result<CommandResult> {
     ))
 }
 
-fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
+fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
         VaultCommands::Open(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let migration_count: i64 = connection
-                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
-                    row.get(0)
-                })
-                .context("query migration count")?;
+            let migration_count: i64 = with_connection(runtime, &resolved, |connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                        row.get(0)
+                    })
+                    .context("query migration count")
+            })?;
             Ok(CommandResult {
                 command: "vault.open".to_string(),
                 summary: "vault open completed".to_string(),
@@ -1157,15 +1363,15 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
         }
         VaultCommands::Stats(args) => {
             let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let snapshot = HealthSnapshotService
-                .snapshot(
+            let snapshot = with_connection(runtime, &resolved, |connection| {
+                Ok(HealthSnapshotService.snapshot(
                     Path::new(&resolved.vault_root),
-                    &connection,
+                    connection,
                     0,
                     WatcherStatus::Stopped,
-                )
-                .map_err(|source| anyhow!("vault stats failed: {source}"))?;
+                )?)
+            })
+            .map_err(|source| anyhow!("vault stats failed: {source}"))?;
             Ok(CommandResult {
                 command: "vault.stats".to_string(),
                 summary: "vault stats completed".to_string(),
@@ -1214,16 +1420,18 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
         }
         VaultCommands::Reindex(args) => {
             let resolved = args.resolve()?;
-            let mut connection = open_initialized_connection(&resolved)?;
-            let reconcile = WatchReconcileService::default()
-                .reconcile_once(
-                    Path::new(&resolved.vault_root),
-                    &mut connection,
-                    CasePolicy::Sensitive,
-                )
-                .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
-            let totals = query_index_totals(&connection)
-                .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+            let (reconcile, totals) = with_connection(runtime, &resolved, |connection| {
+                let reconcile = WatchReconcileService::default()
+                    .reconcile_once(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        CasePolicy::Sensitive,
+                    )
+                    .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+                let totals = query_index_totals(connection)
+                    .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+                Ok((reconcile, totals))
+            })?;
             Ok(CommandResult {
                 command: "vault.reindex".to_string(),
                 summary: "vault reindex completed".to_string(),
@@ -1243,14 +1451,15 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
         }
         VaultCommands::Reconcile(args) => {
             let resolved = args.resolve()?;
-            let mut connection = open_initialized_connection(&resolved)?;
-            let result = WatchReconcileService::default()
-                .reconcile_once(
-                    Path::new(&resolved.vault_root),
-                    &mut connection,
-                    CasePolicy::Sensitive,
-                )
-                .map_err(|source| anyhow!("vault reconcile failed: {source}"))?;
+            let result = with_connection(runtime, &resolved, |connection| {
+                WatchReconcileService::default()
+                    .reconcile_once(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        CasePolicy::Sensitive,
+                    )
+                    .map_err(|source| anyhow!("vault reconcile failed: {source}"))
+            })?;
             Ok(CommandResult {
                 command: "vault.reconcile".to_string(),
                 summary: "vault reconcile completed".to_string(),
@@ -1268,230 +1477,410 @@ fn handle_vault(command: VaultCommands) -> Result<CommandResult> {
                 }),
             })
         }
-    }
-}
-
-fn handle_note(command: NoteCommands, allow_writes: bool) -> Result<CommandResult> {
-    match command {
-        NoteCommands::Get(args) => {
-            let resolved = args.resolve()?;
-            let kernel = open_bridge_kernel(&resolved)?;
-            let note = expect_bridge_value(kernel.note_get(&args.path), "note.get")?;
+        VaultCommands::Daemon { command } => handle_daemon(command),
+        VaultCommands::DaemonServe(args) => {
+            run_daemon_server(&args.socket)?;
             Ok(CommandResult {
-                command: "note.get".to_string(),
-                summary: "note get completed".to_string(),
+                command: "vault.daemon.serve".to_string(),
+                summary: "vault daemon serve stopped".to_string(),
                 args: serde_json::json!({
-                    "path": note.path,
-                    "title": note.title,
-                    "front_matter": note.front_matter,
-                    "body": note.body,
-                    "headings_total": note.headings_total,
-                }),
-            })
-        }
-        NoteCommands::Put(args) => {
-            ensure_writes_enabled(allow_writes, "note.put")?;
-            let resolved = args.resolve()?;
-            let mut kernel = open_bridge_kernel(&resolved)?;
-            let ack = expect_bridge_value(
-                kernel.note_put_with_policy(&args.path, &args.content, true),
-                "note.put",
-            )?;
-            Ok(CommandResult {
-                command: "note.put".to_string(),
-                summary: "note put completed".to_string(),
-                args: serde_json::json!({
-                    "path": ack.path,
-                    "file_id": ack.file_id,
-                    "action": ack.action,
-                }),
-            })
-        }
-        NoteCommands::List(args) => {
-            let resolved = args.resolve()?;
-            let kernel = open_bridge_kernel(&resolved)?;
-            let mut after_path: Option<String> = None;
-            let mut items = Vec::new();
-            loop {
-                let page = expect_bridge_value(
-                    kernel.notes_list(after_path.as_deref(), 1000),
-                    "note.list",
-                )?;
-                after_path = page.next_cursor;
-                items.extend(page.items.into_iter().map(|item| {
-                    serde_json::json!({
-                        "file_id": item.file_id,
-                        "path": item.path,
-                        "title": item.title,
-                        "updated_at": item.updated_at,
-                    })
-                }));
-                if after_path.is_none() {
-                    break;
-                }
-            }
-            Ok(CommandResult {
-                command: "note.list".to_string(),
-                summary: "note list completed".to_string(),
-                args: serde_json::json!({
-                    "total": items.len(),
-                    "items": items,
+                    "socket": args.socket,
+                    "stopped": true,
                 }),
             })
         }
     }
 }
 
-fn handle_links(command: LinksCommands) -> Result<CommandResult> {
+fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
+    let Some(socket) = cli.daemon_socket.as_deref() else {
+        return Ok(None);
+    };
+    if is_daemon_control_command(&cli.command) {
+        return Ok(None);
+    }
+
+    let response = daemon_request(
+        socket,
+        &DaemonRequest::Execute {
+            payload: DaemonExecuteRequest {
+                command: cli.command.clone(),
+                allow_writes: cli.allow_writes,
+                json: cli.json,
+            },
+        },
+    )?;
+    if !response.ok {
+        let message = response
+            .error
+            .unwrap_or_else(|| "daemon returned unknown failure".to_string());
+        return Err(anyhow!(message));
+    }
+    response
+        .output
+        .map(Some)
+        .ok_or_else(|| anyhow!("daemon execute response missing output payload"))
+}
+
+fn is_daemon_control_command(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Vault {
+            command: VaultCommands::Daemon { .. } | VaultCommands::DaemonServe(_)
+        }
+    )
+}
+
+fn daemon_cache_key(command: &Commands) -> Result<String> {
+    serde_json::to_string(command).context("serialize command cache key")
+}
+
+fn command_is_cacheable(command: &Commands) -> bool {
     match command {
-        LinksCommands::Outgoing(args) => {
-            let resolved = args.resolve()?;
-            let kernel = open_bridge_kernel(&resolved)?;
-            let panels = expect_bridge_value(kernel.note_links(&args.path), "links.outgoing")?;
-            let items = panels
-                .outgoing
-                .into_iter()
-                .map(|link| {
-                    serde_json::json!({
-                        "source_path": link.source_path,
-                        "target_path": link.target_path,
-                        "heading": link.heading,
-                        "block_id": link.block_id,
-                        "display_text": link.display_text,
-                        "kind": link.kind,
-                        "resolved": link.resolved,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(CommandResult {
-                command: "links.outgoing".to_string(),
-                summary: "links outgoing completed".to_string(),
-                args: serde_json::json!({
-                    "path": args.path,
-                    "total": items.len(),
-                    "items": items,
-                }),
-            })
-        }
-        LinksCommands::Backlinks(args) => {
-            let resolved = args.resolve()?;
-            let kernel = open_bridge_kernel(&resolved)?;
-            let panels = expect_bridge_value(kernel.note_links(&args.path), "links.backlinks")?;
-            let items = panels
-                .backlinks
-                .into_iter()
-                .map(|link| {
-                    serde_json::json!({
-                        "source_path": link.source_path,
-                        "target_path": link.target_path,
-                        "heading": link.heading,
-                        "block_id": link.block_id,
-                        "display_text": link.display_text,
-                        "kind": link.kind,
-                        "resolved": link.resolved,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(CommandResult {
-                command: "links.backlinks".to_string(),
-                summary: "links backlinks completed".to_string(),
-                args: serde_json::json!({
-                    "path": args.path,
-                    "total": items.len(),
-                    "items": items,
-                }),
-            })
-        }
+        Commands::Doc { command } => matches!(command, DocCommands::Read(_) | DocCommands::List(_)),
+        Commands::Base { .. } => true,
+        Commands::Graph { .. } => true,
+        Commands::Meta { .. } => true,
+        Commands::Task { command } => matches!(command, TaskCommands::List(_)),
+        Commands::Query(_) => true,
+        Commands::Vault { command } => matches!(
+            command,
+            VaultCommands::Stats(_) | VaultCommands::Preflight(_)
+        ),
     }
 }
 
-fn handle_properties(command: PropertiesCommands, allow_writes: bool) -> Result<CommandResult> {
+fn handle_daemon(command: DaemonCommands) -> Result<CommandResult> {
     match command {
-        PropertiesCommands::Get(args) => {
-            let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
-                .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
-            let Some(file) = file else {
+        DaemonCommands::Start(args) => {
+            if args.foreground {
+                run_daemon_server(&args.socket)?;
                 return Ok(CommandResult {
-                    command: "properties.get".to_string(),
-                    summary: "properties get completed".to_string(),
+                    command: "vault.daemon.start".to_string(),
+                    summary: "vault daemon foreground session stopped".to_string(),
                     args: serde_json::json!({
-                        "path": args.path,
-                        "total": 0,
-                        "items": [],
+                        "socket": args.socket,
+                        "foreground": true,
+                        "stopped": true,
                     }),
                 });
-            };
+            }
 
-            let rows = PropertiesRepository::list_for_file_with_path(&connection, &file.file_id)
-                .map_err(|source| anyhow!("query properties failed: {source}"))?;
-            let items = rows
-                .into_iter()
-                .map(|row| {
-                    let parsed_value = serde_json::from_str::<JsonValue>(&row.value_json)
-                        .unwrap_or_else(|_| JsonValue::String(row.value_json.clone()));
-                    serde_json::json!({
-                        "property_id": row.property_id,
-                        "file_id": row.file_id,
-                        "file_path": row.file_path,
-                        "key": row.key,
-                        "value_type": row.value_type,
-                        "value": parsed_value,
-                        "value_json": row.value_json,
-                        "updated_at": row.updated_at,
-                    })
-                })
-                .collect::<Vec<_>>();
+            let status = daemon_status_probe(&args.socket)?;
+            if status.is_some() {
+                return Ok(CommandResult {
+                    command: "vault.daemon.start".to_string(),
+                    summary: "vault daemon already running".to_string(),
+                    args: serde_json::json!({
+                        "socket": args.socket,
+                        "started": false,
+                        "already_running": true,
+                    }),
+                });
+            }
+
+            let current_exe = std::env::current_exe().context("resolve current executable path")?;
+            let child = ProcessCommand::new(current_exe)
+                .arg("vault")
+                .arg("daemon-serve")
+                .arg("--socket")
+                .arg(&args.socket)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .with_context(|| format!("spawn background daemon at '{}'", args.socket))?;
+            let pid = child.id();
+            wait_for_daemon_startup(&args.socket, args.startup_timeout_ms)?;
 
             Ok(CommandResult {
-                command: "properties.get".to_string(),
-                summary: "properties get completed".to_string(),
+                command: "vault.daemon.start".to_string(),
+                summary: "vault daemon started".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
-                    "file_id": file.file_id,
-                    "total": items.len(),
-                    "items": items,
+                    "socket": args.socket,
+                    "started": true,
+                    "pid": pid,
                 }),
             })
         }
-        PropertiesCommands::Set(args) => {
-            ensure_writes_enabled(allow_writes, "properties.set")?;
-            let resolved = args.resolve()?;
-            let mut connection = open_initialized_connection(&resolved)?;
-            let file = FilesRepository::get_by_normalized_path(&connection, &args.path)
-                .map_err(|source| anyhow!("lookup note metadata failed: {source}"))?;
-            let Some(file) = file else {
-                return Err(anyhow!(
-                    "note path is not indexed; run vault reindex first: {}",
-                    args.path
-                ));
-            };
+        DaemonCommands::Status(args) => {
+            let status = daemon_status_probe(&args.socket)?;
+            match status {
+                Some(status) => Ok(CommandResult {
+                    command: "vault.daemon.status".to_string(),
+                    summary: "vault daemon status completed".to_string(),
+                    args: serde_json::json!({
+                        "socket": args.socket,
+                        "running": true,
+                        "uptime_ms": status.uptime_ms,
+                        "cached_connections": status.cached_connections,
+                        "cached_kernels": status.cached_kernels,
+                        "cached_results": status.cached_results,
+                    }),
+                }),
+                None => Ok(CommandResult {
+                    command: "vault.daemon.status".to_string(),
+                    summary: "vault daemon status completed".to_string(),
+                    args: serde_json::json!({
+                        "socket": args.socket,
+                        "running": false,
+                    }),
+                }),
+            }
+        }
+        DaemonCommands::Stop(args) => {
+            let status = daemon_status_probe(&args.socket)?;
+            if status.is_none() {
+                return Ok(CommandResult {
+                    command: "vault.daemon.stop".to_string(),
+                    summary: "vault daemon stop completed".to_string(),
+                    args: serde_json::json!({
+                        "socket": args.socket,
+                        "stopped": false,
+                        "running": false,
+                    }),
+                });
+            }
 
-            let typed_value = parse_cli_property_value(&args.value)?;
-            let result = PropertyUpdateService::default()
-                .set_property(
-                    Path::new(&resolved.vault_root),
-                    &mut connection,
-                    &file.file_id,
-                    &args.key,
-                    typed_value,
-                )
-                .map_err(|source| anyhow!("property set failed: {source}"))?;
-
+            let response = daemon_request(&args.socket, &DaemonRequest::Shutdown)?;
+            if !response.ok {
+                let message = response
+                    .error
+                    .unwrap_or_else(|| "daemon returned unknown failure".to_string());
+                return Err(anyhow!(message));
+            }
             Ok(CommandResult {
-                command: "properties.set".to_string(),
-                summary: "properties set completed".to_string(),
+                command: "vault.daemon.stop".to_string(),
+                summary: "vault daemon stop completed".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
-                    "file_id": result.file_id,
-                    "key": result.key,
-                    "value": typed_property_value_to_json(&result.value),
-                    "title": result.parsed.title,
-                    "headings_total": result.parsed.headings.len(),
+                    "socket": args.socket,
+                    "stopped": true,
                 }),
             })
         }
+    }
+}
+
+fn daemon_status_probe(socket: &str) -> Result<Option<DaemonStatus>> {
+    let response = match daemon_request(socket, &DaemonRequest::Status) {
+        Ok(response) => response,
+        Err(source) => {
+            if daemon_socket_is_unavailable(&source) {
+                return Ok(None);
+            }
+            return Err(source);
+        }
+    };
+    if !response.ok {
+        return Ok(None);
+    }
+    Ok(response.status)
+}
+
+fn daemon_socket_is_unavailable(error: &anyhow::Error) -> bool {
+    for source in error.chain() {
+        if let Some(io_error) = source.downcast_ref::<std::io::Error>()
+            && matches!(
+                io_error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn wait_for_daemon_startup(socket: &str, timeout_ms: u64) -> Result<()> {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms.max(100));
+    loop {
+        if daemon_status_probe(socket)?.is_some() {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err(anyhow!(
+                "daemon startup timed out after {}ms for socket '{}'",
+                timeout_ms,
+                socket
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn daemon_request(socket: &str, request: &DaemonRequest) -> Result<DaemonResponse> {
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        let _ = request;
+        return Err(anyhow!(
+            "daemon sockets are only supported on unix platforms"
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let mut stream = UnixStream::connect(socket)
+            .with_context(|| format!("connect daemon socket '{}'", socket))?;
+        let payload = serde_json::to_vec(request).context("serialize daemon request")?;
+        stream
+            .write_all(&payload)
+            .context("write daemon request payload")?;
+        stream.flush().context("flush daemon request payload")?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .context("shutdown daemon request write half")?;
+
+        let mut response_bytes = Vec::new();
+        stream
+            .read_to_end(&mut response_bytes)
+            .context("read daemon response payload")?;
+        serde_json::from_slice::<DaemonResponse>(&response_bytes)
+            .context("parse daemon response payload")
+    }
+}
+
+fn run_daemon_server(socket: &str) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = socket;
+        return Err(anyhow!(
+            "daemon sockets are only supported on unix platforms"
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let socket_path = Path::new(socket);
+        if let Some(parent) = socket_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create daemon socket parent '{}'", parent.display()))?;
+        }
+        if socket_path.exists() {
+            fs::remove_file(socket_path)
+                .with_context(|| format!("remove stale daemon socket '{}'", socket))?;
+        }
+
+        let listener = UnixListener::bind(socket_path)
+            .with_context(|| format!("bind daemon socket '{socket}'"))?;
+        let mut runtime = RuntimeMode::Daemon(RuntimeCache::default());
+        let started_at = Instant::now();
+        let mut should_shutdown = false;
+
+        while !should_shutdown {
+            let (mut stream, _) = listener.accept().context("accept daemon request stream")?;
+            let mut request_bytes = Vec::new();
+            stream
+                .read_to_end(&mut request_bytes)
+                .context("read daemon request payload")?;
+            let request = serde_json::from_slice::<DaemonRequest>(&request_bytes)
+                .context("parse daemon request payload")?;
+
+            let response = match request {
+                DaemonRequest::Execute { payload } => {
+                    let cacheable = command_is_cacheable(&payload.command);
+                    let cache_key = if cacheable {
+                        daemon_cache_key(&payload.command).ok()
+                    } else {
+                        None
+                    };
+                    let cached =
+                        if let (RuntimeMode::Daemon(cache), Some(key)) = (&runtime, &cache_key) {
+                            cache.command_results.get(key).cloned()
+                        } else {
+                            None
+                        };
+
+                    let result = match cached {
+                        Some(result) => Ok(result),
+                        None => dispatch_with_runtime(
+                            payload.command.clone(),
+                            payload.allow_writes,
+                            &mut runtime,
+                        ),
+                    };
+
+                    match result {
+                        Ok(result) => {
+                            if let RuntimeMode::Daemon(cache) = &mut runtime {
+                                if let Some(key) = cache_key {
+                                    cache.command_results.insert(key, result.clone());
+                                } else {
+                                    cache.command_results.clear();
+                                }
+                            }
+
+                            match render_output(payload.json, &result) {
+                                Ok(output) => DaemonResponse {
+                                    ok: true,
+                                    output: Some(output),
+                                    error: None,
+                                    status: None,
+                                },
+                                Err(source) => DaemonResponse {
+                                    ok: false,
+                                    output: None,
+                                    error: Some(source.to_string()),
+                                    status: None,
+                                },
+                            }
+                        }
+                        Err(source) => DaemonResponse {
+                            ok: false,
+                            output: None,
+                            error: Some(source.to_string()),
+                            status: None,
+                        },
+                    }
+                }
+                DaemonRequest::Status => {
+                    let status = match &runtime {
+                        RuntimeMode::OneShot => DaemonStatus {
+                            uptime_ms: started_at.elapsed().as_millis(),
+                            cached_connections: 0,
+                            cached_kernels: 0,
+                            cached_results: 0,
+                        },
+                        RuntimeMode::Daemon(cache) => DaemonStatus {
+                            uptime_ms: started_at.elapsed().as_millis(),
+                            cached_connections: cache.connections.len(),
+                            cached_kernels: cache.kernels.len(),
+                            cached_results: cache.command_results.len(),
+                        },
+                    };
+                    DaemonResponse {
+                        ok: true,
+                        output: None,
+                        error: None,
+                        status: Some(status),
+                    }
+                }
+                DaemonRequest::Shutdown => {
+                    should_shutdown = true;
+                    DaemonResponse {
+                        ok: true,
+                        output: Some(String::from("daemon shutdown acknowledged")),
+                        error: None,
+                        status: None,
+                    }
+                }
+            };
+
+            let bytes =
+                serde_json::to_vec(&response).context("serialize daemon response payload")?;
+            stream
+                .write_all(&bytes)
+                .context("write daemon response payload")?;
+            stream.flush().context("flush daemon response payload")?;
+        }
+
+        drop(listener);
+        if socket_path.exists() {
+            fs::remove_file(socket_path)
+                .with_context(|| format!("remove daemon socket '{}'", socket_path.display()))?;
+        }
+        Ok(())
     }
 }
 
@@ -1502,143 +1891,6 @@ fn ensure_writes_enabled(allow_writes: bool, command: &str) -> Result<()> {
     Err(anyhow!(
         "{command} is disabled by default; pass --allow-writes to enable vault content mutations"
     ))
-}
-
-fn handle_bases(command: BasesCommands) -> Result<CommandResult> {
-    match command {
-        BasesCommands::List(args) => {
-            let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let bases = BasesRepository::list_with_paths(&connection)
-                .map_err(|source| anyhow!("query bases failed: {source}"))?;
-            let items = bases
-                .into_iter()
-                .map(|base| -> Result<JsonValue> {
-                    let document = decode_base_document(&base.config_json)?;
-                    Ok(serde_json::json!({
-                        "base_id": base.base_id,
-                        "file_path": base.file_path,
-                        "views": document
-                            .views
-                            .into_iter()
-                            .map(|view| view.name)
-                            .collect::<Vec<_>>(),
-                        "updated_at": base.updated_at,
-                    }))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(CommandResult {
-                command: "bases.list".to_string(),
-                summary: "bases list completed".to_string(),
-                args: serde_json::json!({
-                    "total": items.len(),
-                    "items": items,
-                }),
-            })
-        }
-        BasesCommands::View(args) => {
-            let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let base = BasesRepository::list_with_paths(&connection)
-                .map_err(|source| anyhow!("query bases failed: {source}"))?
-                .into_iter()
-                .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
-                .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
-            let document = decode_base_document(&base.config_json)?;
-            let registry = BaseViewRegistry::from_document(&document)
-                .map_err(|source| anyhow!("decode base view registry failed: {source}"))?;
-            let plan = BaseTableQueryPlanner
-                .compile(
-                    &registry,
-                    &TableQueryPlanRequest {
-                        view_name: args.view_name.clone(),
-                        page: args.page,
-                        page_size: args.page_size,
-                    },
-                )
-                .map_err(|source| anyhow!("compile base table query plan failed: {source}"))?;
-            let page = BaseTableExecutorService
-                .execute_with_options(
-                    &connection,
-                    &plan,
-                    BaseTableExecutionOptions {
-                        include_summaries: false,
-                    },
-                )
-                .map_err(|source| anyhow!("execute base table query failed: {source}"))?;
-            let has_more = (args.page as usize * args.page_size as usize) < page.total as usize;
-            let rows = page
-                .rows
-                .into_iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "file_id": row.file_id,
-                        "file_path": row.file_path,
-                        "values": row.values,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(CommandResult {
-                command: "bases.view".to_string(),
-                summary: "bases view completed".to_string(),
-                args: serde_json::json!({
-                    "base_id": base.base_id,
-                    "file_path": base.file_path,
-                    "view_name": plan.view_name,
-                    "page": args.page,
-                    "page_size": args.page_size,
-                    "total": page.total,
-                    "has_more": has_more,
-                    "columns": plan.columns,
-                    "rows": rows,
-                }),
-            })
-        }
-    }
-}
-
-fn handle_search(command: SearchCommands) -> Result<CommandResult> {
-    match command {
-        SearchCommands::Query(args) => {
-            let resolved = args.resolve()?;
-            let connection = open_initialized_connection(&resolved)?;
-            let page = SearchQueryService
-                .query(
-                    Path::new(&resolved.vault_root),
-                    &connection,
-                    SearchQueryRequest {
-                        query: args.query.clone(),
-                        limit: u64::from(args.limit),
-                        offset: u64::from(args.offset),
-                    },
-                )
-                .map_err(|source| anyhow!("search query failed: {source}"))?;
-            let items = page
-                .items
-                .into_iter()
-                .map(|item| {
-                    serde_json::json!({
-                        "file_id": item.file_id,
-                        "path": item.path,
-                        "title": item.title,
-                        "indexed_at": item.indexed_at,
-                        "matched_in": item.matched_in,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(CommandResult {
-                command: "search.query".to_string(),
-                summary: "search query completed".to_string(),
-                args: serde_json::json!({
-                    "query": page.query,
-                    "limit": page.limit,
-                    "offset": page.offset,
-                    "total": page.total,
-                    "items": items,
-                }),
-            })
-        }
-    }
 }
 
 fn paginate_json_items(items: Vec<JsonValue>, limit: u32, offset: u32) -> Vec<JsonValue> {
@@ -1667,11 +1919,16 @@ fn handle_meta_token_aggregate(
     args: GraphWindowArgs,
     property_key: &str,
     command: &str,
+    runtime: &mut RuntimeMode,
 ) -> Result<CommandResult> {
     let resolved = args.resolve()?;
-    let connection = open_initialized_connection(&resolved)?;
-    let rows = PropertiesRepository::list_by_key_with_paths(&connection, property_key)
-        .map_err(|source| anyhow!("query property key '{}' failed: {source}", property_key))?;
+    let rows = with_connection(runtime, &resolved, |connection| {
+        Ok(PropertiesRepository::list_by_key_with_paths(
+            connection,
+            property_key,
+        )?)
+    })
+    .map_err(|source| anyhow!("query property key '{}' failed: {source}", property_key))?;
     let mut counts = HashMap::<String, usize>::new();
     for row in rows {
         for token in extract_property_tokens(&row.value_json) {
@@ -1773,6 +2030,61 @@ fn update_task_line_state(line: &str, state: &str) -> Result<String> {
     Ok(format!("{indent}- {marker} {content}"))
 }
 
+fn runtime_cache_key(args: &ResolvedVaultPathArgs) -> String {
+    format!("{}\u{1f}{}", args.vault_root, args.db_path)
+}
+
+fn with_connection<T>(
+    runtime: &mut RuntimeMode,
+    args: &ResolvedVaultPathArgs,
+    operation: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    match runtime {
+        RuntimeMode::OneShot => {
+            let mut connection = open_initialized_connection(args)?;
+            operation(&mut connection)
+        }
+        RuntimeMode::Daemon(cache) => {
+            let key = runtime_cache_key(args);
+            if !cache.connections.contains_key(&key) {
+                let connection = open_initialized_connection(args)?;
+                cache.connections.insert(key.clone(), connection);
+            }
+            let connection = cache.connections.get_mut(&key).ok_or_else(|| {
+                anyhow!(
+                    "runtime cache missing sqlite connection for {}",
+                    args.db_path
+                )
+            })?;
+            operation(connection)
+        }
+    }
+}
+
+fn with_kernel<T>(
+    runtime: &mut RuntimeMode,
+    args: &ResolvedVaultPathArgs,
+    operation: impl FnOnce(&mut BridgeKernel) -> Result<T>,
+) -> Result<T> {
+    match runtime {
+        RuntimeMode::OneShot => {
+            let mut kernel = open_bridge_kernel(args)?;
+            operation(&mut kernel)
+        }
+        RuntimeMode::Daemon(cache) => {
+            let key = runtime_cache_key(args);
+            if !cache.kernels.contains_key(&key) {
+                let kernel = open_bridge_kernel(args)?;
+                cache.kernels.insert(key.clone(), kernel);
+            }
+            let kernel = cache.kernels.get_mut(&key).ok_or_else(|| {
+                anyhow!("runtime cache missing bridge kernel for {}", args.db_path)
+            })?;
+            operation(kernel)
+        }
+    }
+}
+
 fn resolve_vault_paths(
     vault_root: &str,
     db_path_override: Option<&str>,
@@ -1811,65 +2123,6 @@ fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str) -> Result<
             Err(anyhow!(message))
         }
         None => Err(anyhow!("{command} failed without an error payload")),
-    }
-}
-
-fn parse_cli_property_value(raw: &str) -> Result<TypedPropertyValue> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(TypedPropertyValue::String(String::new()));
-    }
-    if trimmed.eq_ignore_ascii_case("null") {
-        return Ok(TypedPropertyValue::Null);
-    }
-    if trimmed.eq_ignore_ascii_case("true") {
-        return Ok(TypedPropertyValue::Bool(true));
-    }
-    if trimmed.eq_ignore_ascii_case("false") {
-        return Ok(TypedPropertyValue::Bool(false));
-    }
-    if let Ok(value) = trimmed.parse::<f64>() {
-        return Ok(TypedPropertyValue::Number(value));
-    }
-    if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed) {
-        return json_to_typed_property_value(&value);
-    }
-    Ok(TypedPropertyValue::String(raw.to_string()))
-}
-
-fn json_to_typed_property_value(value: &JsonValue) -> Result<TypedPropertyValue> {
-    match value {
-        JsonValue::Null => Ok(TypedPropertyValue::Null),
-        JsonValue::Bool(value) => Ok(TypedPropertyValue::Bool(*value)),
-        JsonValue::Number(value) => value
-            .as_f64()
-            .map(TypedPropertyValue::Number)
-            .ok_or_else(|| anyhow!("property numeric value is out of supported range")),
-        JsonValue::String(value) => Ok(TypedPropertyValue::String(value.clone())),
-        JsonValue::Array(values) => {
-            let typed_values = values
-                .iter()
-                .map(json_to_typed_property_value)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(TypedPropertyValue::List(typed_values))
-        }
-        JsonValue::Object(_) => Ok(TypedPropertyValue::String(value.to_string())),
-    }
-}
-
-fn typed_property_value_to_json(value: &TypedPropertyValue) -> JsonValue {
-    match value {
-        TypedPropertyValue::Bool(value) => JsonValue::Bool(*value),
-        TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => {
-            JsonValue::String(value.clone())
-        }
-        TypedPropertyValue::List(values) => {
-            JsonValue::Array(values.iter().map(typed_property_value_to_json).collect())
-        }
-        TypedPropertyValue::Null => JsonValue::Null,
     }
 }
 
@@ -1955,7 +2208,10 @@ mod tests {
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
 
-    use super::{Cli, dispatch, render_output};
+    use super::{
+        Cli, Commands, DocCommands, NotePutArgs, QueryArgs, command_is_cacheable, dispatch,
+        maybe_forward_to_daemon, render_output,
+    };
     use clap::{CommandFactory, Parser};
     use serde_json::Value as JsonValue;
 
@@ -1975,11 +2231,11 @@ mod tests {
         assert!(rendered.contains("meta"));
         assert!(rendered.contains("task"));
         assert!(rendered.contains("query"));
-        assert!(rendered.contains("note"));
-        assert!(rendered.contains("links"));
-        assert!(rendered.contains("properties"));
-        assert!(rendered.contains("bases"));
-        assert!(rendered.contains("search"));
+        assert!(!rendered.contains("note"));
+        assert!(!rendered.contains("links"));
+        assert!(!rendered.contains("properties"));
+        assert!(!rendered.contains("bases"));
+        assert!(!rendered.contains("search"));
         assert!(!rendered.contains("hubs"));
     }
 
@@ -2028,7 +2284,7 @@ mod tests {
             fs::create_dir_all(&views_dir).expect("create views dir");
             fs::write(
                 projects_dir.join("project-a.md"),
-                "---\nstatus: active\npriority: 4\n---\n# Project A\n",
+                "---\nstatus: active\npriority: 4\ntags: [work, active]\naliases: [\"Project Alpha\"]\n---\n# Project A\n",
             )
             .expect("write project-a note");
             fs::write(
@@ -2038,6 +2294,8 @@ mod tests {
             .expect("write project-b note");
             fs::write(notes_dir.join("alpha.md"), "# Alpha\n[[project-a]]\n")
                 .expect("write alpha note");
+            fs::write(notes_dir.join("tasks.md"), "- [ ] ship tao cli\n")
+                .expect("write tasks note");
             fs::write(
                 views_dir.join("projects.base"),
                 "views:\n  - name: ActiveProjects\n    type: table\n    source: notes/projects\n    filters:\n      - key: status\n        op: eq\n        value: active\n    sorts:\n      - key: priority\n        direction: desc\n    columns:\n      - title\n      - status\n      - priority\n",
@@ -2092,12 +2350,12 @@ mod tests {
                     ],
                 ),
                 (
-                    "note.get",
+                    "doc.read",
                     vec![
                         "tao",
                         "--json",
-                        "note",
-                        "get",
+                        "doc",
+                        "read",
                         "--vault-root",
                         &vault_root_string,
                         "--path",
@@ -2105,24 +2363,24 @@ mod tests {
                     ],
                 ),
                 (
-                    "note.list",
+                    "doc.list",
                     vec![
                         "tao",
                         "--json",
-                        "note",
+                        "doc",
                         "list",
                         "--vault-root",
                         &vault_root_string,
                     ],
                 ),
                 (
-                    "note.put",
+                    "doc.write",
                     vec![
                         "tao",
                         "--json",
                         "--allow-writes",
-                        "note",
-                        "put",
+                        "doc",
+                        "write",
                         "--vault-root",
                         &vault_root_string,
                         "--path",
@@ -2132,11 +2390,11 @@ mod tests {
                     ],
                 ),
                 (
-                    "links.outgoing",
+                    "graph.outgoing",
                     vec![
                         "tao",
                         "--json",
-                        "links",
+                        "graph",
                         "outgoing",
                         "--vault-root",
                         &vault_root_string,
@@ -2145,11 +2403,11 @@ mod tests {
                     ],
                 ),
                 (
-                    "links.backlinks",
+                    "graph.backlinks",
                     vec![
                         "tao",
                         "--json",
-                        "links",
+                        "graph",
                         "backlinks",
                         "--vault-root",
                         &vault_root_string,
@@ -2158,53 +2416,96 @@ mod tests {
                     ],
                 ),
                 (
-                    "properties.get",
+                    "graph.unresolved",
                     vec![
                         "tao",
                         "--json",
-                        "properties",
-                        "get",
+                        "graph",
+                        "unresolved",
                         "--vault-root",
                         &vault_root_string,
-                        "--path",
-                        "notes/projects/project-a.md",
                     ],
                 ),
                 (
-                    "properties.set",
+                    "graph.deadends",
                     vec![
                         "tao",
                         "--json",
-                        "--allow-writes",
-                        "properties",
-                        "set",
+                        "graph",
+                        "deadends",
                         "--vault-root",
                         &vault_root_string,
-                        "--path",
-                        "notes/projects/project-a.md",
-                        "--key",
-                        "status",
-                        "--value",
-                        "active",
                     ],
                 ),
                 (
-                    "bases.list",
+                    "graph.orphans",
                     vec![
                         "tao",
                         "--json",
-                        "bases",
+                        "graph",
+                        "orphans",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "graph.components",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "components",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "graph.walk",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "walk",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/alpha.md",
+                        "--depth",
+                        "2",
+                        "--limit",
+                        "20",
+                    ],
+                ),
+                (
+                    "base.list",
+                    vec![
+                        "tao",
+                        "--json",
+                        "base",
                         "list",
                         "--vault-root",
                         &vault_root_string,
                     ],
                 ),
                 (
-                    "bases.view",
+                    "base.schema",
                     vec![
                         "tao",
                         "--json",
-                        "bases",
+                        "base",
+                        "schema",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path-or-id",
+                        "views/projects.base",
+                    ],
+                ),
+                (
+                    "base.view",
+                    vec![
+                        "tao",
+                        "--json",
+                        "base",
                         "view",
                         "--vault-root",
                         &vault_root_string,
@@ -2219,14 +2520,88 @@ mod tests {
                     ],
                 ),
                 (
-                    "search.query",
+                    "meta.properties",
                     vec![
                         "tao",
                         "--json",
-                        "search",
+                        "meta",
+                        "properties",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "meta.tags",
+                    vec![
+                        "tao",
+                        "--json",
+                        "meta",
+                        "tags",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "meta.aliases",
+                    vec![
+                        "tao",
+                        "--json",
+                        "meta",
+                        "aliases",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "meta.tasks",
+                    vec![
+                        "tao",
+                        "--json",
+                        "meta",
+                        "tasks",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "task.list",
+                    vec![
+                        "tao",
+                        "--json",
+                        "task",
+                        "list",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "task.set-state",
+                    vec![
+                        "tao",
+                        "--json",
+                        "--allow-writes",
+                        "task",
+                        "set-state",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/tasks.md",
+                        "--line",
+                        "1",
+                        "--state",
+                        "done",
+                    ],
+                ),
+                (
+                    "query.run",
+                    vec![
+                        "tao",
+                        "--json",
                         "query",
                         "--vault-root",
                         &vault_root_string,
+                        "--from",
+                        "docs",
                         "--query",
                         "project",
                         "--limit",
@@ -2290,13 +2665,17 @@ mod tests {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
             let vault_root = tempdir.path().join("vault");
+            let notes_dir = vault_root.join("notes");
             fs::create_dir_all(&vault_root).expect("create vault dir");
+            fs::create_dir_all(&notes_dir).expect("create notes dir");
+            fs::write(notes_dir.join("tasks.md"), "- [ ] blocked task\n")
+                .expect("write task fixture");
 
-            let note_put = Cli::parse_from([
+            let doc_write = Cli::parse_from([
                 "tao",
                 "--json",
-                "note",
-                "put",
+                "doc",
+                "write",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
                 "--path",
@@ -2304,28 +2683,89 @@ mod tests {
                 "--content",
                 "# blocked",
             ]);
-            let note_put_error = dispatch(note_put.command, note_put.allow_writes)
-                .expect_err("note.put should require --allow-writes");
-            assert!(note_put_error.to_string().contains("--allow-writes"));
+            let doc_write_error = dispatch(doc_write.command, doc_write.allow_writes)
+                .expect_err("doc.write should require --allow-writes");
+            assert!(doc_write_error.to_string().contains("--allow-writes"));
 
-            let properties_set = Cli::parse_from([
+            let task_set_state = Cli::parse_from([
                 "tao",
                 "--json",
-                "properties",
-                "set",
+                "task",
+                "set-state",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
                 "--path",
-                "notes/blocked.md",
-                "--key",
-                "status",
-                "--value",
-                "draft",
+                "notes/tasks.md",
+                "--line",
+                "1",
+                "--state",
+                "done",
             ]);
-            let properties_error = dispatch(properties_set.command, properties_set.allow_writes)
-                .expect_err("properties.set should require --allow-writes");
-            assert!(properties_error.to_string().contains("--allow-writes"));
+            let task_error = dispatch(task_set_state.command, task_set_state.allow_writes)
+                .expect_err("task.set-state should require --allow-writes");
+            assert!(task_error.to_string().contains("--allow-writes"));
         });
+    }
+
+    #[test]
+    fn daemon_control_commands_bypass_client_forwarding() {
+        let cli = Cli::parse_from([
+            "tao",
+            "--json",
+            "--daemon-socket",
+            "/tmp/tao-test.sock",
+            "vault",
+            "daemon",
+            "status",
+            "--socket",
+            "/tmp/tao-test.sock",
+        ]);
+        let forwarded = maybe_forward_to_daemon(&cli).expect("daemon control should not forward");
+        assert!(forwarded.is_none());
+    }
+
+    #[test]
+    fn daemon_forwarding_reports_missing_socket_for_non_control_commands() {
+        let cli = Cli::parse_from([
+            "tao",
+            "--json",
+            "--daemon-socket",
+            "/tmp/does-not-exist.sock",
+            "vault",
+            "open",
+            "--vault-root",
+            "/tmp",
+        ]);
+        let error = maybe_forward_to_daemon(&cli).expect_err("forwarding should fail");
+        assert!(
+            error.to_string().contains("connect daemon socket"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn daemon_cacheability_matrix_blocks_mutating_commands() {
+        let cacheable_query = Commands::Query(QueryArgs {
+            vault_root: "/tmp".to_string(),
+            db_path: None,
+            from: "docs".to_string(),
+            query: Some("project".to_string()),
+            path: None,
+            view_name: None,
+            limit: 10,
+            offset: 0,
+        });
+        assert!(command_is_cacheable(&cacheable_query));
+
+        let doc_write = Commands::Doc {
+            command: DocCommands::Write(NotePutArgs {
+                vault_root: "/tmp".to_string(),
+                db_path: None,
+                path: "notes/x.md".to_string(),
+                content: "# x".to_string(),
+            }),
+        };
+        assert!(!command_is_cacheable(&doc_write));
     }
 
     #[test]
