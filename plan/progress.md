@@ -1992,3 +1992,63 @@ Append-only execution log for autonomous runs.
   - commands: [cargo test -p tao-sdk-service --release frontmatter_only_wikilinks_are_indexed_for_outgoing_and_backlinks incremental_reindex_updates_frontmatter_only_wikilinks]
   - outcomes: [frontmatter-only wikilink regression coverage is present and passing; outgoing/backlink parity for frontmatter links is locked by service-level tests]
 - residual_risk: none
+
+- timestamp: 2026-03-05T01:04:00Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: PERF-011
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, crates/tao-sdk-search/src/lib.rs, scripts/bench.sh]
+  - commands: [cargo test -p tao-cli -p tao-sdk-search --release, ./scripts/bench.sh --suite sdk --profile 10k --runs 6 --warmup 2 --skip-generate]
+  - outcomes: [added docs query projection parser (`--select`) and streaming envelope path (`--json-stream`) for large docs query outputs; implemented projected search query execution in sdk-search to avoid materializing unselected fields; benchmark summary `.benchmarks/reports/20260305T010618Z/query-docs-stream-vs-standard.summary.json` records 16.74% p50 improvement on 1k-row projected output loop with rss delta 0.236% within configured tolerance]
+- residual_risk: daemon cached standard path can still outperform streaming path in some noisy runs; projection path is now deterministic and benchmarked, while streaming remains available for one-shot/transport-constrained use
+
+- timestamp: 2026-03-05T01:04:30Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: PERF-012
+- action: done
+- evidence:
+  - files: [scripts/budgets.sh, plan/perf-budgets.json]
+  - commands: [./scripts/budgets.sh --profile 10k --runs 6 --warmup 2 --skip-generate]
+  - outcomes: [added explicit phase23 read budget config (`warm_read_p50_ms=10`) and enforced budget gate over `query-docs`, `query-base`, `query-graph`, `graph-walk`, `meta-tags`; latest summary `.benchmarks/reports/20260305T010310Z/budgets/summary.json` passes with all p50 values under 3ms]
+- residual_risk: hyperfine sub-5ms calibration warnings persist; p50 gate remains stable because thresholds are well above observed jitter
+
+- timestamp: 2026-03-05T01:05:00Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: PERF-013
+- action: done
+- evidence:
+  - files: [crates/tao-bench/Cargo.toml, crates/tao-bench/src/main.rs, scripts/bench.sh]
+  - commands: [cargo test -p tao-bench --release, ./scripts/bench.sh --suite sdk --profile 10k --runs 6 --warmup 2 --skip-generate]
+  - outcomes: [added `graph-walk` and `unified-query` tao-bench scenarios with warm/cold latency reporting, vault/db scenario inputs, JSON output, and companion markdown summaries; benchmark runs now write to timestamped report roots under `.benchmarks/reports/<timestamp>`]
+- residual_risk: cold-mode measurements include sqlite open cost by design; compare warm metrics for core engine behavior
+
+- timestamp: 2026-03-05T01:05:30Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: PERF-014
+- action: done
+- evidence:
+  - files: [.github/workflows/rust-ci.yml, scripts/bench.sh, scripts/budgets.sh]
+  - commands: [reviewed rust-ci workflow steps, validated local equivalents via `./scripts/fixtures.sh`, `./scripts/bench.sh --suite sdk`, `./scripts/budgets.sh`]
+  - outcomes: [rust CI now installs hyperfine, generates synthetic fixtures, runs phase23 perf scenarios, executes `scripts/budgets.sh`, and uploads `.benchmarks/reports/**` as artifacts so budget failures block the job]
+- residual_risk: perf checks remain host-sensitive; workflow uses generated fixtures and fixed run counts to minimize drift
+
+- timestamp: 2026-03-05T01:06:00Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: QA-018
+- action: done
+- evidence:
+  - files: [scripts/bench.sh, scripts/budgets.sh, .github/workflows/rust-ci.yml, plan/perf-budgets.json]
+  - commands: [bun run util:check, ./scripts/budgets.sh --profile 10k --runs 6 --warmup 2 --skip-generate, rg -n "Dropbox|/Users/han/Library/CloudStorage/Dropbox" scripts .github/workflows package.json plan/perf-budgets.json]
+  - outcomes: [full quality gate passed end-to-end; benchmark and budget flows use generated fixtures rooted at `vault/generated`; no required benchmark/CI command references Dropbox or personal vault paths]
+- residual_risk: fixture validator intentionally scans for leaked personal paths to prevent regressions and should remain enabled
+
+- timestamp: 2026-03-05T01:06:30Z
+- session: session-2026-03-05-phase23-perf-closeout
+- ticket: QA-020
+- action: done
+- evidence:
+  - files: [plan/tickets.csv, plan/run-state.json, plan/progress.md]
+  - commands: [mark PERF-011..014 + QA-018 done with evidence, update run-state completion fields, add closure report entries]
+  - outcomes: [phase23 perf tranche closure completed; run-state now records `last_completed_ticket=QA-020` and `session_status=completed`; closure report captures implemented deltas, benchmark outcomes, and residual risks]
+- residual_risk: broader phase23 backlog remains open outside this perf tranche and should continue from the next planned ticket sequence
