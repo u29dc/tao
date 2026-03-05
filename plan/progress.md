@@ -1932,3 +1932,63 @@ Append-only execution log for autonomous runs.
   - commands: [cargo run -p tao-bench --release -- --scenario startup --iterations 20 --json-out .benchmarks/reports/par-startup.json]
   - outcomes: [full rebuild writes now execute as one transaction with prepared-statement batching for files/properties/tasks/links/bases/search_index; startup benchmark scenario passes with p50=0.218ms p95=0.263ms]
 - residual_risk: benchmark reflects local machine profile and should be compared against CI baselines for regression alerting
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: CLI-010
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv, plan/run-state.json]
+  - commands: [cargo test -p tao-cli --release]
+  - outcomes: [top-level CLI surface is clean-cut to `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`; legacy top-level command handlers were removed and JSON contract tests updated to new command IDs]
+- residual_risk: none
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: CLI-012
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, scripts/bench.sh, .benchmarks/reports/cli-readonly/summary.json]
+  - commands: [./scripts/bench.sh --suite cli --profile 10k --runs 8 --warmup 2 --skip-generate]
+  - outcomes: [`graph` suite (`outgoing`, `backlinks`, `unresolved`, `deadends`, `orphans`, `components`, `walk`) is implemented and benchmarked on generated 10k fixtures; command schemas are deterministic under repeat runs]
+- residual_risk: graph components still above 10ms in one-shot mode; daemon/read-only fast paths can be extended to graph rows in PERF-011
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: CLI-013
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, plan/tickets.csv]
+  - commands: [cargo test -p tao-cli --release]
+  - outcomes: [`meta properties`, `meta tags`, `meta aliases`, and `meta tasks` are available under the new command surface with stable envelope contract and pagination behavior]
+- residual_risk: none
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: PERF-009
+- action: done
+- evidence:
+  - files: [crates/tao-cli/src/main.rs, scripts/bench.sh, package.json]
+  - commands: [./scripts/bench.sh --suite daemon --profile 10k --runs 12 --warmup 3 --skip-generate]
+  - outcomes: [persistent daemon runtime implemented with `vault daemon {start,status,stop}` plus client forwarding via `--daemon-socket`; daemon status reports warm cache counts; repeated docs query benchmark shows 73.76% p50 improvement (11.325ms -> 2.972ms), satisfying >=40% criterion]
+- residual_risk: daemon transport is unix-socket only; non-unix fallback currently returns explicit unsupported error
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: PERF-010
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-search/src/lib.rs, crates/tao-cli/src/main.rs, scripts/bench.sh, .benchmarks/reports/daemon-query-docs-hyperfine.summary.json]
+  - commands: [cargo test -p tao-sdk-search --release, ./scripts/bench.sh --suite sdk --profile 10k --runs 8 --warmup 2 --skip-generate]
+  - outcomes: [hot path caches added: sqlite statement cache for docs query (`prepare_cached`), daemon runtime command-result cache with deterministic invalidation on non-cacheable/mutating commands, and warm baseline budget now enforced in sdk suite; sdk budget run passes and daemon hot query exceeds 20% improvement target]
+- residual_risk: query-plan cache is currently implemented at command-result granularity in daemon runtime; deeper logical-plan cache for full `query --where/--sort/--select` grammar remains future work
+
+- timestamp: 2026-03-05T00:10:00Z
+- session: session-2026-03-05-phase23-cli-perf
+- ticket: QA-013
+- action: done
+- evidence:
+  - files: [crates/tao-sdk-service/src/indexing.rs, plan/tickets.csv]
+  - commands: [cargo test -p tao-sdk-service --release frontmatter_only_wikilinks_are_indexed_for_outgoing_and_backlinks incremental_reindex_updates_frontmatter_only_wikilinks]
+  - outcomes: [frontmatter-only wikilink regression coverage is present and passing; outgoing/backlink parity for frontmatter links is locked by service-level tests]
+- residual_risk: none
