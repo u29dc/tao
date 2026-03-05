@@ -1,0 +1,12 @@
+{
+  "phase": "phase23",
+  "profile": "10k",
+  "warm_read_p50_ms": 10,
+  "checks": [
+    "query-docs",
+    "query-base",
+    "query-graph",
+    "graph-walk",
+    "meta-tags"
+  ]
+}

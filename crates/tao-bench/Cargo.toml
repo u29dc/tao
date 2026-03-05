@@ -15,8 +15,11 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+rusqlite.workspace = true
 tao-sdk-bridge = { path = "../tao-sdk-bridge" }
 tao-sdk-links = { path = "../tao-sdk-links" }
+tao-sdk-search = { path = "../tao-sdk-search" }
+tao-sdk-service = { path = "../tao-sdk-service" }
 serde_json.workspace = true
 serde.workspace = true
 tempfile = "3.17.1"

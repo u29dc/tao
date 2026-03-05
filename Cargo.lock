@@ -803,10 +803,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusqlite",
  "serde",
  "serde_json",
  "tao-sdk-bridge",
  "tao-sdk-links",
+ "tao-sdk-search",
+ "tao-sdk-service",
  "tempfile",
 ]
 

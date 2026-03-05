@@ -5,9 +5,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use rusqlite::Connection;
 use serde_json::{Value as JsonValue, json};
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel, TaoBridgeRuntime};
 use tao_sdk_links::resolve_target;
+use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
+use tao_sdk_service::{BacklinkGraphService, GraphWalkRequest};
 use tempfile::tempdir;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -15,6 +18,8 @@ enum Scenario {
     Parse,
     Resolve,
     Search,
+    GraphWalk,
+    UnifiedQuery,
     Bridge,
     Ffi,
     Startup,
@@ -38,6 +43,22 @@ struct Args {
     enforce_budgets: bool,
     #[arg(long)]
     json_out: Option<PathBuf>,
+    #[arg(long)]
+    markdown_out: Option<PathBuf>,
+    #[arg(long)]
+    vault_root: Option<PathBuf>,
+    #[arg(long)]
+    db_path: Option<PathBuf>,
+    #[arg(long, default_value = "notes/projects/project-1.md")]
+    graph_root: String,
+    #[arg(long, default_value_t = 2)]
+    graph_depth: u32,
+    #[arg(long, default_value_t = 200)]
+    graph_limit: u32,
+    #[arg(long, default_value = "project")]
+    query_text: String,
+    #[arg(long, default_value_t = 100)]
+    query_limit: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,8 +107,10 @@ fn run() -> Result<()> {
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
         Scenario::Ffi => run_ffi_benchmark(&args),
+        Scenario::GraphWalk => run_graph_walk_benchmark(&args),
         Scenario::Resolve => run_resolve_benchmark(&args),
         Scenario::Startup => run_startup_benchmark(&args),
+        Scenario::UnifiedQuery => run_unified_query_benchmark(&args),
         Scenario::Parse | Scenario::Search => run_cpu_smoke_benchmark(&args),
     }
 }
@@ -245,6 +268,178 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
         println!("startup report written to {}", path.display());
     }
 
+    Ok(())
+}
+
+fn run_graph_walk_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("graph-walk benchmark iterations must be greater than zero");
+    }
+    let (vault_root, db_path) = resolve_vault_and_db_paths(args)?;
+    let request = GraphWalkRequest {
+        path: args.graph_root.clone(),
+        depth: args.graph_depth.max(1),
+        limit: args.graph_limit.max(1),
+        include_unresolved: true,
+    };
+
+    let mut warm_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut cold_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut warm_steps = 0_u64;
+    let mut cold_steps = 0_u64;
+
+    let warm_connection =
+        Connection::open(&db_path).with_context(|| format!("open sqlite {}", db_path.display()))?;
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let steps = BacklinkGraphService
+            .walk(&warm_connection, &request)
+            .context("graph walk warm sample failed")?;
+        warm_samples.push(elapsed_ms(start));
+        warm_steps = warm_steps.saturating_add(u64::try_from(steps.len()).unwrap_or(0));
+    }
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let cold_connection = Connection::open(&db_path)
+            .with_context(|| format!("open sqlite {}", db_path.display()))?;
+        let steps = BacklinkGraphService
+            .walk(&cold_connection, &request)
+            .context("graph walk cold sample failed")?;
+        cold_samples.push(elapsed_ms(start));
+        cold_steps = cold_steps.saturating_add(u64::try_from(steps.len()).unwrap_or(0));
+    }
+
+    let warm = LatencySummary::from_samples(warm_samples)?;
+    let cold = LatencySummary::from_samples(cold_samples)?;
+    let improvement_pct = if cold.p50_ms == 0.0 {
+        0.0
+    } else {
+        ((cold.p50_ms - warm.p50_ms) / cold.p50_ms) * 100.0
+    };
+
+    println!(
+        "graph-walk warm_p50_ms={:.3} cold_p50_ms={:.3} warm_steps_avg={:.1} cold_steps_avg={:.1}",
+        warm.p50_ms,
+        cold.p50_ms,
+        warm_steps as f64 / args.iterations as f64,
+        cold_steps as f64 / args.iterations as f64
+    );
+
+    let report = json!({
+        "scenario": "graph_walk",
+        "iterations": args.iterations,
+        "generated_at_unix": now_unix(),
+        "vault_root": vault_root,
+        "db_path": db_path.display().to_string(),
+        "request": {
+            "path": request.path,
+            "depth": request.depth,
+            "limit": request.limit,
+            "include_unresolved": request.include_unresolved,
+        },
+        "latency": {
+            "warm": warm.as_json(),
+            "cold": cold.as_json(),
+        },
+        "steps": {
+            "warm_total": warm_steps,
+            "cold_total": cold_steps,
+            "warm_avg": round_ms(warm_steps as f64 / args.iterations as f64),
+            "cold_avg": round_ms(cold_steps as f64 / args.iterations as f64),
+        },
+        "improvement": {
+            "p50_vs_cold_pct": round_ms(improvement_pct),
+        },
+    });
+    write_benchmark_reports(args, &report, "graph_walk")?;
+    Ok(())
+}
+
+fn run_unified_query_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("unified-query benchmark iterations must be greater than zero");
+    }
+    let (vault_root, db_path) = resolve_vault_and_db_paths(args)?;
+    let request = SearchQueryRequest {
+        query: args.query_text.trim().to_string(),
+        limit: args.query_limit.clamp(1, 1_000),
+        offset: 0,
+    };
+    if request.query.is_empty() {
+        bail!("query text must not be empty");
+    }
+
+    let mut warm_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut cold_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut warm_rows = 0_u64;
+    let mut cold_rows = 0_u64;
+
+    let warm_connection =
+        Connection::open(&db_path).with_context(|| format!("open sqlite {}", db_path.display()))?;
+    let _ = SearchQueryService
+        .query(&vault_root, &warm_connection, request.clone())
+        .context("prime warm query cache")?;
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let page = SearchQueryService
+            .query(&vault_root, &warm_connection, request.clone())
+            .context("warm unified query sample failed")?;
+        warm_samples.push(elapsed_ms(start));
+        warm_rows = warm_rows.saturating_add(u64::try_from(page.items.len()).unwrap_or(0));
+    }
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let cold_connection = Connection::open(&db_path)
+            .with_context(|| format!("open sqlite {}", db_path.display()))?;
+        let page = SearchQueryService
+            .query(&vault_root, &cold_connection, request.clone())
+            .context("cold unified query sample failed")?;
+        cold_samples.push(elapsed_ms(start));
+        cold_rows = cold_rows.saturating_add(u64::try_from(page.items.len()).unwrap_or(0));
+    }
+
+    let warm = LatencySummary::from_samples(warm_samples)?;
+    let cold = LatencySummary::from_samples(cold_samples)?;
+    let improvement_pct = if cold.p50_ms == 0.0 {
+        0.0
+    } else {
+        ((cold.p50_ms - warm.p50_ms) / cold.p50_ms) * 100.0
+    };
+
+    println!(
+        "unified-query warm_p50_ms={:.3} cold_p50_ms={:.3} warm_rows_avg={:.1} cold_rows_avg={:.1}",
+        warm.p50_ms,
+        cold.p50_ms,
+        warm_rows as f64 / args.iterations as f64,
+        cold_rows as f64 / args.iterations as f64
+    );
+
+    let report = json!({
+        "scenario": "unified_query",
+        "iterations": args.iterations,
+        "generated_at_unix": now_unix(),
+        "vault_root": vault_root,
+        "db_path": db_path.display().to_string(),
+        "request": {
+            "query": request.query,
+            "limit": request.limit,
+            "offset": request.offset,
+        },
+        "latency": {
+            "warm": warm.as_json(),
+            "cold": cold.as_json(),
+        },
+        "rows": {
+            "warm_total": warm_rows,
+            "cold_total": cold_rows,
+            "warm_avg": round_ms(warm_rows as f64 / args.iterations as f64),
+            "cold_avg": round_ms(cold_rows as f64 / args.iterations as f64),
+        },
+        "improvement": {
+            "p50_vs_cold_pct": round_ms(improvement_pct),
+        },
+    });
+    write_benchmark_reports(args, &report, "unified_query")?;
     Ok(())
 }
 
@@ -590,6 +785,108 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn resolve_vault_and_db_paths(args: &Args) -> Result<(PathBuf, PathBuf)> {
+    let vault_root = args
+        .vault_root
+        .clone()
+        .context("scenario requires --vault-root path to indexed fixture vault")?;
+    let db_path = args
+        .db_path
+        .clone()
+        .context("scenario requires --db-path path to indexed sqlite database")?;
+    if !vault_root.is_dir() {
+        bail!(
+            "vault root does not exist or is not a directory: {}",
+            vault_root.display()
+        );
+    }
+    if !db_path.is_file() {
+        bail!(
+            "db path does not exist or is not a file: {}",
+            db_path.display()
+        );
+    }
+    Ok((vault_root, db_path))
+}
+
+fn write_benchmark_reports(args: &Args, report: &JsonValue, scenario: &str) -> Result<()> {
+    if let Some(path) = &args.json_out {
+        write_json_report(path, report)?;
+        println!("{scenario} report written to {}", path.display());
+    }
+    if let Some(path) = resolve_markdown_path(args, scenario) {
+        write_markdown_summary(&path, report)?;
+        println!("{scenario} markdown summary written to {}", path.display());
+    }
+    Ok(())
+}
+
+fn resolve_markdown_path(args: &Args, scenario: &str) -> Option<PathBuf> {
+    if let Some(path) = &args.markdown_out {
+        return Some(path.clone());
+    }
+    args.json_out.as_ref().map(|path| {
+        if path.extension().is_some() {
+            path.with_extension("md")
+        } else {
+            path.join(format!("{scenario}.md"))
+        }
+    })
+}
+
+fn write_markdown_summary(path: &Path, report: &JsonValue) -> Result<()> {
+    let scenario = report
+        .get("scenario")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("unknown");
+    let iterations = report
+        .get("iterations")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    let warm_p50 = report
+        .pointer("/latency/warm/p50_ms")
+        .and_then(JsonValue::as_f64)
+        .unwrap_or(0.0);
+    let warm_p95 = report
+        .pointer("/latency/warm/p95_ms")
+        .and_then(JsonValue::as_f64)
+        .unwrap_or(0.0);
+    let cold_p50 = report
+        .pointer("/latency/cold/p50_ms")
+        .and_then(JsonValue::as_f64)
+        .unwrap_or(0.0);
+    let cold_p95 = report
+        .pointer("/latency/cold/p95_ms")
+        .and_then(JsonValue::as_f64)
+        .unwrap_or(0.0);
+    let improvement_pct = report
+        .pointer("/improvement/p50_vs_cold_pct")
+        .and_then(JsonValue::as_f64)
+        .unwrap_or(0.0);
+
+    let mut markdown = String::new();
+    markdown.push_str("# Tao Bench Summary\n\n");
+    markdown.push_str(&format!("- scenario: `{scenario}`\n"));
+    markdown.push_str(&format!("- iterations: `{iterations}`\n"));
+    markdown.push_str(&format!("- generated_at_unix: `{}`\n\n", now_unix()));
+    markdown.push_str("| mode | p50_ms | p95_ms |\n");
+    markdown.push_str("| --- | ---: | ---: |\n");
+    markdown.push_str(&format!("| warm | {:.3} | {:.3} |\n", warm_p50, warm_p95));
+    markdown.push_str(&format!("| cold | {:.3} | {:.3} |\n\n", cold_p50, cold_p95));
+    markdown.push_str(&format!(
+        "- warm_vs_cold_p50_improvement_pct: `{:.3}`\n",
+        improvement_pct
+    ));
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create markdown report dir {}", parent.display()))?;
+    }
+    fs::write(path, markdown)
+        .with_context(|| format!("write markdown benchmark report {}", path.display()))?;
+    Ok(())
 }
 
 fn write_json_report(path: &Path, report: &JsonValue) -> Result<()> {
