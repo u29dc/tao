@@ -11,14 +11,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
     BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest,
     parse_base_document,
 };
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
-use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
+use tao_sdk_search::{SearchQueryProjection, SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphWalkDirection,
     GraphWalkRequest, HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
@@ -37,6 +38,9 @@ struct Cli {
     /// Emit one JSON envelope to stdout.
     #[arg(long, global = true)]
     json: bool,
+    /// Stream JSON envelope serialization for supported large read commands.
+    #[arg(long, global = true, default_value_t = false)]
+    json_stream: bool,
     /// Allow vault content write operations (disabled by default).
     #[arg(long, global = true, default_value_t = false)]
     allow_writes: bool,
@@ -368,6 +372,9 @@ struct QueryArgs {
     /// Optional base view name when `--from base:<id>`.
     #[arg(long)]
     view_name: Option<String>,
+    /// Optional projected column list for docs scope (`file_id,path,title,matched_in`).
+    #[arg(long)]
+    select: Option<String>,
     /// Window size.
     #[arg(long, default_value_t = 100)]
     limit: u32,
@@ -462,6 +469,263 @@ impl QueryArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryDocsColumn {
+    FileId,
+    Path,
+    Title,
+    MatchedIn,
+}
+
+impl QueryDocsColumn {
+    fn key(self) -> &'static str {
+        match self {
+            Self::FileId => "file_id",
+            Self::Path => "path",
+            Self::Title => "title",
+            Self::MatchedIn => "matched_in",
+        }
+    }
+}
+
+fn parse_query_docs_columns(select: Option<&str>) -> Result<Vec<QueryDocsColumn>> {
+    let mut columns = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(raw) = select {
+        let tokens = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            return Err(anyhow!(
+                "--select must include at least one docs column from: file_id,path,title,matched_in"
+            ));
+        }
+        for token in tokens {
+            let column = match token {
+                "file_id" => QueryDocsColumn::FileId,
+                "path" => QueryDocsColumn::Path,
+                "title" => QueryDocsColumn::Title,
+                "matched_in" => QueryDocsColumn::MatchedIn,
+                _ => {
+                    return Err(anyhow!(
+                        "unsupported docs projection column '{}'; allowed: file_id,path,title,matched_in",
+                        token
+                    ));
+                }
+            };
+            if seen.insert(column) {
+                columns.push(column);
+            }
+        }
+    } else {
+        columns = vec![
+            QueryDocsColumn::FileId,
+            QueryDocsColumn::Path,
+            QueryDocsColumn::Title,
+            QueryDocsColumn::MatchedIn,
+        ];
+    }
+
+    Ok(columns)
+}
+
+fn project_query_docs_row(
+    item: tao_sdk_search::SearchQueryProjectedItem,
+    columns: &[QueryDocsColumn],
+) -> JsonValue {
+    let mut map = serde_json::Map::with_capacity(columns.len());
+    for column in columns {
+        match column {
+            QueryDocsColumn::FileId => {
+                map.insert(
+                    QueryDocsColumn::FileId.key().to_string(),
+                    JsonValue::String(item.file_id.clone().unwrap_or_default()),
+                );
+            }
+            QueryDocsColumn::Path => {
+                map.insert(
+                    QueryDocsColumn::Path.key().to_string(),
+                    JsonValue::String(item.path.clone().unwrap_or_default()),
+                );
+            }
+            QueryDocsColumn::Title => {
+                map.insert(
+                    QueryDocsColumn::Title.key().to_string(),
+                    JsonValue::String(item.title.clone().unwrap_or_default()),
+                );
+            }
+            QueryDocsColumn::MatchedIn => {
+                map.insert(
+                    QueryDocsColumn::MatchedIn.key().to_string(),
+                    JsonValue::Array(
+                        item.matched_in
+                            .clone()
+                            .unwrap_or_default()
+                            .iter()
+                            .cloned()
+                            .map(JsonValue::String)
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+            }
+        }
+    }
+    JsonValue::Object(map)
+}
+
+struct QueryDocsStreamingEnvelope<'a> {
+    page: &'a tao_sdk_search::SearchQueryProjectedPage,
+    columns: &'a [QueryDocsColumn],
+}
+
+struct QueryDocsStreamingValue<'a> {
+    page: &'a tao_sdk_search::SearchQueryProjectedPage,
+    columns: &'a [QueryDocsColumn],
+}
+
+struct QueryDocsStreamingArgs<'a> {
+    page: &'a tao_sdk_search::SearchQueryProjectedPage,
+    columns: &'a [QueryDocsColumn],
+}
+
+struct QueryDocsStreamingRows<'a> {
+    items: &'a [tao_sdk_search::SearchQueryProjectedItem],
+    columns: &'a [QueryDocsColumn],
+}
+
+struct QueryDocsStreamingRow<'a> {
+    item: &'a tao_sdk_search::SearchQueryProjectedItem,
+    columns: &'a [QueryDocsColumn],
+}
+
+fn query_docs_projection(columns: &[QueryDocsColumn]) -> SearchQueryProjection {
+    SearchQueryProjection {
+        include_file_id: columns.contains(&QueryDocsColumn::FileId),
+        include_path: columns.contains(&QueryDocsColumn::Path),
+        include_title: columns.contains(&QueryDocsColumn::Title),
+        include_matched_in: columns.contains(&QueryDocsColumn::MatchedIn),
+    }
+}
+
+impl Serialize for QueryDocsStreamingEnvelope<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("ok", &true)?;
+        map.serialize_entry(
+            "value",
+            &QueryDocsStreamingValue {
+                page: self.page,
+                columns: self.columns,
+            },
+        )?;
+        map.serialize_entry("error", &Option::<JsonValue>::None)?;
+        map.end()
+    }
+}
+
+impl Serialize for QueryDocsStreamingValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("command", "query.run")?;
+        map.serialize_entry("summary", "query run completed")?;
+        map.serialize_entry(
+            "args",
+            &QueryDocsStreamingArgs {
+                page: self.page,
+                columns: self.columns,
+            },
+        )?;
+        map.end()
+    }
+}
+
+impl Serialize for QueryDocsStreamingArgs<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(6))?;
+        let column_names = self
+            .columns
+            .iter()
+            .map(|column| column.key())
+            .collect::<Vec<_>>();
+        map.serialize_entry("from", "docs")?;
+        map.serialize_entry("columns", &column_names)?;
+        map.serialize_entry(
+            "rows",
+            &QueryDocsStreamingRows {
+                items: &self.page.items,
+                columns: self.columns,
+            },
+        )?;
+        map.serialize_entry("total", &self.page.total)?;
+        map.serialize_entry("limit", &self.page.limit)?;
+        map.serialize_entry("offset", &self.page.offset)?;
+        map.end()
+    }
+}
+
+impl Serialize for QueryDocsStreamingRows<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.items.len()))?;
+        for item in self.items {
+            sequence.serialize_element(&QueryDocsStreamingRow {
+                item,
+                columns: self.columns,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for QueryDocsStreamingRow<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.columns.len()))?;
+        for column in self.columns {
+            match column {
+                QueryDocsColumn::FileId => {
+                    map.serialize_entry(
+                        column.key(),
+                        &self.item.file_id.clone().unwrap_or_default(),
+                    )?;
+                }
+                QueryDocsColumn::Path => {
+                    map.serialize_entry(column.key(), &self.item.path.clone().unwrap_or_default())?;
+                }
+                QueryDocsColumn::Title => {
+                    map.serialize_entry(
+                        column.key(),
+                        &self.item.title.clone().unwrap_or_default(),
+                    )?;
+                }
+                QueryDocsColumn::MatchedIn => {
+                    map.serialize_entry(
+                        column.key(),
+                        &self.item.matched_in.clone().unwrap_or_default(),
+                    )?;
+                }
+            }
+        }
+        map.end()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommandResult {
     command: String,
@@ -516,6 +780,7 @@ struct DaemonExecuteRequest {
     command: Commands,
     allow_writes: bool,
     json: bool,
+    json_stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,7 +819,14 @@ impl<T: Serialize> JsonEnvelope<T> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.json_stream && !cli.json {
+        return Err(anyhow!("--json-stream requires --json"));
+    }
     if let Some(output) = maybe_forward_to_daemon(&cli)? {
+        println!("{output}");
+        return Ok(());
+    }
+    if let Some(output) = maybe_render_streaming_output(&cli)? {
         println!("{output}");
         return Ok(());
     }
@@ -563,6 +835,51 @@ fn main() -> Result<()> {
     let output = render_output(cli.json, &result)?;
     println!("{output}");
     Ok(())
+}
+
+fn maybe_render_streaming_output(cli: &Cli) -> Result<Option<String>> {
+    let mut runtime = RuntimeMode::OneShot;
+    maybe_render_streaming_output_for_command(&cli.command, cli.json_stream, &mut runtime)
+}
+
+fn maybe_render_streaming_output_for_command(
+    command: &Commands,
+    json_stream: bool,
+    runtime: &mut RuntimeMode,
+) -> Result<Option<String>> {
+    if !json_stream {
+        return Ok(None);
+    }
+
+    let Commands::Query(args) = command else {
+        return Ok(None);
+    };
+    if !args.from.trim().eq_ignore_ascii_case("docs") {
+        return Ok(None);
+    }
+
+    let columns = parse_query_docs_columns(args.select.as_deref())?;
+    let projection = query_docs_projection(&columns);
+    let resolved = args.resolve()?;
+    let page = with_connection(runtime, &resolved, |connection| {
+        Ok(SearchQueryService.query_projected(
+            Path::new(&resolved.vault_root),
+            connection,
+            SearchQueryRequest {
+                query: args.query.clone().unwrap_or_default(),
+                limit: u64::from(args.limit.max(1)),
+                offset: u64::from(args.offset),
+            },
+            projection,
+        )?)
+    })
+    .map_err(|source| anyhow!("query docs failed: {source}"))?;
+    let rendered = serde_json::to_string(&QueryDocsStreamingEnvelope {
+        page: &page,
+        columns: &columns,
+    })
+    .context("serialize streamed docs query envelope")?;
+    Ok(Some(rendered))
 }
 
 fn dispatch(command: Commands, allow_writes: bool) -> Result<CommandResult> {
@@ -1188,9 +1505,11 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
     let from = args.from.trim();
     let limit = args.limit.max(1);
     if from.eq_ignore_ascii_case("docs") {
+        let columns = parse_query_docs_columns(args.select.as_deref())?;
+        let projection = query_docs_projection(&columns);
         let resolved = args.resolve()?;
         let page = with_connection(runtime, &resolved, |connection| {
-            Ok(SearchQueryService.query(
+            Ok(SearchQueryService.query_projected(
                 Path::new(&resolved.vault_root),
                 connection,
                 SearchQueryRequest {
@@ -1198,27 +1517,25 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
                     limit: u64::from(limit),
                     offset: u64::from(args.offset),
                 },
+                projection,
             )?)
         })
         .map_err(|source| anyhow!("query docs failed: {source}"))?;
         let rows = page
             .items
             .into_iter()
-            .map(|item| {
-                serde_json::json!({
-                    "file_id": item.file_id,
-                    "path": item.path,
-                    "title": item.title,
-                    "matched_in": item.matched_in,
-                })
-            })
+            .map(|item| project_query_docs_row(item, &columns))
+            .collect::<Vec<_>>();
+        let selected_columns = columns
+            .iter()
+            .map(|column| column.key())
             .collect::<Vec<_>>();
         return Ok(CommandResult {
             command: "query.run".to_string(),
             summary: "query run completed".to_string(),
             args: serde_json::json!({
                 "from": "docs",
-                "columns": ["file_id", "path", "title", "matched_in"],
+                "columns": selected_columns,
                 "rows": rows,
                 "total": page.total,
                 "limit": page.limit,
@@ -1507,6 +1824,7 @@ fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
                 command: cli.command.clone(),
                 allow_writes: cli.allow_writes,
                 json: cli.json,
+                json_stream: cli.json_stream,
             },
         },
     )?;
@@ -1811,19 +2129,54 @@ fn run_daemon_server(socket: &str) -> Result<()> {
                                 }
                             }
 
-                            match render_output(payload.json, &result) {
-                                Ok(output) => DaemonResponse {
-                                    ok: true,
-                                    output: Some(output),
-                                    error: None,
-                                    status: None,
-                                },
-                                Err(source) => DaemonResponse {
-                                    ok: false,
-                                    output: None,
-                                    error: Some(source.to_string()),
-                                    status: None,
-                                },
+                            if payload.json {
+                                match maybe_render_streaming_output_for_command(
+                                    &payload.command,
+                                    payload.json_stream,
+                                    &mut runtime,
+                                ) {
+                                    Ok(Some(output)) => DaemonResponse {
+                                        ok: true,
+                                        output: Some(output),
+                                        error: None,
+                                        status: None,
+                                    },
+                                    Ok(None) => match render_output(payload.json, &result) {
+                                        Ok(output) => DaemonResponse {
+                                            ok: true,
+                                            output: Some(output),
+                                            error: None,
+                                            status: None,
+                                        },
+                                        Err(source) => DaemonResponse {
+                                            ok: false,
+                                            output: None,
+                                            error: Some(source.to_string()),
+                                            status: None,
+                                        },
+                                    },
+                                    Err(source) => DaemonResponse {
+                                        ok: false,
+                                        output: None,
+                                        error: Some(source.to_string()),
+                                        status: None,
+                                    },
+                                }
+                            } else {
+                                match render_output(payload.json, &result) {
+                                    Ok(output) => DaemonResponse {
+                                        ok: true,
+                                        output: Some(output),
+                                        error: None,
+                                        status: None,
+                                    },
+                                    Err(source) => DaemonResponse {
+                                        ok: false,
+                                        output: None,
+                                        error: Some(source.to_string()),
+                                        status: None,
+                                    },
+                                }
                             }
                         }
                         Err(source) => DaemonResponse {
@@ -2210,7 +2563,7 @@ mod tests {
 
     use super::{
         Cli, Commands, DocCommands, NotePutArgs, QueryArgs, command_is_cacheable, dispatch,
-        maybe_forward_to_daemon, render_output,
+        maybe_forward_to_daemon, maybe_render_streaming_output, render_output,
     };
     use clap::{CommandFactory, Parser};
     use serde_json::Value as JsonValue;
@@ -2708,6 +3061,166 @@ mod tests {
     }
 
     #[test]
+    fn query_docs_select_projects_requested_columns_only() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+            fs::write(
+                vault_root.join("notes/projects/alpha.md"),
+                "# Alpha\nproject roadmap",
+            )
+            .expect("write alpha");
+            fs::write(
+                vault_root.join("notes/projects/beta.md"),
+                "# Beta\nproject updates",
+            )
+            .expect("write beta");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--select",
+                "path,title",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let columns = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("columns"))
+                .and_then(JsonValue::as_array)
+                .expect("columns array");
+            let column_names = columns
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>();
+            assert_eq!(column_names, vec!["path", "title"]);
+            let rows = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("rows"))
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            assert!(!rows.is_empty(), "expected at least one query row");
+            for row in rows {
+                let object = row.as_object().expect("row object");
+                assert!(object.contains_key("path"));
+                assert!(object.contains_key("title"));
+                assert!(!object.contains_key("file_id"));
+                assert!(!object.contains_key("matched_in"));
+            }
+        });
+    }
+
+    #[test]
+    fn json_stream_docs_query_uses_streaming_envelope() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+            fs::write(
+                vault_root.join("notes/projects/alpha.md"),
+                "# Alpha\nproject roadmap",
+            )
+            .expect("write alpha");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "--json",
+                "--json-stream",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--select",
+                "path,title",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let output = maybe_render_streaming_output(&cli)
+                .expect("render streaming output")
+                .expect("streaming output expected");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse streaming json");
+            assert_eq!(
+                envelope
+                    .get("value")
+                    .and_then(|value| value.get("command"))
+                    .and_then(JsonValue::as_str),
+                Some("query.run")
+            );
+            let columns = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("columns"))
+                .and_then(JsonValue::as_array)
+                .expect("columns");
+            assert_eq!(
+                columns
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["path", "title"]
+            );
+        });
+    }
+
+    #[test]
     fn daemon_control_commands_bypass_client_forwarding() {
         let cli = Cli::parse_from([
             "tao",
@@ -2752,6 +3265,7 @@ mod tests {
             query: Some("project".to_string()),
             path: None,
             view_name: None,
+            select: None,
             limit: 10,
             offset: 0,
         });

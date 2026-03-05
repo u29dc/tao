@@ -16,6 +16,30 @@ pub struct SearchQueryRequest {
     pub offset: u64,
 }
 
+/// Optional field projection for search query output rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchQueryProjection {
+    /// Include stable file id values.
+    pub include_file_id: bool,
+    /// Include normalized path values.
+    pub include_path: bool,
+    /// Include derived title values.
+    pub include_title: bool,
+    /// Include matching-surface classification values.
+    pub include_matched_in: bool,
+}
+
+impl Default for SearchQueryProjection {
+    fn default() -> Self {
+        Self {
+            include_file_id: true,
+            include_path: true,
+            include_title: true,
+            include_matched_in: true,
+        }
+    }
+}
+
 /// One matched note row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQueryItem {
@@ -29,6 +53,21 @@ pub struct SearchQueryItem {
     pub indexed_at: String,
     /// Ordered list of matching surfaces: `title`, `path`, `content`.
     pub matched_in: Vec<String>,
+}
+
+/// One matched note row for projected queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQueryProjectedItem {
+    /// Stable file id from index (when projected).
+    pub file_id: Option<String>,
+    /// Normalized vault-relative path (when projected).
+    pub path: Option<String>,
+    /// File stem title projection (when projected).
+    pub title: Option<String>,
+    /// Indexed timestamp string.
+    pub indexed_at: String,
+    /// Ordered list of matching surfaces when projected.
+    pub matched_in: Option<Vec<String>>,
 }
 
 /// Search page payload.
@@ -46,6 +85,21 @@ pub struct SearchQueryPage {
     pub items: Vec<SearchQueryItem>,
 }
 
+/// Search page payload for projected search queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQueryProjectedPage {
+    /// Original normalized query.
+    pub query: String,
+    /// Requested limit.
+    pub limit: u64,
+    /// Requested offset.
+    pub offset: u64,
+    /// Total matched rows before pagination.
+    pub total: u64,
+    /// Windowed result rows.
+    pub items: Vec<SearchQueryProjectedItem>,
+}
+
 /// Search query service over indexed markdown files.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SearchQueryService;
@@ -54,10 +108,45 @@ impl SearchQueryService {
     /// Execute one deterministic search query over title/path/content surfaces.
     pub fn query(
         &self,
-        _vault_root: &Path,
+        vault_root: &Path,
         connection: &Connection,
         request: SearchQueryRequest,
     ) -> Result<SearchQueryPage, SearchQueryError> {
+        let projected = self.query_projected(
+            vault_root,
+            connection,
+            request,
+            SearchQueryProjection::default(),
+        )?;
+        let items = projected
+            .items
+            .into_iter()
+            .map(|item| SearchQueryItem {
+                file_id: item.file_id.unwrap_or_default(),
+                path: item.path.unwrap_or_default(),
+                title: item.title.unwrap_or_default(),
+                indexed_at: item.indexed_at,
+                matched_in: item.matched_in.unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(SearchQueryPage {
+            query: projected.query,
+            limit: projected.limit,
+            offset: projected.offset,
+            total: projected.total,
+            items,
+        })
+    }
+
+    /// Execute one deterministic projected search query over title/path/content surfaces.
+    pub fn query_projected(
+        &self,
+        _vault_root: &Path,
+        connection: &Connection,
+        request: SearchQueryRequest,
+        projection: SearchQueryProjection,
+    ) -> Result<SearchQueryProjectedPage, SearchQueryError> {
         let query = request.query.trim();
         if query.is_empty() {
             return Err(SearchQueryError::EmptyQuery);
@@ -127,24 +216,53 @@ OFFSET ?4
         let rows = statement
             .query_map(params![fts_query, needle, limit_i64, offset_i64], |row| {
                 let path: String = row.get("normalized_path")?;
-                let title_match: i64 = row.get("title_match")?;
-                let path_match: i64 = row.get("path_match")?;
-                let content_match: i64 = row.get("content_match")?;
+                let title_match: i64 = if projection.include_matched_in {
+                    row.get("title_match")?
+                } else {
+                    0
+                };
+                let path_match: i64 = if projection.include_matched_in {
+                    row.get("path_match")?
+                } else {
+                    0
+                };
+                let content_match: i64 = if projection.include_matched_in {
+                    row.get("content_match")?
+                } else {
+                    0
+                };
                 let total: u64 = row.get("total_count")?;
-                let mut matched_in = Vec::new();
-                if title_match != 0 {
-                    matched_in.push("title".to_string());
-                }
-                if path_match != 0 {
-                    matched_in.push("path".to_string());
-                }
-                if matched_in.is_empty() && content_match != 0 {
-                    matched_in.push("content".to_string());
-                }
-                Ok(SearchQueryItem {
-                    file_id: row.get("file_id")?,
-                    title: title_from_path(&path),
-                    path,
+                let matched_in = if projection.include_matched_in {
+                    let mut matched_in = Vec::new();
+                    if title_match != 0 {
+                        matched_in.push("title".to_string());
+                    }
+                    if path_match != 0 {
+                        matched_in.push("path".to_string());
+                    }
+                    if matched_in.is_empty() && content_match != 0 {
+                        matched_in.push("content".to_string());
+                    }
+                    Some(matched_in)
+                } else {
+                    None
+                };
+                Ok(SearchQueryProjectedItem {
+                    file_id: if projection.include_file_id {
+                        Some(row.get("file_id")?)
+                    } else {
+                        None
+                    },
+                    title: if projection.include_title {
+                        Some(title_from_path(&path))
+                    } else {
+                        None
+                    },
+                    path: if projection.include_path {
+                        Some(path)
+                    } else {
+                        None
+                    },
                     indexed_at: row.get("indexed_at")?,
                     matched_in,
                 })
@@ -162,7 +280,7 @@ OFFSET ?4
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(SearchQueryPage {
+        Ok(SearchQueryProjectedPage {
             query: query.to_string(),
             limit: request.limit,
             offset: request.offset,
