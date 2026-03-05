@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -25,7 +25,8 @@ use tao_sdk_service::{
     GraphWalkRequest, HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
 };
 use tao_sdk_storage::{
-    BasesRepository, PropertiesRepository, TasksRepository, preflight_migrations, run_migrations,
+    BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, TasksRepository,
+    preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::CasePolicy;
 use tao_sdk_watch::WatchReconcileService;
@@ -121,6 +122,10 @@ enum GraphCommands {
     Orphans(GraphWindowArgs),
     /// Return connected components across resolved graph edges.
     Components(GraphComponentsArgs),
+    /// Return one-hop neighbors for one note.
+    Neighbors(GraphNeighborsArgs),
+    /// Return shortest path between two notes.
+    Path(GraphPathArgs),
     /// Walk graph neighbors from one root note.
     Walk(GraphWalkArgs),
 }
@@ -287,6 +292,9 @@ struct GraphWalkArgs {
     /// Include unresolved links in traversal.
     #[arg(long, default_value_t = false)]
     include_unresolved: bool,
+    /// Include folder hierarchy overlay edges.
+    #[arg(long, default_value_t = false)]
+    include_folders: bool,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -309,6 +317,53 @@ struct GraphComponentsArgs {
     /// Number of member paths to include when `--include-members` is not set.
     #[arg(long, default_value_t = 64)]
     sample_size: u32,
+    /// Component mode selector: weak|strong.
+    #[arg(long, default_value = "weak")]
+    mode: String,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct GraphNeighborsArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Root note path.
+    #[arg(long)]
+    path: String,
+    /// Direction selector: all|outgoing|incoming.
+    #[arg(long, default_value = "all")]
+    direction: String,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct GraphPathArgs {
+    /// Absolute vault root path.
+    #[arg(long)]
+    vault_root: String,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Start note path.
+    #[arg(long)]
+    from: String,
+    /// End note path.
+    #[arg(long)]
+    to: String,
+    /// Maximum traversal depth.
+    #[arg(long, default_value_t = 8)]
+    max_depth: u32,
+    /// Maximum number of explored nodes before abort.
+    #[arg(long, default_value_t = 10_000)]
+    max_nodes: u32,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -451,6 +506,18 @@ impl GraphComponentsArgs {
     }
 }
 
+impl GraphNeighborsArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
+impl GraphPathArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
+    }
+}
+
 impl TaskListArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(&self.vault_root, self.db_path.as_deref())
@@ -475,6 +542,60 @@ enum QueryDocsColumn {
     Path,
     Title,
     MatchedIn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphNeighborDirection {
+    All,
+    Outgoing,
+    Incoming,
+}
+
+impl GraphNeighborDirection {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "all" => Ok(Self::All),
+            "outgoing" => Ok(Self::Outgoing),
+            "incoming" => Ok(Self::Incoming),
+            _ => Err(anyhow!(
+                "unsupported --direction '{}'; expected one of: all|outgoing|incoming",
+                raw
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphComponentModeArg {
+    Weak,
+    Strong,
+}
+
+impl GraphComponentModeArg {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "weak" => Ok(Self::Weak),
+            "strong" => Ok(Self::Strong),
+            _ => Err(anyhow!(
+                "unsupported --mode '{}'; expected one of: weak|strong",
+                raw
+            )),
+        }
+    }
+
+    fn as_service_mode(self) -> tao_sdk_service::GraphComponentMode {
+        match self {
+            Self::Weak => tao_sdk_service::GraphComponentMode::Weak,
+            Self::Strong => tao_sdk_service::GraphComponentMode::Strong,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Weak => "weak",
+            Self::Strong => "strong",
+        }
+    }
 }
 
 impl QueryDocsColumn {
@@ -1271,9 +1392,11 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         GraphCommands::Components(args) => {
             let resolved = args.resolve()?;
+            let mode = GraphComponentModeArg::parse(args.mode.trim())?;
             let (total, rows) = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.components_page(
                     connection,
+                    mode.as_service_mode(),
                     args.limit,
                     args.offset,
                     args.include_members,
@@ -1295,12 +1418,214 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.components".to_string(),
                 summary: "graph components completed".to_string(),
                 args: serde_json::json!({
+                    "mode": mode.as_str(),
                     "total": total,
                     "limit": args.limit,
                     "offset": args.offset,
                     "include_members": args.include_members,
                     "sample_size": args.sample_size,
                     "items": items,
+                }),
+            })
+        }
+        GraphCommands::Neighbors(args) => {
+            let resolved = args.resolve()?;
+            let direction = GraphNeighborDirection::parse(args.direction.trim())?;
+            let (total, items) = with_connection(runtime, &resolved, |connection| {
+                let mut rows = Vec::<serde_json::Value>::new();
+
+                if matches!(
+                    direction,
+                    GraphNeighborDirection::All | GraphNeighborDirection::Outgoing
+                ) {
+                    let outgoing =
+                        BacklinkGraphService.outgoing_for_path(connection, &args.path)?;
+                    for edge in outgoing {
+                        let Some(target_path) = edge.resolved_path.clone() else {
+                            continue;
+                        };
+                        rows.push(serde_json::json!({
+                            "path": target_path,
+                            "direction": "outgoing",
+                            "link_id": edge.link_id,
+                            "source_path": edge.source_path,
+                            "raw_target": edge.raw_target,
+                        }));
+                    }
+                }
+
+                if matches!(
+                    direction,
+                    GraphNeighborDirection::All | GraphNeighborDirection::Incoming
+                ) {
+                    let incoming =
+                        BacklinkGraphService.backlinks_for_path(connection, &args.path)?;
+                    for edge in incoming {
+                        rows.push(serde_json::json!({
+                            "path": edge.source_path,
+                            "direction": "incoming",
+                            "link_id": edge.link_id,
+                            "source_path": edge.source_path,
+                            "raw_target": edge.raw_target,
+                        }));
+                    }
+                }
+
+                rows.sort_by(|left, right| {
+                    let left_path = left
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let right_path = right
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let left_direction = left
+                        .get("direction")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let right_direction = right
+                        .get("direction")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    left_path
+                        .cmp(right_path)
+                        .then_with(|| left_direction.cmp(right_direction))
+                });
+                rows.dedup_by(|left, right| {
+                    left.get("path") == right.get("path")
+                        && left.get("direction") == right.get("direction")
+                });
+
+                let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+                let items = paginate_json_items(rows, args.limit, args.offset);
+                Ok((total, items))
+            })
+            .map_err(|source| anyhow!("graph neighbors failed: {source}"))?;
+            Ok(CommandResult {
+                command: "graph.neighbors".to_string(),
+                summary: "graph neighbors completed".to_string(),
+                args: serde_json::json!({
+                    "path": args.path,
+                    "direction": args.direction,
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::Path(args) => {
+            if args.max_nodes == 0 {
+                return Err(anyhow!("--max-nodes must be greater than zero"));
+            }
+            let resolved = args.resolve()?;
+            let (found, explored_nodes, path) = with_connection(runtime, &resolved, |connection| {
+                let Some(from_file) = FilesRepository::get_by_normalized_path(connection, &args.from)? else {
+                    return Ok((false, 0_u32, Vec::<String>::new()));
+                };
+                let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &args.to)? else {
+                    return Ok((false, 0_u32, Vec::<String>::new()));
+                };
+
+                if from_file.file_id == to_file.file_id {
+                    return Ok((true, 1_u32, vec![from_file.normalized_path]));
+                }
+
+                let file_rows = FilesRepository::list_all(connection)?;
+                let mut path_by_file_id = HashMap::<String, String>::new();
+                for row in file_rows {
+                    if row.is_markdown {
+                        path_by_file_id.insert(row.file_id, row.normalized_path);
+                    }
+                }
+
+                let pairs = LinksRepository::list_resolved_pairs(connection)?;
+                let mut adjacency = HashMap::<String, Vec<String>>::new();
+                for pair in pairs {
+                    adjacency
+                        .entry(pair.source_file_id.clone())
+                        .or_default()
+                        .push(pair.target_file_id.clone());
+                    adjacency
+                        .entry(pair.target_file_id)
+                        .or_default()
+                        .push(pair.source_file_id);
+                }
+                for neighbors in adjacency.values_mut() {
+                    neighbors.sort();
+                    neighbors.dedup();
+                }
+
+                let from_id = from_file.file_id;
+                let to_id = to_file.file_id;
+                let mut queue = VecDeque::<String>::from([from_id.clone()]);
+                let mut depth_by_id = HashMap::<String, u32>::new();
+                let mut parent_by_id = HashMap::<String, String>::new();
+                depth_by_id.insert(from_id.clone(), 0);
+                let mut explored_nodes: u32 = 1;
+
+                while let Some(current) = queue.pop_front() {
+                    if current == to_id {
+                        break;
+                    }
+                    let current_depth = *depth_by_id.get(&current).unwrap_or(&0);
+                    if current_depth >= args.max_depth {
+                        continue;
+                    }
+                    if let Some(neighbors) = adjacency.get(&current) {
+                        for next in neighbors {
+                            if depth_by_id.contains_key(next) {
+                                continue;
+                            }
+                            explored_nodes = explored_nodes.saturating_add(1);
+                            if explored_nodes > args.max_nodes {
+                                return Err(anyhow!(
+                                    "graph path aborted after exploring {} nodes; increase --max-nodes",
+                                    args.max_nodes
+                                ));
+                            }
+                            depth_by_id.insert(next.clone(), current_depth + 1);
+                            parent_by_id.insert(next.clone(), current.clone());
+                            queue.push_back(next.clone());
+                        }
+                    }
+                }
+
+                if !depth_by_id.contains_key(&to_id) {
+                    return Ok((false, explored_nodes, Vec::<String>::new()));
+                }
+
+                let mut path_ids = vec![to_id.clone()];
+                let mut cursor = to_id;
+                while let Some(parent) = parent_by_id.get(&cursor).cloned() {
+                    path_ids.push(parent.clone());
+                    if parent == from_id {
+                        break;
+                    }
+                    cursor = parent;
+                }
+                path_ids.reverse();
+                let path = path_ids
+                    .into_iter()
+                    .filter_map(|file_id| path_by_file_id.get(&file_id).cloned())
+                    .collect::<Vec<_>>();
+                Ok((true, explored_nodes, path))
+            })
+            .map_err(|source| anyhow!("graph path failed: {source}"))?;
+            let edge_count = path.len().saturating_sub(1);
+            Ok(CommandResult {
+                command: "graph.path".to_string(),
+                summary: "graph path completed".to_string(),
+                args: serde_json::json!({
+                    "from": args.from,
+                    "to": args.to,
+                    "found": found,
+                    "max_depth": args.max_depth,
+                    "max_nodes": args.max_nodes,
+                    "explored_nodes": explored_nodes,
+                    "edge_count": edge_count,
+                    "path": path,
                 }),
             })
         }
@@ -1314,6 +1639,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                         depth: args.depth,
                         limit: args.limit,
                         include_unresolved: args.include_unresolved,
+                        include_folders: args.include_folders,
                     },
                 )?)
             })
@@ -1325,9 +1651,15 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                         GraphWalkDirection::Outgoing => "outgoing",
                         GraphWalkDirection::Incoming => "incoming",
                     };
+                    let edge_type = match step.edge_type {
+                        tao_sdk_service::GraphWalkEdgeType::Wikilink => "wikilink",
+                        tao_sdk_service::GraphWalkEdgeType::FolderParent => "folder-parent",
+                        tao_sdk_service::GraphWalkEdgeType::FolderSibling => "folder-sibling",
+                    };
                     serde_json::json!({
                         "depth": step.depth,
                         "direction": direction,
+                        "edge_type": edge_type,
                         "link_id": step.link_id,
                         "source_path": step.source_path,
                         "target_path": step.target_path,
@@ -1342,6 +1674,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 args: serde_json::json!({
                     "path": args.path,
                     "depth": args.depth,
+                    "include_folders": args.include_folders,
                     "total": items.len(),
                     "items": items,
                 }),
@@ -2265,6 +2598,8 @@ fn link_edge_to_json(edge: tao_sdk_service::LinkGraphEdge) -> JsonValue {
         "heading_slug": edge.heading_slug,
         "block_id": edge.block_id,
         "is_unresolved": edge.is_unresolved,
+        "unresolved_reason": edge.unresolved_reason,
+        "source_field": edge.source_field,
     })
 }
 
@@ -2813,6 +3148,34 @@ mod tests {
                     ],
                 ),
                 (
+                    "graph.neighbors",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "neighbors",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--path",
+                        "notes/alpha.md",
+                    ],
+                ),
+                (
+                    "graph.path",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "path",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--from",
+                        "notes/alpha.md",
+                        "--to",
+                        "notes/projects/project-a.md",
+                    ],
+                ),
+                (
                     "graph.walk",
                     vec![
                         "tao",
@@ -3221,6 +3584,587 @@ mod tests {
     }
 
     #[test]
+    fn graph_neighbors_supports_direction_filtering() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/a.md"), "# A\n[[notes/b.md]]\n").expect("write a");
+            fs::write(vault_root.join("notes/b.md"), "# B\n[[notes/c.md]]\n").expect("write b");
+            fs::write(vault_root.join("notes/c.md"), "# C\n").expect("write c");
+            fs::write(vault_root.join("notes/d.md"), "# D\n[[notes/a.md]]\n").expect("write d");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let neighbors = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "neighbors",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/a.md",
+                "--direction",
+                "incoming",
+            ]);
+            let output = render_output(
+                neighbors.json,
+                &dispatch(neighbors.command, neighbors.allow_writes).expect("dispatch neighbors"),
+            )
+            .expect("render neighbors");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse neighbors");
+            let items = envelope
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("neighbors items");
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                items[0].get("path").and_then(JsonValue::as_str),
+                Some("notes/d.md")
+            );
+            assert_eq!(
+                items[0].get("direction").and_then(JsonValue::as_str),
+                Some("incoming")
+            );
+        });
+    }
+
+    #[test]
+    fn graph_path_reports_found_not_found_and_guardrail_errors() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/a.md"), "# A\n[[notes/b.md]]\n").expect("write a");
+            fs::write(vault_root.join("notes/b.md"), "# B\n[[notes/c.md]]\n").expect("write b");
+            fs::write(vault_root.join("notes/c.md"), "# C\n").expect("write c");
+            fs::write(vault_root.join("notes/e.md"), "# E\n").expect("write e");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let found = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "path",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "notes/a.md",
+                "--to",
+                "notes/a.md",
+            ]);
+            let found_output = render_output(
+                found.json,
+                &dispatch(found.command, found.allow_writes).expect("dispatch found path"),
+            )
+            .expect("render found path");
+            let found_envelope: JsonValue =
+                serde_json::from_str(&found_output).expect("parse found path");
+            assert_eq!(
+                found_envelope
+                    .get("value")
+                    .and_then(|value| value.get("args"))
+                    .and_then(|args| args.get("found"))
+                    .and_then(JsonValue::as_bool),
+                Some(true)
+            );
+
+            let missing = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "path",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "notes/a.md",
+                "--to",
+                "notes/e.md",
+            ]);
+            let missing_output = render_output(
+                missing.json,
+                &dispatch(missing.command, missing.allow_writes).expect("dispatch missing path"),
+            )
+            .expect("render missing path");
+            let missing_envelope: JsonValue =
+                serde_json::from_str(&missing_output).expect("parse missing path");
+            assert_eq!(
+                missing_envelope
+                    .get("value")
+                    .and_then(|value| value.get("args"))
+                    .and_then(|args| args.get("found"))
+                    .and_then(JsonValue::as_bool),
+                Some(false)
+            );
+
+            let guardrail = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "path",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "notes/a.md",
+                "--to",
+                "notes/c.md",
+                "--max-nodes",
+                "0",
+            ]);
+            let error = dispatch(guardrail.command, guardrail.allow_writes)
+                .expect_err("guardrail should fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("--max-nodes must be greater than zero")
+            );
+        });
+    }
+
+    #[test]
+    fn graph_components_supports_weak_and_strong_modes() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/a.md"), "# A\n[[b]]\n").expect("write a");
+            fs::write(vault_root.join("notes/b.md"), "# B\n[[a]]\n[[c]]\n").expect("write b");
+            fs::write(vault_root.join("notes/c.md"), "# C\n").expect("write c");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let weak = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "components",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--mode",
+                "weak",
+                "--include-members",
+            ]);
+            let weak_output = render_output(
+                weak.json,
+                &dispatch(weak.command, weak.allow_writes).expect("dispatch weak components"),
+            )
+            .expect("render weak components");
+            let weak_json: JsonValue = serde_json::from_str(&weak_output).expect("parse weak json");
+            let weak_items = weak_json
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("weak items");
+            assert_eq!(weak_items.len(), 1);
+            assert_eq!(
+                weak_items[0].get("size").and_then(JsonValue::as_u64),
+                Some(3)
+            );
+
+            let strong = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "components",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--mode",
+                "strong",
+                "--include-members",
+            ]);
+            let strong_output = render_output(
+                strong.json,
+                &dispatch(strong.command, strong.allow_writes).expect("dispatch strong components"),
+            )
+            .expect("render strong components");
+            let strong_json: JsonValue =
+                serde_json::from_str(&strong_output).expect("parse strong json");
+            let strong_items = strong_json
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("strong items");
+            let strong_sizes = strong_items
+                .iter()
+                .filter_map(|item| item.get("size").and_then(JsonValue::as_u64))
+                .collect::<Vec<_>>();
+            assert_eq!(strong_sizes, vec![2, 1]);
+        });
+    }
+
+    #[test]
+    fn graph_walk_can_include_folder_overlay_edges() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create projects dir");
+            fs::create_dir_all(vault_root.join("notes/meetings")).expect("create meetings dir");
+            fs::write(vault_root.join("notes/projects/a.md"), "# A\n").expect("write a");
+            fs::write(vault_root.join("notes/projects/b.md"), "# B\n").expect("write b");
+            fs::write(vault_root.join("notes/meetings/m1.md"), "# M1\n").expect("write m1");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let plain_walk = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "walk",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/projects/a.md",
+                "--depth",
+                "2",
+            ]);
+            let plain_output = render_output(
+                plain_walk.json,
+                &dispatch(plain_walk.command, plain_walk.allow_writes)
+                    .expect("dispatch plain walk"),
+            )
+            .expect("render plain walk");
+            let plain_json: JsonValue =
+                serde_json::from_str(&plain_output).expect("parse plain walk");
+            let plain_items = plain_json
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("plain items");
+            assert!(
+                plain_items.is_empty(),
+                "expected no wikilink steps in plain walk fixture"
+            );
+
+            let folder_walk = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "walk",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/projects/a.md",
+                "--depth",
+                "2",
+                "--include-folders",
+            ]);
+            let folder_output = render_output(
+                folder_walk.json,
+                &dispatch(folder_walk.command, folder_walk.allow_writes)
+                    .expect("dispatch folder walk"),
+            )
+            .expect("render folder walk");
+            let folder_json: JsonValue =
+                serde_json::from_str(&folder_output).expect("parse folder walk");
+            let folder_items = folder_json
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("folder walk items");
+            assert!(!folder_items.is_empty(), "expected folder overlay edges");
+            assert!(folder_items.iter().any(|item| {
+                item.get("edge_type").and_then(JsonValue::as_str) == Some("folder-sibling")
+            }));
+        });
+    }
+
+    #[test]
+    fn graph_unresolved_includes_reason_and_source_fields() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(
+                vault_root.join("notes/a.md"),
+                "---\nrefs:\n  - \"[[missing-frontmatter]]\"\n---\n# A\n[[missing-body]]\n",
+            )
+            .expect("write a");
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let unresolved = Cli::parse_from([
+                "tao",
+                "--json",
+                "graph",
+                "unresolved",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--limit",
+                "20",
+                "--offset",
+                "0",
+            ]);
+            let output = render_output(
+                unresolved.json,
+                &dispatch(unresolved.command, unresolved.allow_writes)
+                    .expect("dispatch unresolved"),
+            )
+            .expect("render unresolved");
+            let payload: JsonValue = serde_json::from_str(&output).expect("parse unresolved");
+            let items = payload
+                .get("value")
+                .and_then(|value| value.get("args"))
+                .and_then(|args| args.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("unresolved items");
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.get("unresolved_reason").is_some())
+            );
+            assert!(items.iter().all(|item| item.get("source_field").is_some()));
+            assert!(items.iter().any(|item| {
+                item.get("source_field").and_then(JsonValue::as_str) == Some("body")
+            }));
+            assert!(items.iter().any(|item| {
+                item.get("source_field")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|value| value.starts_with("frontmatter:"))
+            }));
+        });
+    }
+
+    #[test]
+    fn graph_snapshot_contracts_match_golden_outputs() {
+        with_temp_cwd(|| {
+            let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vault/fixtures/graph-parity")
+                .canonicalize()
+                .expect("canonicalize graph parity fixture");
+            let expected_root = fixture_root.join("expected");
+
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            copy_dir_recursive(&fixture_root, &vault_root).expect("copy graph parity fixture");
+            let _ = fs::remove_dir_all(vault_root.join("expected"));
+
+            let open = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "--json",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let assert_snapshot = |expected_name: &str, cli: Cli| {
+                let rendered = render_output(
+                    cli.json,
+                    &dispatch(cli.command, cli.allow_writes).expect("dispatch"),
+                )
+                .expect("render output");
+                let actual: JsonValue =
+                    serde_json::from_str(&rendered).expect("parse json envelope");
+                let actual_args = actual
+                    .get("value")
+                    .and_then(|value| value.get("args"))
+                    .expect("value.args");
+                let expected_raw = fs::read_to_string(expected_root.join(expected_name))
+                    .expect("read expected snapshot");
+                let expected: JsonValue =
+                    serde_json::from_str(&expected_raw).expect("parse expected snapshot");
+                assert_eq!(
+                    actual_args, &expected,
+                    "snapshot mismatch for {expected_name}"
+                );
+            };
+
+            assert_snapshot(
+                "outgoing.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "outgoing",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--path",
+                    "notes/root.md",
+                ]),
+            );
+            assert_snapshot(
+                "backlinks.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "backlinks",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--path",
+                    "notes/beta.md",
+                ]),
+            );
+            assert_snapshot(
+                "unresolved.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "unresolved",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--limit",
+                    "100",
+                    "--offset",
+                    "0",
+                ]),
+            );
+            assert_snapshot(
+                "deadends.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "deadends",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--limit",
+                    "100",
+                    "--offset",
+                    "0",
+                ]),
+            );
+            assert_snapshot(
+                "orphans.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "orphans",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--limit",
+                    "100",
+                    "--offset",
+                    "0",
+                ]),
+            );
+            assert_snapshot(
+                "walk.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "walk",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--path",
+                    "notes/root.md",
+                    "--depth",
+                    "2",
+                    "--limit",
+                    "50",
+                    "--include-unresolved",
+                ]),
+            );
+        });
+    }
+
+    #[test]
     fn daemon_control_commands_bypass_client_forwarding() {
         let cli = Cli::parse_from([
             "tao",
@@ -3360,5 +4304,24 @@ mod tests {
         let result = operation();
         env::set_current_dir(&original_dir).expect("restore cwd");
         result
+    }
+
+    fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&source_path, &destination_path)?;
+            } else if file_type.is_file() {
+                if let Some(parent) = destination_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&source_path, &destination_path)?;
+            }
+        }
+        Ok(())
     }
 }

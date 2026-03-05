@@ -55,6 +55,8 @@ struct Args {
     graph_depth: u32,
     #[arg(long, default_value_t = 200)]
     graph_limit: u32,
+    #[arg(long, default_value_t = false)]
+    graph_include_folders: bool,
     #[arg(long, default_value = "project")]
     query_text: String,
     #[arg(long, default_value_t = 100)]
@@ -281,6 +283,7 @@ fn run_graph_walk_benchmark(args: &Args) -> Result<()> {
         depth: args.graph_depth.max(1),
         limit: args.graph_limit.max(1),
         include_unresolved: true,
+        include_folders: args.graph_include_folders,
     };
 
     let mut warm_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
@@ -336,6 +339,7 @@ fn run_graph_walk_benchmark(args: &Args) -> Result<()> {
             "depth": request.depth,
             "limit": request.limit,
             "include_unresolved": request.include_unresolved,
+            "include_folders": request.include_folders,
         },
         "latency": {
             "warm": warm.as_json(),

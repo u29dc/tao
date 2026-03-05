@@ -18,6 +18,10 @@ pub struct LinkRecord {
     pub block_id: Option<String>,
     /// Unresolved marker.
     pub is_unresolved: bool,
+    /// Stable unresolved reason code when unresolved.
+    pub unresolved_reason: Option<String>,
+    /// Link provenance field (`body` or `frontmatter:<field>`).
+    pub source_field: String,
     /// Creation timestamp.
     pub created_at: String,
 }
@@ -39,6 +43,10 @@ pub struct LinkRecordInput {
     pub block_id: Option<String>,
     /// Unresolved marker.
     pub is_unresolved: bool,
+    /// Stable unresolved reason code when unresolved.
+    pub unresolved_reason: Option<String>,
+    /// Link provenance field (`body` or `frontmatter:<field>`).
+    pub source_field: String,
 }
 
 /// Link row enriched with source/target normalized paths from join queries.
@@ -62,6 +70,10 @@ pub struct LinkWithPaths {
     pub block_id: Option<String>,
     /// Unresolved marker.
     pub is_unresolved: bool,
+    /// Stable unresolved reason code when unresolved.
+    pub unresolved_reason: Option<String>,
+    /// Link provenance field (`body` or `frontmatter:<field>`).
+    pub source_field: String,
 }
 
 /// Lightweight resolved link pair for graph component construction.
@@ -106,9 +118,11 @@ INSERT INTO links (
   resolved_file_id,
   heading_slug,
   block_id,
-  is_unresolved
+  is_unresolved,
+  unresolved_reason,
+  source_field
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#,
                 params![
                     record.link_id,
@@ -117,7 +131,9 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                     record.resolved_file_id,
                     record.heading_slug,
                     record.block_id,
-                    i64::from(record.is_unresolved)
+                    i64::from(record.is_unresolved),
+                    record.unresolved_reason,
+                    record.source_field,
                 ],
             )
             .map_err(|source| LinksRepositoryError::Sql {
@@ -144,6 +160,8 @@ SELECT
   heading_slug,
   block_id,
   is_unresolved,
+  unresolved_reason,
+  source_field,
   created_at
 FROM links
 WHERE link_id = ?1
@@ -180,7 +198,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -226,7 +246,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -271,7 +293,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -332,7 +356,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -518,7 +544,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -573,7 +601,9 @@ SELECT
   tf.normalized_path AS resolved_path,
   l.heading_slug,
   l.block_id,
-  l.is_unresolved
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
 FROM links l
 JOIN files sf ON sf.file_id = l.source_file_id
 LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
@@ -619,6 +649,8 @@ fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
         heading_slug: row.get("heading_slug")?,
         block_id: row.get("block_id")?,
         is_unresolved: is_unresolved != 0,
+        unresolved_reason: row.get("unresolved_reason")?,
+        source_field: row.get("source_field")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -636,6 +668,8 @@ fn row_to_link_with_paths(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkWithP
         heading_slug: row.get("heading_slug")?,
         block_id: row.get("block_id")?,
         is_unresolved: is_unresolved != 0,
+        unresolved_reason: row.get("unresolved_reason")?,
+        source_field: row.get("source_field")?,
     })
 }
 
@@ -806,6 +840,8 @@ mod tests {
             heading_slug: Some("heading".to_string()),
             block_id: None,
             is_unresolved: false,
+            unresolved_reason: None,
+            source_field: "body".to_string(),
         };
 
         LinksRepository::insert(&connection, &link).expect("insert link");
@@ -849,6 +885,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert resolved");
@@ -862,6 +900,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: true,
+                unresolved_reason: Some("missing-note".to_string()),
+                source_field: "frontmatter:related".to_string(),
             },
         )
         .expect("insert unresolved b");
@@ -875,6 +915,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: true,
+                unresolved_reason: Some("missing-note".to_string()),
+                source_field: "body".to_string(),
             },
         )
         .expect("insert unresolved a");
@@ -895,6 +937,11 @@ mod tests {
         assert_eq!(unresolved[0].link_id, "l-unresolved-a");
         assert_eq!(unresolved[1].source_path, "notes/b.md");
         assert_eq!(unresolved[1].link_id, "l-unresolved-b");
+        assert_eq!(
+            unresolved[1].unresolved_reason.as_deref(),
+            Some("missing-note")
+        );
+        assert_eq!(unresolved[1].source_field, "frontmatter:related");
         assert!(unresolved.iter().all(|row| row.is_unresolved));
     }
 }

@@ -19,9 +19,8 @@ use tao_sdk_properties::{
 };
 use tao_sdk_storage::{
     BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
-    IndexStateRepository, LinkRecordInput, LinksRepository, PropertiesRepository,
-    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput,
-    TasksRepository,
+    IndexStateRepository, LinkRecordInput, PropertiesRepository, PropertyRecordInput,
+    SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput, TasksRepository,
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
@@ -328,15 +327,32 @@ impl IncrementalIndexService {
         let mut links_reindexed = 0_u64;
         let mut properties_reindexed = 0_u64;
         let mut bases_reindexed = 0_u64;
+        let mut pending_link_records = Vec::<LinkRecordInput>::new();
 
-        let mut markdown_candidates = FilesRepository::list_all(&transaction)
-            .map_err(|source| FullIndexError::UpsertFileMetadata {
+        let existing_records = FilesRepository::list_all(&transaction).map_err(|source| {
+            FullIndexError::UpsertFileMetadata {
                 source: Box::new(source),
-            })?
-            .into_iter()
-            .filter(|record| record.is_markdown)
-            .map(|record| record.normalized_path)
-            .collect::<Vec<_>>();
+            }
+        })?;
+        let mut markdown_candidates = Vec::new();
+        let mut file_id_by_path = HashMap::<String, String>::new();
+        for record in existing_records {
+            if record.is_markdown {
+                markdown_candidates.push(record.normalized_path.clone());
+            }
+            file_id_by_path.insert(record.normalized_path, record.file_id);
+        }
+        for changed_path in changed_paths {
+            let normalized = normalize_changed_path(changed_path)?;
+            let absolute = vault_root.join(changed_path);
+            if absolute.exists() && normalized.ends_with(".md") {
+                markdown_candidates.push(normalized);
+                let lookup_key = normalize_changed_path(changed_path)?;
+                file_id_by_path
+                    .entry(lookup_key.clone())
+                    .or_insert_with(|| deterministic_id("file", &lookup_key));
+            }
+        }
         markdown_candidates.sort();
         markdown_candidates.dedup();
         let mut heading_index =
@@ -393,6 +409,7 @@ impl IncrementalIndexService {
                 let file_id = existing
                     .map(|record| record.file_id)
                     .unwrap_or_else(|| deterministic_id("file", &normalized));
+                file_id_by_path.insert(normalized.clone(), file_id.clone());
 
                 FilesRepository::upsert(
                     &transaction,
@@ -521,12 +538,7 @@ impl IncrementalIndexService {
                         let mut resolved_file_id = resolution
                             .resolved_path
                             .as_ref()
-                            .and_then(|path| {
-                                FilesRepository::get_by_normalized_path(&transaction, path)
-                                    .ok()
-                                    .flatten()
-                            })
-                            .map(|record| record.file_id);
+                            .and_then(|path| file_id_by_path.get(path).cloned());
                         let mut heading_slug = link.heading.as_deref().map(slugify_heading);
                         let mut block_id = link.block.clone();
                         let heading_resolution = resolve_heading_target(
@@ -555,28 +567,31 @@ impl IncrementalIndexService {
                         }
 
                         let is_unresolved = resolved_file_id.is_none();
+                        let unresolved_reason = if is_unresolved {
+                            classify_unresolved_reason(
+                                link,
+                                resolution.resolved_path.as_deref(),
+                                heading_resolution.is_resolved,
+                                block_resolution.is_resolved,
+                            )
+                        } else {
+                            None
+                        };
 
-                        LinksRepository::insert(
-                            &transaction,
-                            &LinkRecordInput {
-                                link_id: deterministic_id(
-                                    "link",
-                                    &format!(
-                                        "{file_id}:{index}:{}:{}",
-                                        indexed_link.source, link.raw
-                                    ),
-                                ),
-                                source_file_id: file_id.clone(),
-                                raw_target: link.target.clone(),
-                                resolved_file_id,
-                                heading_slug,
-                                block_id,
-                                is_unresolved,
-                            },
-                        )
-                        .map_err(|source| FullIndexError::InsertLink {
-                            source: Box::new(source),
-                        })?;
+                        pending_link_records.push(LinkRecordInput {
+                            link_id: deterministic_id(
+                                "link",
+                                &format!("{file_id}:{index}:{}:{}", indexed_link.source, link.raw),
+                            ),
+                            source_file_id: file_id.clone(),
+                            raw_target: link.target.clone(),
+                            resolved_file_id,
+                            heading_slug,
+                            block_id,
+                            is_unresolved,
+                            unresolved_reason,
+                            source_field: indexed_link.source.clone(),
+                        });
                         links_reindexed += 1;
                     }
                 } else if normalized.ends_with(".base") {
@@ -620,9 +635,12 @@ impl IncrementalIndexService {
                     heading_index.remove(&normalized);
                     block_index.remove(&normalized);
                 }
+                file_id_by_path.remove(&normalized);
                 removed_files += 1;
             }
         }
+
+        insert_links_batch(&transaction, &pending_link_records)?;
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -2094,9 +2112,11 @@ INSERT INTO links (
   resolved_file_id,
   heading_slug,
   block_id,
-  is_unresolved
+  is_unresolved,
+  unresolved_reason,
+  source_field
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#,
         )
         .map_err(|source| FullIndexError::ExecuteSql {
@@ -2113,7 +2133,9 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 record.resolved_file_id,
                 record.heading_slug,
                 record.block_id,
-                i64::from(record.is_unresolved)
+                i64::from(record.is_unresolved),
+                record.unresolved_reason,
+                record.source_field
             ])
             .map_err(|source| FullIndexError::ExecuteSql {
                 operation: "bulk_insert_links",
@@ -2543,6 +2565,16 @@ fn resolve_document_link_records(
         }
 
         let is_unresolved = resolved_file_id.is_none();
+        let unresolved_reason = if is_unresolved {
+            classify_unresolved_reason(
+                link,
+                resolution.resolved_path.as_deref(),
+                heading_resolution.is_resolved,
+                block_resolution.is_resolved,
+            )
+        } else {
+            None
+        };
         if is_unresolved {
             unresolved_total += 1;
         }
@@ -2560,6 +2592,8 @@ fn resolve_document_link_records(
             heading_slug,
             block_id,
             is_unresolved,
+            unresolved_reason,
+            source_field: indexed_link.source.clone(),
         });
     }
 
@@ -2567,6 +2601,38 @@ fn resolve_document_link_records(
         records,
         unresolved_total,
     }
+}
+
+fn classify_unresolved_reason(
+    link: &WikiLink,
+    resolved_path: Option<&str>,
+    heading_is_resolved: bool,
+    block_is_resolved: bool,
+) -> Option<String> {
+    if link.block.is_some() && !block_is_resolved {
+        return Some("bad-block".to_string());
+    }
+    if link.heading.is_some() && !heading_is_resolved {
+        return Some("bad-anchor".to_string());
+    }
+    if resolved_path.is_none() {
+        if is_malformed_link_target(&link.target) {
+            return Some("malformed-target".to_string());
+        }
+        return Some("missing-note".to_string());
+    }
+    None
+}
+
+fn is_malformed_link_target(target: &str) -> bool {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    trimmed
+        .chars()
+        .any(|ch| !(ch.is_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ' ' | '(' | ')')))
 }
 
 fn build_heading_index(
@@ -3376,6 +3442,10 @@ mod tests {
             .expect("missing heading link");
         assert!(missing_heading.is_unresolved);
         assert_eq!(missing_heading.resolved_path, None);
+        assert_eq!(
+            missing_heading.unresolved_reason.as_deref(),
+            Some("bad-anchor")
+        );
     }
 
     #[test]
@@ -3415,6 +3485,64 @@ mod tests {
             .expect("missing block link");
         assert!(missing_block.is_unresolved);
         assert_eq!(missing_block.resolved_path, None);
+        assert_eq!(
+            missing_block.unresolved_reason.as_deref(),
+            Some("bad-block")
+        );
+    }
+
+    #[test]
+    fn unresolved_links_include_reason_codes_and_provenance() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(
+            temp.path().join("notes/a.md"),
+            "---\nup: \"[[frontmatter-missing]]\"\n---\n# A\n[[missing-note]]\n[[b#Missing Heading]]\n[[b#^missing-block]]\n[[bad??target]]",
+        )
+        .expect("write a");
+        fs::write(
+            temp.path().join("notes/b.md"),
+            "# Known Heading\nParagraph ^known-block",
+        )
+        .expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+            .expect("list outgoing");
+
+        let unresolved = outgoing
+            .iter()
+            .filter(|row| row.is_unresolved)
+            .collect::<Vec<_>>();
+        assert_eq!(unresolved.len(), 5);
+        assert!(unresolved.iter().any(|row| {
+            row.unresolved_reason.as_deref() == Some("missing-note")
+                && row.source_field == "body"
+                && row.raw_target == "missing-note"
+        }));
+        assert!(unresolved.iter().any(|row| {
+            row.unresolved_reason.as_deref() == Some("missing-note")
+                && row.source_field.starts_with("frontmatter:")
+                && row.raw_target == "frontmatter-missing"
+        }));
+        assert!(unresolved.iter().any(|row| {
+            row.unresolved_reason.as_deref() == Some("bad-anchor") && row.raw_target == "b"
+        }));
+        assert!(unresolved.iter().any(|row| {
+            row.unresolved_reason.as_deref() == Some("bad-block") && row.raw_target == "b"
+        }));
+        assert!(unresolved.iter().any(|row| {
+            row.unresolved_reason.as_deref() == Some("malformed-target")
+                && row.raw_target == "bad??target"
+        }));
     }
 
     #[test]
@@ -3483,6 +3611,11 @@ mod tests {
         assert_eq!(outgoing.len(), 2);
         assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/b.md"));
         assert_eq!(outgoing[1].resolved_path.as_deref(), Some("notes/c.md"));
+        assert!(
+            outgoing
+                .iter()
+                .all(|row| row.source_field.starts_with("frontmatter:"))
+        );
 
         let target_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
             .expect("get b")
@@ -3591,6 +3724,48 @@ mod tests {
                 .expect("list properties");
         assert_eq!(properties.len(), 1);
         assert_eq!(properties[0].key, "status");
+    }
+
+    #[test]
+    fn incremental_apply_changes_resolves_forward_links_within_same_batch() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+        fs::write(temp.path().join("notes/a.md"), "# A\n[[b]]").expect("write a");
+        fs::write(temp.path().join("notes/b.md"), "# B\n[[c]]").expect("write b");
+        fs::write(temp.path().join("notes/c.md"), "# C").expect("write c");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[
+                    PathBuf::from("notes/a.md"),
+                    PathBuf::from("notes/b.md"),
+                    PathBuf::from("notes/c.md"),
+                ],
+                CasePolicy::Sensitive,
+            )
+            .expect("incremental apply on fresh db");
+
+        let file_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+            .expect("get a")
+            .expect("a exists");
+        let file_b = FilesRepository::get_by_normalized_path(&connection, "notes/b.md")
+            .expect("get b")
+            .expect("b exists");
+        let outgoing_a = LinksRepository::list_outgoing_with_paths(&connection, &file_a.file_id)
+            .expect("list outgoing a");
+        let outgoing_b = LinksRepository::list_outgoing_with_paths(&connection, &file_b.file_id)
+            .expect("list outgoing b");
+        assert_eq!(outgoing_a.len(), 1);
+        assert_eq!(outgoing_a[0].resolved_path.as_deref(), Some("notes/b.md"));
+        assert!(!outgoing_a[0].is_unresolved);
+        assert_eq!(outgoing_b.len(), 1);
+        assert_eq!(outgoing_b[0].resolved_path.as_deref(), Some("notes/c.md"));
+        assert!(!outgoing_b[0].is_unresolved);
     }
 
     #[test]
@@ -4020,14 +4195,14 @@ mod tests {
             .expect("insert orphan render cache");
         connection
             .execute(
-                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
-                rusqlite::params!["link_broken_target", source_a.file_id, "missing-target", "file_missing_3", 0_i64],
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved, unresolved_reason, source_field) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6)",
+                rusqlite::params!["link_broken_target", source_a.file_id, "missing-target", "file_missing_3", 0_i64, "body"],
             )
             .expect("insert broken target link");
         connection
             .execute(
-                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4)",
-                rusqlite::params!["link_resolution_mismatch", source_a.file_id, "mismatch", 0_i64],
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved, unresolved_reason, source_field) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, NULL, ?5)",
+                rusqlite::params!["link_resolution_mismatch", source_a.file_id, "mismatch", 0_i64, "body"],
             )
             .expect("insert resolution mismatch link");
 
@@ -4116,14 +4291,14 @@ mod tests {
             .expect("insert orphan property");
         connection
             .execute(
-                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5)",
-                rusqlite::params!["link_broken_target_2", source_a.file_id, "missing-target", "file_missing_y", 0_i64],
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved, unresolved_reason, source_field) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6)",
+                rusqlite::params!["link_broken_target_2", source_a.file_id, "missing-target", "file_missing_y", 0_i64, "body"],
             )
             .expect("insert broken target link");
         connection
             .execute(
-                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4)",
-                rusqlite::params!["link_resolution_mismatch_2", source_a.file_id, "mismatch", 0_i64],
+                "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved, unresolved_reason, source_field) VALUES (?1, ?2, ?3, NULL, NULL, NULL, ?4, NULL, ?5)",
+                rusqlite::params!["link_resolution_mismatch_2", source_a.file_id, "mismatch", 0_i64, "body"],
             )
             .expect("insert resolution mismatch link");
 

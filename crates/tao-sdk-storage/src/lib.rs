@@ -63,6 +63,11 @@ pub const MIGRATION_0005_SQL: &str = include_str!("../migrations/0005_search_ind
 pub const MIGRATION_0006_ID: &str = "0006_search_fts";
 /// Search FTS virtual table + triggers SQL payload.
 pub const MIGRATION_0006_SQL: &str = include_str!("../migrations/0006_search_fts.sql");
+/// Link unresolved diagnostics metadata migration identifier.
+pub const MIGRATION_0007_ID: &str = "0007_links_unresolved_metadata";
+/// Link unresolved diagnostics metadata SQL payload.
+pub const MIGRATION_0007_SQL: &str =
+    include_str!("../migrations/0007_links_unresolved_metadata.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -81,7 +86,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 6] = [
+const MIGRATIONS: [Migration; 7] = [
     Migration {
         id: MIGRATION_0001_ID,
         sql: MIGRATION_0001_SQL,
@@ -106,6 +111,10 @@ const MIGRATIONS: [Migration; 6] = [
         id: MIGRATION_0006_ID,
         sql: MIGRATION_0006_SQL,
     },
+    Migration {
+        id: MIGRATION_0007_ID,
+        sql: MIGRATION_0007_SQL,
+    },
 ];
 
 const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
@@ -124,6 +133,12 @@ pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchema
         if let Err(source) = connection.execute_batch(migration.sql) {
             if migration.id == MIGRATION_0005_ID
                 && is_duplicate_column_error(&source, "normalized_path")
+            {
+                continue;
+            }
+            if migration.id == MIGRATION_0007_ID
+                && (is_duplicate_column_error(&source, "unresolved_reason")
+                    || is_duplicate_column_error(&source, "source_field"))
             {
                 continue;
             }
@@ -450,8 +465,9 @@ mod tests {
 
     use super::{
         MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
-        MIGRATION_0005_ID, MIGRATION_0006_ID, MigrationRunnerError, apply_initial_schema,
-        known_migrations, migration_checksum, preflight_migrations, run_migrations,
+        MIGRATION_0005_ID, MIGRATION_0006_ID, MIGRATION_0007_ID, MigrationRunnerError,
+        apply_initial_schema, known_migrations, migration_checksum, preflight_migrations,
+        run_migrations,
     };
 
     #[test]
@@ -506,7 +522,8 @@ mod tests {
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
                 MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string()
+                MIGRATION_0006_ID.to_string(),
+                MIGRATION_0007_ID.to_string()
             ]
         );
         assert!(report.skipped.is_empty());
@@ -597,7 +614,8 @@ mod tests {
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
                 MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string()
+                MIGRATION_0006_ID.to_string(),
+                MIGRATION_0007_ID.to_string()
             ]
         );
         assert!(first.skipped.is_empty());
@@ -610,7 +628,8 @@ mod tests {
                 MIGRATION_0003_ID.to_string(),
                 MIGRATION_0004_ID.to_string(),
                 MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string()
+                MIGRATION_0006_ID.to_string(),
+                MIGRATION_0007_ID.to_string()
             ]
         );
     }

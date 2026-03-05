@@ -1,12 +1,8 @@
 {
-  "phase": "phase23",
   "profile": "10k",
   "warm_read_p50_ms": 10,
-  "checks": [
-    "query-docs",
-    "query-base",
-    "query-graph",
-    "graph-walk",
-    "meta-tags"
-  ]
+  "graph_read_p50_ms": 10,
+  "base_read_p50_ms": 10,
+  "query_read_p50_ms": 10,
+  "notes": "Budgets apply to generated fixtures only; external/personal vaults are forbidden for automated benchmark runs."
 }

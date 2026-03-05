@@ -1,0 +1,148 @@
+{
+  "depth": 2,
+  "include_folders": false,
+  "items": [
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_00c0eda799009894",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_454b6bfc072ae827",
+      "raw_target": "alpha",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_65354bc952aadd4e",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_aee44035ef4d8ee6",
+      "raw_target": "missing-frontmatter",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_d7ec9e78022e82f9",
+      "raw_target": "alpha",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_da6a8e47bbd81cb4",
+      "raw_target": "missing-body",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_efc17989b92fa72b",
+      "raw_target": "beta",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "depth": 1,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_f93cf3f0a594e22d",
+      "raw_target": "beta",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "depth": 2,
+      "direction": "outgoing",
+      "edge_type": "wikilink",
+      "link_id": "link_d82fb97752573324",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/alpha.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "depth": 2,
+      "direction": "incoming",
+      "edge_type": "wikilink",
+      "link_id": "link_00c0eda799009894",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "depth": 2,
+      "direction": "incoming",
+      "edge_type": "wikilink",
+      "link_id": "link_454b6bfc072ae827",
+      "raw_target": "alpha",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "depth": 2,
+      "direction": "incoming",
+      "edge_type": "wikilink",
+      "link_id": "link_65354bc952aadd4e",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "depth": 2,
+      "direction": "incoming",
+      "edge_type": "wikilink",
+      "link_id": "link_d7ec9e78022e82f9",
+      "raw_target": "alpha",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "depth": 2,
+      "direction": "incoming",
+      "edge_type": "wikilink",
+      "link_id": "link_d82fb97752573324",
+      "raw_target": "beta",
+      "resolved": true,
+      "source_path": "notes/alpha.md",
+      "target_path": "notes/beta.md"
+    }
+  ],
+  "path": "notes/root.md",
+  "total": 14
+}

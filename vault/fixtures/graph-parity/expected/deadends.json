@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "file_id": "file_de83f2b75a6c605e",
+      "incoming_resolved": 3,
+      "outgoing_resolved": 0,
+      "path": "notes/beta.md"
+    },
+    {
+      "file_id": "file_2de8130197d5448b",
+      "incoming_resolved": 1,
+      "outgoing_resolved": 0,
+      "path": "notes/deadend.md"
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "total": 2
+}

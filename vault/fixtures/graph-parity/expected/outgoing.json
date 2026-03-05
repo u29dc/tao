@@ -1,0 +1,78 @@
+{
+  "items": [
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": "target-heading",
+      "kind": "heading",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": null,
+      "kind": "wikilink",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "block_id": "block-a",
+      "display_text": null,
+      "heading": null,
+      "kind": "block",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/beta.md"
+    },
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": null,
+      "kind": "wikilink",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": null,
+      "kind": "wikilink",
+      "resolved": true,
+      "source_path": "notes/root.md",
+      "target_path": "notes/alpha.md"
+    },
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": null,
+      "kind": "wikilink",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "block_id": null,
+      "display_text": null,
+      "heading": "missing-heading",
+      "kind": "heading",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    },
+    {
+      "block_id": "missing-block",
+      "display_text": null,
+      "heading": null,
+      "kind": "block",
+      "resolved": false,
+      "source_path": "notes/root.md",
+      "target_path": null
+    }
+  ],
+  "path": "notes/root.md",
+  "total": 8
+}

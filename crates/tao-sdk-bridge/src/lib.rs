@@ -1698,6 +1698,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert outgoing link");
@@ -1712,6 +1714,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert backlink");
@@ -1751,6 +1755,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert link");

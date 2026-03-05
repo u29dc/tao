@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${SCRIPT_DIR}/safety.sh"
+
 usage() {
   cat <<USAGE
 Usage: scripts/bench.sh [--suite SUITE] [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--skip-generate]
@@ -11,6 +14,7 @@ Suites:
   all      Run sdk + full read-only cli matrix (default)
   sdk      Run parse/resolve/search/bridge/ffi/startup/graph-walk/unified-query + baseline query/graph budgets
   cli      Run full read-only CLI command matrix
+  fixtures Run fixture generation throughput benchmark (1k, 5k, 10k)
   daemon   Run one-shot vs daemon warm-runtime comparison
   graph-walk Run tao-bench graph-walk scenario
   unified-query Run tao-bench unified-query scenario
@@ -22,7 +26,7 @@ Suites:
   search   Run search scenario only
 
 Options:
-  --profile PROFILE   Fixture profile for CLI workloads: 1k|5k|10k|25k (default: 10k)
+  --profile PROFILE   Fixture profile for CLI workloads: 1k|2k|5k|10k|25k (default: 10k)
   --seed N            Fixture seed (default: 42)
   --runs N            Hyperfine runs per command (default: 25)
   --warmup N          Hyperfine warmup runs per command (default: 5)
@@ -99,18 +103,18 @@ if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 case "$FIXTURE_PROFILE" in
-  1k|5k|10k|25k)
+  1k|2k|5k|10k|25k)
     ;;
   *)
-    echo "--profile must be one of: 1k|5k|10k|25k" >&2
+    echo "--profile must be one of: 1k|2k|5k|10k|25k" >&2
     exit 1
     ;;
 esac
 case "$SUITE" in
-  all|sdk|cli|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core)
+  all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core)
     ;;
   *)
-    echo "--suite must be one of: all|sdk|cli|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core" >&2
+    echo "--suite must be one of: all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core" >&2
     exit 1
     ;;
 esac
@@ -128,6 +132,7 @@ CLI_BIN="target/release/tao"
 FIXTURE_VAULT="${FIXTURE_ROOT}/vault-${FIXTURE_PROFILE}"
 DB_PATH=""
 SAMPLE_NOTE="notes/projects/project-1.md"
+SAMPLE_TARGET_NOTE="notes/projects/project-2.md"
 SAMPLE_BASE="views/projects.base"
 SAMPLE_VIEW="Projects"
 
@@ -138,6 +143,7 @@ BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
 FFI_REPORT="${REPORT_DIR}/ffi-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 GRAPH_WALK_REPORT="${REPORT_DIR}/graph-walk-bench.json"
+GRAPH_WALK_FOLDERS_REPORT="${REPORT_DIR}/graph-walk-folders-bench.json"
 UNIFIED_QUERY_REPORT="${REPORT_DIR}/unified-query-bench.json"
 HYPERFINE_QUERY_REPORT="${REPORT_DIR}/query-docs-hyperfine.json"
 HYPERFINE_GRAPH_REPORT="${REPORT_DIR}/graph-unresolved-hyperfine.json"
@@ -149,6 +155,9 @@ DAEMON_RUNNING=0
 
 mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
 ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
+
+assert_safe_path "${OUTPUT_ROOT}" "benchmark output root"
+assert_safe_path "${FIXTURE_ROOT}" "fixture root"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
@@ -185,14 +194,21 @@ prepare_fixture() {
     echo "sample note missing: ${FIXTURE_VAULT}/${SAMPLE_NOTE}" >&2
     exit 1
   fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_TARGET_NOTE}" ]]; then
+    echo "sample target note missing: ${FIXTURE_VAULT}/${SAMPLE_TARGET_NOTE}" >&2
+    exit 1
+  fi
   if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_BASE}" ]]; then
     echo "sample base missing: ${FIXTURE_VAULT}/${SAMPLE_BASE}" >&2
     exit 1
   fi
 
   FIXTURE_VAULT="$(cd "${FIXTURE_VAULT}" && pwd -P)"
+  assert_safe_path "${FIXTURE_VAULT}" "fixture vault"
   DB_PATH="${FIXTURE_VAULT}/.tao/index.sqlite"
   DAEMON_SOCKET="${FIXTURE_VAULT}/.tao/taod.sock"
+  assert_safe_path "${DB_PATH}" "benchmark sqlite path"
+  assert_safe_path "${DAEMON_SOCKET}" "daemon socket path"
 
   echo "Seeding index for CLI benchmarks..."
   "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
@@ -450,7 +466,11 @@ graph-unresolved|${CLI_BIN} --json graph unresolved --vault-root ${FIXTURE_VAULT
 graph-deadends|${CLI_BIN} --json graph deadends --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
 graph-orphans|${CLI_BIN} --json graph orphans --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
 graph-components|${CLI_BIN} --json graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-components-strong|${CLI_BIN} --json graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --mode strong --limit 50 --offset 0
+graph-neighbors|${CLI_BIN} --json graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0
+graph-path|${CLI_BIN} --json graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000
 graph-walk|${CLI_BIN} --json graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200
+graph-walk-folders|${CLI_BIN} --json graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 --include-folders
 meta-properties|${CLI_BIN} --json meta properties --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 meta-tags|${CLI_BIN} --json meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 meta-aliases|${CLI_BIN} --json meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
@@ -516,11 +536,75 @@ run_sdk_suite() {
   run_tao_bench_scenario ffi 200 "${FFI_REPORT}" --enforce-budgets --max-p50-ms 20 --max-p95-ms 60
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
   run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200
+  run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_FOLDERS_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200 --graph-include-folders
   run_tao_bench_scenario unified-query 100 "${UNIFIED_QUERY_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100
   validate_startup_budget
   run_baseline_cli_budgets
   run_daemon_query_benchmark
   run_query_stream_projection_benchmark
+}
+
+run_fixture_generation_benchmark() {
+  local report_path="${REPORT_DIR}/fixture-generation.summary.json"
+  local tmp_path="${REPORT_DIR}/fixture-generation.raw.tsv"
+  local budget_1k_ms="${FIXTURE_BUDGET_1K_MS:-0}"
+  local budget_5k_ms="${FIXTURE_BUDGET_5K_MS:-0}"
+  local budget_10k_ms="${FIXTURE_BUDGET_10K_MS:-0}"
+  : > "${tmp_path}"
+  local profile
+  for profile in 1k 5k 10k; do
+    local start_ms end_ms elapsed_ms notes_total
+    case "${profile}" in
+      1k) notes_total=1000 ;;
+      5k) notes_total=5000 ;;
+      10k) notes_total=10000 ;;
+      *) notes_total=0 ;;
+    esac
+    start_ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')
+    ./scripts/fixtures.sh --profile "${profile}" --seed "${SEED}" --output "${FIXTURE_ROOT}" >/dev/null
+    end_ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')
+    elapsed_ms=$((end_ms - start_ms))
+    printf "%s\t%s\t%s\n" "${profile}" "${notes_total}" "${elapsed_ms}" >> "${tmp_path}"
+  done
+
+  bun --eval '
+    const fs = require("node:fs");
+    const [rawPath, reportPath, b1k, b5k, b10k] = process.argv.slice(1);
+    const budgets = {
+      "1k": Number(b1k),
+      "5k": Number(b5k),
+      "10k": Number(b10k),
+    };
+    const lines = fs.readFileSync(rawPath, "utf8").trim().split("\n").filter(Boolean);
+    const rows = lines.map((line) => {
+      const [profile, notes, elapsedMs] = line.split("\t");
+      const notesTotal = Number(notes);
+      const durationMs = Number(elapsedMs);
+      const notesPerSec = durationMs <= 0 ? 0 : Number(((notesTotal / durationMs) * 1000).toFixed(2));
+      const budgetMs = budgets[profile] ?? 0;
+      return {
+        profile,
+        notes_total: notesTotal,
+        duration_ms: durationMs,
+        notes_per_sec: notesPerSec,
+        budget_ms: budgetMs > 0 ? budgetMs : null,
+        budget_pass: budgetMs > 0 ? durationMs <= budgetMs : null,
+      };
+    });
+    const summary = {
+      generated_at: new Date().toISOString(),
+      rows,
+    };
+    fs.writeFileSync(reportPath, `${JSON.stringify(summary, null, 2)}\n`);
+    const failed = rows.find((row) => row.budget_ms !== null && row.budget_pass === false);
+    if (failed) {
+      console.error(
+        `fixture generation budget failed for ${failed.profile}: ${failed.duration_ms}ms > ${failed.budget_ms}ms`
+      );
+      process.exit(1);
+    }
+    console.log(`fixture generation summary written to ${reportPath}`);
+  ' "${tmp_path}" "${report_path}" "${budget_1k_ms}" "${budget_5k_ms}" "${budget_10k_ms}"
 }
 
 build_bins_if_needed
@@ -538,6 +622,9 @@ case "${SUITE}" in
   cli)
     prepare_fixture
     run_cli_matrix
+    ;;
+  fixtures)
+    run_fixture_generation_benchmark
     ;;
   daemon)
     prepare_fixture

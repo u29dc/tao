@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${SCRIPT_DIR}/safety.sh"
+
 usage() {
   cat <<USAGE
 Usage: scripts/budgets.sh [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--budget-config PATH] [--budget-ms N] [--skip-generate]
@@ -36,6 +39,10 @@ REPORT_DIR=""
 SUMMARY_JSON=""
 SUMMARY_MD=""
 DAEMON_RUNNING=0
+SAMPLE_NOTE="notes/projects/project-1.md"
+SAMPLE_TARGET_NOTE="notes/projects/project-2.md"
+SAMPLE_BASE="views/projects.base"
+SAMPLE_VIEW="Projects"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -136,10 +143,10 @@ if ! [[ "$BUDGET_MS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   exit 1
 fi
 case "$PROFILE" in
-  1k|5k|10k|25k)
+  1k|2k|5k|10k|25k)
     ;;
   *)
-    echo "--profile must be one of: 1k|5k|10k|25k" >&2
+    echo "--profile must be one of: 1k|2k|5k|10k|25k" >&2
     exit 1
     ;;
 esac
@@ -155,6 +162,8 @@ SUMMARY_JSON="${REPORT_DIR}/summary.json"
 SUMMARY_MD="${REPORT_DIR}/summary.md"
 mkdir -p "${REPORT_DIR}"
 ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
+assert_safe_path "${OUTPUT_ROOT}" "budget output root"
+assert_safe_path "${FIXTURE_ROOT}" "fixture root"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
@@ -180,10 +189,25 @@ prepare_fixture() {
     echo "fixture vault not found: ${FIXTURE_VAULT}" >&2
     exit 1
   fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_NOTE}" ]]; then
+    echo "sample note missing: ${FIXTURE_VAULT}/${SAMPLE_NOTE}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_TARGET_NOTE}" ]]; then
+    echo "sample target note missing: ${FIXTURE_VAULT}/${SAMPLE_TARGET_NOTE}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${FIXTURE_VAULT}/${SAMPLE_BASE}" ]]; then
+    echo "sample base missing: ${FIXTURE_VAULT}/${SAMPLE_BASE}" >&2
+    exit 1
+  fi
 
   FIXTURE_VAULT="$(cd "${FIXTURE_VAULT}" && pwd -P)"
+  assert_safe_path "${FIXTURE_VAULT}" "fixture vault"
   DB_PATH="${FIXTURE_VAULT}/.tao/index.sqlite"
   DAEMON_SOCKET="${FIXTURE_VAULT}/.tao/taod-budgets.sock"
+  assert_safe_path "${DB_PATH}" "budget sqlite path"
+  assert_safe_path "${DAEMON_SOCKET}" "budget daemon socket path"
 
   "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
   "${CLI_BIN}" --json vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
@@ -211,14 +235,12 @@ build_cli_if_needed
 prepare_fixture
 start_daemon
 
-SAMPLE_NOTE="notes/projects/project-1.md"
-SAMPLE_BASE="views/projects.base"
-SAMPLE_VIEW="Projects"
-
 CASE_MATRIX=$(cat <<EOF
 query-docs|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path,title --limit 1000 --offset 0 > /dev/null
 query-base|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 100 --offset 0 > /dev/null
 query-graph|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
+graph-neighbors|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
+graph-path|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000 > /dev/null
 graph-walk|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 > /dev/null
 meta-tags|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0 > /dev/null
 EOF

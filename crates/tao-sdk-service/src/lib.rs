@@ -2743,6 +2743,10 @@ pub struct LinkGraphEdge {
     pub block_id: Option<String>,
     /// Unresolved marker.
     pub is_unresolved: bool,
+    /// Stable unresolved reason code.
+    pub unresolved_reason: Option<String>,
+    /// Link provenance source field.
+    pub source_field: String,
 }
 
 /// One graph node row with resolved in/out degree counters.
@@ -2767,6 +2771,15 @@ pub struct GraphComponentRow {
     pub paths: Vec<String>,
     /// Whether `paths` is truncated compared to full membership.
     pub truncated: bool,
+}
+
+/// Connected component traversal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphComponentMode {
+    /// Weakly connected components over undirected projection.
+    Weak,
+    /// Strongly connected components over directed graph.
+    Strong,
 }
 
 /// Graph walk traversal direction.
@@ -2795,6 +2808,19 @@ pub struct GraphWalkStep {
     pub raw_target: String,
     /// Whether the edge is resolved.
     pub resolved: bool,
+    /// Traversed edge type.
+    pub edge_type: GraphWalkEdgeType,
+}
+
+/// Graph walk edge classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphWalkEdgeType {
+    /// Wikilink edge from indexed markdown links.
+    Wikilink,
+    /// Folder parent overlay edge.
+    FolderParent,
+    /// Folder sibling overlay edge.
+    FolderSibling,
 }
 
 /// Input request for graph walk traversal.
@@ -2808,6 +2834,8 @@ pub struct GraphWalkRequest {
     pub limit: u32,
     /// Include unresolved outgoing edges.
     pub include_unresolved: bool,
+    /// Include folder relationship overlay edges.
+    pub include_folders: bool,
 }
 
 /// Link graph query service for outgoing, backlink, and unresolved edges.
@@ -2905,6 +2933,7 @@ impl BacklinkGraphService {
     pub fn components_page(
         &self,
         connection: &Connection,
+        mode: GraphComponentMode,
         limit: u32,
         offset: u32,
         include_members: bool,
@@ -2926,57 +2955,16 @@ impl BacklinkGraphService {
 
         let pairs = LinksRepository::list_resolved_pairs(connection)
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        let mut adjacency = HashMap::<String, Vec<String>>::new();
-        for pair in pairs {
-            adjacency
-                .entry(pair.source_file_id.clone())
-                .or_default()
-                .push(pair.target_file_id.clone());
-            adjacency
-                .entry(pair.target_file_id)
-                .or_default()
-                .push(pair.source_file_id);
-        }
-
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort();
-            neighbors.dedup();
-        }
-
-        let mut visited = HashSet::<String>::new();
-        let mut components = Vec::<GraphComponentRow>::new();
-        for root in ids {
-            if !visited.insert(root.clone()) {
-                continue;
-            }
-            let mut queue = VecDeque::from([root]);
-            let mut members = Vec::<String>::new();
-            while let Some(current) = queue.pop_front() {
-                members.push(current.clone());
-                if let Some(neighbors) = adjacency.get(&current) {
-                    for next in neighbors {
-                        if visited.insert(next.clone()) {
-                            queue.push_back(next.clone());
-                        }
-                    }
-                }
-            }
-
-            let mut paths = members
-                .iter()
-                .filter_map(|file_id| paths_by_id.get(file_id).cloned())
-                .collect::<Vec<_>>();
-            paths.sort();
-            let full_len = paths.len();
-            if !include_members && paths.len() > sample_size {
-                paths.truncate(sample_size);
-            }
-            components.push(GraphComponentRow {
-                size: u64::try_from(members.len()).unwrap_or(u64::MAX),
-                truncated: !include_members && full_len > paths.len(),
-                paths,
-            });
-        }
+        let components_by_ids = match mode {
+            GraphComponentMode::Weak => weak_components(&ids, &pairs),
+            GraphComponentMode::Strong => strong_components(&ids, &pairs),
+        };
+        let mut components = build_component_rows(
+            components_by_ids,
+            &paths_by_id,
+            include_members,
+            sample_size,
+        );
 
         components.sort_by(|left, right| {
             right
@@ -3009,6 +2997,25 @@ impl BacklinkGraphService {
         else {
             return Ok(Vec::new());
         };
+        let path_by_id = FilesRepository::list_all(connection)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+            .into_iter()
+            .filter(|row| row.is_markdown)
+            .map(|row| (row.file_id, row.normalized_path))
+            .collect::<HashMap<_, _>>();
+        let mut folder_members = HashMap::<String, Vec<String>>::new();
+        if request.include_folders {
+            for (file_id, path) in &path_by_id {
+                folder_members
+                    .entry(note_folder(path).to_string())
+                    .or_default()
+                    .push(file_id.clone());
+            }
+            for members in folder_members.values_mut() {
+                members.sort();
+                members.dedup();
+            }
+        }
 
         let mut steps = Vec::<GraphWalkStep>::new();
         let mut frontier = vec![start_file.file_id];
@@ -3047,6 +3054,7 @@ impl BacklinkGraphService {
                     target_path: edge.resolved_path,
                     raw_target: edge.raw_target,
                     resolved,
+                    edge_type: GraphWalkEdgeType::Wikilink,
                 });
 
                 if let Some(target_id) = edge.resolved_file_id {
@@ -3073,6 +3081,7 @@ impl BacklinkGraphService {
                     target_path: edge.resolved_path,
                     raw_target: edge.raw_target,
                     resolved: true,
+                    edge_type: GraphWalkEdgeType::Wikilink,
                 });
                 let source_id = edge.source_file_id;
                 let should_visit = visited_depth
@@ -3084,6 +3093,71 @@ impl BacklinkGraphService {
                     next_frontier.push(source_id);
                 }
             }
+            if request.include_folders {
+                for source_id in &frontier {
+                    if steps.len() >= hard_limit {
+                        break;
+                    }
+                    let Some(source_path) = path_by_id.get(source_id) else {
+                        continue;
+                    };
+                    let source_folder = note_folder(source_path).to_string();
+                    let mut folder_targets = Vec::<(String, GraphWalkEdgeType)>::new();
+
+                    if let Some(parent_folder) = parent_folder(&source_folder)
+                        && let Some(parent_members) = folder_members.get(parent_folder)
+                    {
+                        for target_id in parent_members {
+                            if target_id != source_id {
+                                folder_targets
+                                    .push((target_id.clone(), GraphWalkEdgeType::FolderParent));
+                            }
+                        }
+                    }
+                    if let Some(sibling_members) = folder_members.get(&source_folder) {
+                        for target_id in sibling_members {
+                            if target_id != source_id {
+                                folder_targets
+                                    .push((target_id.clone(), GraphWalkEdgeType::FolderSibling));
+                            }
+                        }
+                    }
+
+                    folder_targets.sort_by(|left, right| left.0.cmp(&right.0));
+                    folder_targets.dedup();
+
+                    for (target_id, edge_type) in folder_targets {
+                        if steps.len() >= hard_limit {
+                            break;
+                        }
+                        let Some(target_path) = path_by_id.get(&target_id).cloned() else {
+                            continue;
+                        };
+                        let link_id = format!(
+                            "folder:{source_id}:{target_id}:{}",
+                            graph_walk_edge_type_label(&edge_type)
+                        );
+                        steps.push(GraphWalkStep {
+                            depth: next_depth,
+                            direction: GraphWalkDirection::Outgoing,
+                            link_id,
+                            source_path: source_path.clone(),
+                            target_path: Some(target_path.clone()),
+                            raw_target: target_path,
+                            resolved: true,
+                            edge_type,
+                        });
+                        let should_visit = visited_depth
+                            .get(&target_id)
+                            .map(|seen_depth| next_depth < *seen_depth)
+                            .unwrap_or(true);
+                        if should_visit {
+                            visited_depth.insert(target_id.clone(), next_depth);
+                            next_frontier.push(target_id);
+                        }
+                    }
+                }
+            }
 
             next_frontier.sort();
             next_frontier.dedup();
@@ -3091,6 +3165,176 @@ impl BacklinkGraphService {
         }
 
         Ok(steps)
+    }
+}
+
+fn build_component_rows(
+    components_by_ids: Vec<Vec<String>>,
+    paths_by_id: &HashMap<String, String>,
+    include_members: bool,
+    sample_size: usize,
+) -> Vec<GraphComponentRow> {
+    let mut components = Vec::<GraphComponentRow>::with_capacity(components_by_ids.len());
+    for members in components_by_ids {
+        let mut paths = members
+            .iter()
+            .filter_map(|file_id| paths_by_id.get(file_id).cloned())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let full_len = paths.len();
+        if !include_members && paths.len() > sample_size {
+            paths.truncate(sample_size);
+        }
+        components.push(GraphComponentRow {
+            size: u64::try_from(members.len()).unwrap_or(u64::MAX),
+            truncated: !include_members && full_len > paths.len(),
+            paths,
+        });
+    }
+    components
+}
+
+fn weak_components(
+    ids: &[String],
+    pairs: &[tao_sdk_storage::ResolvedLinkPair],
+) -> Vec<Vec<String>> {
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    for pair in pairs {
+        adjacency
+            .entry(pair.source_file_id.clone())
+            .or_default()
+            .push(pair.target_file_id.clone());
+        adjacency
+            .entry(pair.target_file_id.clone())
+            .or_default()
+            .push(pair.source_file_id.clone());
+    }
+    for neighbors in adjacency.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+
+    let mut visited = HashSet::<String>::new();
+    let mut components = Vec::<Vec<String>>::new();
+    for root in ids {
+        if !visited.insert(root.clone()) {
+            continue;
+        }
+        let mut queue = VecDeque::from([root.clone()]);
+        let mut members = Vec::<String>::new();
+        while let Some(current) = queue.pop_front() {
+            members.push(current.clone());
+            if let Some(neighbors) = adjacency.get(&current) {
+                for next in neighbors {
+                    if visited.insert(next.clone()) {
+                        queue.push_back(next.clone());
+                    }
+                }
+            }
+        }
+        members.sort();
+        components.push(members);
+    }
+    components
+}
+
+fn strong_components(
+    ids: &[String],
+    pairs: &[tao_sdk_storage::ResolvedLinkPair],
+) -> Vec<Vec<String>> {
+    let mut forward = HashMap::<String, Vec<String>>::new();
+    let mut reverse = HashMap::<String, Vec<String>>::new();
+    for pair in pairs {
+        forward
+            .entry(pair.source_file_id.clone())
+            .or_default()
+            .push(pair.target_file_id.clone());
+        reverse
+            .entry(pair.target_file_id.clone())
+            .or_default()
+            .push(pair.source_file_id.clone());
+    }
+    for neighbors in forward.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+    for neighbors in reverse.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+
+    let mut visited = HashSet::<String>::new();
+    let mut finish_order = Vec::<String>::new();
+    for root in ids {
+        if visited.contains(root) {
+            continue;
+        }
+        let mut stack = Vec::<(String, bool)>::from([(root.clone(), false)]);
+        while let Some((node, expanded)) = stack.pop() {
+            if expanded {
+                finish_order.push(node);
+                continue;
+            }
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            stack.push((node.clone(), true));
+            if let Some(neighbors) = forward.get(&node) {
+                for next in neighbors.iter().rev() {
+                    if !visited.contains(next) {
+                        stack.push((next.clone(), false));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut assigned = HashSet::<String>::new();
+    let mut components = Vec::<Vec<String>>::new();
+    while let Some(root) = finish_order.pop() {
+        if !assigned.insert(root.clone()) {
+            continue;
+        }
+        let mut stack = Vec::<String>::from([root]);
+        let mut members = Vec::<String>::new();
+        while let Some(node) = stack.pop() {
+            members.push(node.clone());
+            if let Some(neighbors) = reverse.get(&node) {
+                for next in neighbors {
+                    if assigned.insert(next.clone()) {
+                        stack.push(next.clone());
+                    }
+                }
+            }
+        }
+        members.sort();
+        components.push(members);
+    }
+    components
+}
+
+fn note_folder(path: &str) -> &str {
+    Path::new(path)
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or_default()
+}
+
+fn parent_folder(folder: &str) -> Option<&str> {
+    if folder.is_empty() {
+        return None;
+    }
+    Path::new(folder)
+        .parent()
+        .and_then(Path::to_str)
+        .or(Some(""))
+}
+
+fn graph_walk_edge_type_label(edge_type: &GraphWalkEdgeType) -> &'static str {
+    match edge_type {
+        GraphWalkEdgeType::Wikilink => "wikilink",
+        GraphWalkEdgeType::FolderParent => "folder-parent",
+        GraphWalkEdgeType::FolderSibling => "folder-sibling",
     }
 }
 
@@ -3106,6 +3350,8 @@ fn map_link_edges(rows: Vec<tao_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdg
             heading_slug: row.heading_slug,
             block_id: row.block_id,
             is_unresolved: row.is_unresolved,
+            unresolved_reason: row.unresolved_reason,
+            source_field: row.source_field,
         })
         .collect()
 }
@@ -3210,10 +3456,11 @@ mod tests {
     use super::{
         BacklinkGraphService, BaseColumnConfigPersistError, BaseColumnConfigPersistenceService,
         BaseTableCachedQueryService, BaseTableExecutorError, BaseTableExecutorService,
-        BaseValidationError, BaseValidationService, CasePolicy, HealthSnapshotService,
-        MarkdownIngestPipeline, NoteCrudError, NoteCrudService, PropertyQueryRequest,
-        PropertyQueryService, PropertyQuerySort, PropertyUpdateService, ReconcileService,
-        SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
+        BaseValidationError, BaseValidationService, CasePolicy, GraphComponentMode,
+        HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
+        PropertyQueryRequest, PropertyQueryService, PropertyQuerySort, PropertyUpdateService,
+        ReconcileService, SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService,
+        WatcherStatus,
     };
 
     fn file_record(
@@ -3519,6 +3766,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert link");
@@ -3591,6 +3840,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert outgoing l2");
@@ -3604,6 +3855,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert outgoing l1");
@@ -3617,6 +3870,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert outgoing l3");
@@ -3664,6 +3919,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: true,
+                unresolved_reason: Some("missing-note".to_string()),
+                source_field: "body".to_string(),
             },
         )
         .expect("insert unresolved link");
@@ -3677,6 +3934,8 @@ mod tests {
                 heading_slug: None,
                 block_id: None,
                 is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
             },
         )
         .expect("insert resolved marker link");
@@ -3693,6 +3952,93 @@ mod tests {
         assert_eq!(unresolved_page[0].link_id, "l-unresolved");
         assert_eq!(unresolved[0].link_id, "l-unresolved");
         assert!(unresolved[0].is_unresolved);
+        assert_eq!(
+            unresolved[0].unresolved_reason.as_deref(),
+            Some("missing-note")
+        );
+        assert_eq!(unresolved[0].source_field, "body");
+    }
+
+    #[test]
+    fn backlink_graph_components_supports_weak_and_strong_modes() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record("a", "notes/a.md", "notes/a.md", "/vault/notes/a.md"),
+        )
+        .expect("insert a");
+        FilesRepository::insert(
+            &connection,
+            &file_record("b", "notes/b.md", "notes/b.md", "/vault/notes/b.md"),
+        )
+        .expect("insert b");
+        FilesRepository::insert(
+            &connection,
+            &file_record("c", "notes/c.md", "notes/c.md", "/vault/notes/c.md"),
+        )
+        .expect("insert c");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-a-b".to_string(),
+                source_file_id: "a".to_string(),
+                raw_target: "b".to_string(),
+                resolved_file_id: Some("b".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert a->b");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-b-a".to_string(),
+                source_file_id: "b".to_string(),
+                raw_target: "a".to_string(),
+                resolved_file_id: Some("a".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert b->a");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-b-c".to_string(),
+                source_file_id: "b".to_string(),
+                raw_target: "c".to_string(),
+                resolved_file_id: Some("c".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert b->c");
+
+        let (weak_total, weak_rows) = BacklinkGraphService
+            .components_page(&connection, GraphComponentMode::Weak, 50, 0, true, 64)
+            .expect("weak components");
+        assert_eq!(weak_total, 1);
+        assert_eq!(weak_rows.len(), 1);
+        assert_eq!(weak_rows[0].size, 3);
+
+        let (strong_total, strong_rows) = BacklinkGraphService
+            .components_page(&connection, GraphComponentMode::Strong, 50, 0, true, 64)
+            .expect("strong components");
+        assert_eq!(strong_total, 2);
+        let sizes = strong_rows.iter().map(|row| row.size).collect::<Vec<_>>();
+        assert_eq!(sizes, vec![2, 1]);
     }
 
     #[test]

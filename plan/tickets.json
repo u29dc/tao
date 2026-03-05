@@ -1,0 +1,1396 @@
+[
+  {
+    "id": "SAFE-001",
+    "title": "Codify repository-local vault safety policy",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [],
+    "objective": "Make the non-negotiable local-only vault safety policy explicit in repository operating instructions and phase plan artifacts.",
+    "scope": "Policy text only; no runtime behavior changes in this ticket.",
+    "steps": [
+      "Add a dedicated safety section in AGENTS.md that forbids Dropbox and personal-folder access for automated work.",
+      "Add matching safety constraints in plan/README.md and execution checklist artifacts.",
+      "Define allowed paths and forbidden paths explicitly with absolute examples.",
+      "Document violation behavior as hard-fail and stop execution."
+    ],
+    "files": [
+      "AGENTS.md",
+      "plan/README.md",
+      "plan/checklists/execution.md"
+    ],
+    "notes": "This ticket establishes policy only; enforcement is implemented in SAFE-002..SAFE-004.",
+    "acceptance": [
+      "AGENTS.md contains a dedicated hard safety rule section with forbidden and allowed path patterns.",
+      "plan/README.md repeats the same constraints without contradiction.",
+      "Execution checklist contains an explicit safety preflight item."
+    ]
+  },
+  {
+    "id": "SAFE-002",
+    "title": "Implement reusable safety guard utility",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "SAFE-001"
+    ],
+    "objective": "Provide one script with deterministic path validation and forbidden-literal scanning for all automation flows.",
+    "scope": "New utility script and helper functions only.",
+    "steps": [
+      "Create scripts/safety.sh with assert-path and repository scan modes.",
+      "Implement forbidden-path detection for Dropbox/personal paths.",
+      "Implement repository-local path assertion against repo root.",
+      "Add usage help and non-zero exit behavior for all violations."
+    ],
+    "files": [
+      "scripts/safety.sh"
+    ],
+    "notes": "Design script to be sourceable by other shell scripts and executable standalone.",
+    "acceptance": [
+      "scripts/safety.sh --assert-path vault/generated exits 0.",
+      "scripts/safety.sh --assert-path /Users/han/Library/CloudStorage/Dropbox/VAULT exits non-zero.",
+      "scripts/safety.sh --check-repo exits non-zero when a forbidden literal is injected into a temp file outside ignore globs."
+    ]
+  },
+  {
+    "id": "SAFE-003",
+    "title": "Enforce safety guard in fixture and benchmark scripts",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "SAFE-002"
+    ],
+    "objective": "Ensure benchmark and fixture automation cannot run against non-repository vault paths.",
+    "scope": "scripts/fixtures.sh, scripts/bench.sh, scripts/budgets.sh only.",
+    "steps": [
+      "Source scripts/safety.sh in each automation script.",
+      "Add path assertions for output roots, fixture roots, resolved vaults, db paths, and daemon socket paths.",
+      "Fail fast before index/bench execution when any path is unsafe.",
+      "Keep existing CLI behavior unchanged outside script automation."
+    ],
+    "files": [
+      "scripts/fixtures.sh",
+      "scripts/bench.sh",
+      "scripts/budgets.sh"
+    ],
+    "notes": "This is script-level safety hardening and should not change benchmark semantics.",
+    "acceptance": [
+      "Each script rejects Dropbox/personal paths with an explicit safety error.",
+      "Each script still succeeds with vault/generated paths.",
+      "Existing benchmark outputs remain written under .benchmarks/reports."
+    ]
+  },
+  {
+    "id": "SAFE-004",
+    "title": "Add safety check into quality gate",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "SAFE-002"
+    ],
+    "objective": "Make forbidden path scanning mandatory before lint/test/build checks.",
+    "scope": "package.json scripts and related quality gate wiring.",
+    "steps": [
+      "Add util:safety script command to package.json.",
+      "Insert util:safety as the first step in util:check.",
+      "Verify util:check fails on forbidden literals and passes when clean.",
+      "Document safety gate in AGENTS command section if needed."
+    ],
+    "files": [
+      "package.json",
+      "AGENTS.md"
+    ],
+    "notes": "Do not add heavy benchmarks to util:check.",
+    "acceptance": [
+      "bun run util:safety executes scripts/safety.sh --check-repo.",
+      "bun run util:check runs util:safety first.",
+      "A forbidden literal outside ignored paths causes util:check to fail."
+    ]
+  },
+  {
+    "id": "SAFE-005",
+    "title": "Add automated safety regression tests",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "SAFE-003",
+      "SAFE-004"
+    ],
+    "objective": "Protect safety behavior from regressions with deterministic automated tests.",
+    "scope": "Shell-level integration tests for safety script and guarded script entrypoints.",
+    "steps": [
+      "Add a shell test harness under scripts/tests for safety assertions.",
+      "Test allowed repository-local path assertions.",
+      "Test forbidden Dropbox path rejection.",
+      "Test repository scan mode against controlled temp fixtures."
+    ],
+    "files": [
+      "scripts/tests/safety_test.sh",
+      "scripts/safety.sh"
+    ],
+    "notes": "Use mktemp under repository root; clean up after test run.",
+    "acceptance": [
+      "scripts/tests/safety_test.sh exits 0 when safety behavior is correct.",
+      "At least one negative test proves forbidden path rejection.",
+      "Test script is runnable from repository root in CI-compatible shell."
+    ]
+  },
+  {
+    "id": "GRAPH-001",
+    "title": "Centralize wikilink tokenization for body and frontmatter",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [],
+    "objective": "Use one parser path for wikilink extraction from markdown body and frontmatter string values.",
+    "scope": "Extractor logic and indexing integration only.",
+    "steps": [
+      "Create a shared tokenization module in tao-sdk-links or tao-sdk-service.",
+      "Route body parsing and frontmatter recursive string scanning through that module.",
+      "Emit source attribution metadata (body, frontmatter:<keypath>) for each edge.",
+      "Add deduplication by canonical target and source context."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/indexing.rs",
+      "crates/tao-sdk-links/src/lib.rs",
+      "crates/tao-sdk-service/tests/conformance_harness.rs"
+    ],
+    "notes": "Do not rescan file text more than once per note.",
+    "acceptance": [
+      "A note with links only in frontmatter produces outgoing edges.",
+      "Body and frontmatter duplicates appear once in canonical edge results.",
+      "Source attribution is visible in internal edge metadata/tests."
+    ]
+  },
+  {
+    "id": "GRAPH-002",
+    "title": "Implement heading and block reference normalization",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-001"
+    ],
+    "objective": "Normalize wikilink targets containing headings and block references consistently.",
+    "scope": "Link canonicalization pipeline and tests.",
+    "steps": [
+      "Parse `[[note#heading]]` and `[[note#^block]]` forms into structured target components.",
+      "Apply canonical slug normalization for heading lookups.",
+      "Retain block identifiers without lossy transformations.",
+      "Extend outgoing/backlink query outputs to include subtarget metadata."
+    ],
+    "files": [
+      "crates/tao-sdk-links/src/lib.rs",
+      "crates/tao-sdk-storage/src/links.rs",
+      "crates/tao-sdk-service/tests/conformance_harness.rs"
+    ],
+    "notes": "Preserve raw target for debugging while indexing canonical form for matching.",
+    "acceptance": [
+      "Heading links resolve to the same note edge as plain note links with subtarget metadata preserved.",
+      "Block links are indexed and queryable without collisions.",
+      "New tests cover mixed heading and block link variants."
+    ]
+  },
+  {
+    "id": "GRAPH-003",
+    "title": "Add case-policy aware link canonicalization",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-001"
+    ],
+    "objective": "Honor vault case policy when canonicalizing link targets.",
+    "scope": "Canonical key generation and resolver lookup behavior.",
+    "steps": [
+      "Thread case policy from config into link canonicalization.",
+      "Implement deterministic lowercase folding only when case-insensitive mode is active.",
+      "Add resolver tests for case-sensitive and case-insensitive fixtures.",
+      "Verify backlinks/outgoing stability across policies."
+    ],
+    "files": [
+      "crates/tao-sdk-vault/src/path.rs",
+      "crates/tao-sdk-links/src/lib.rs",
+      "crates/tao-sdk-service/src/config.rs"
+    ],
+    "notes": "Do not change path display values in user-facing output.",
+    "acceptance": [
+      "Case-insensitive policy resolves mixed-case links to a single canonical note.",
+      "Case-sensitive policy preserves distinct targets when file names differ by case.",
+      "Policy behavior is covered by automated tests."
+    ]
+  },
+  {
+    "id": "GRAPH-004",
+    "title": "Expose unresolved-link reasons and provenance",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-001"
+    ],
+    "objective": "Improve unresolved diagnostics to explain why a link did not resolve.",
+    "scope": "Graph unresolved query output and indexing metadata.",
+    "steps": [
+      "Add reason codes for unresolved links (missing-note, bad-anchor, bad-block, malformed-target).",
+      "Store origin metadata for unresolved entries (source path and source field).",
+      "Return reason and provenance in graph unresolved command output.",
+      "Add tests for each reason code using fixture notes."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-sdk-storage/src/links.rs",
+      "crates/tao-cli/src/main.rs"
+    ],
+    "notes": "Use stable reason identifiers suitable for automation.",
+    "acceptance": [
+      "graph unresolved includes reason and source fields for every entry.",
+      "At least four reason categories are covered by tests.",
+      "Output remains backward compatible for existing fields."
+    ]
+  },
+  {
+    "id": "GRAPH-005",
+    "title": "Add graph neighbors command with deterministic ordering",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-001"
+    ],
+    "objective": "Provide one-hop graph neighborhood lookup for note exploration.",
+    "scope": "CLI graph command + SDK service API.",
+    "steps": [
+      "Implement SDK service API returning outgoing and incoming neighbors for a note path.",
+      "Expose command `graph neighbors` with limit/offset and direction controls.",
+      "Sort output by canonical path and relation type for deterministic results.",
+      "Add CLI contract tests and integration tests."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-cli/tests/json_contracts.rs"
+    ],
+    "notes": "Keep neighbor query read-only and compatible with daemon mode.",
+    "acceptance": [
+      "graph neighbors returns both incoming and outgoing links for a valid note.",
+      "Results are deterministic across repeated runs with the same dataset.",
+      "CLI JSON contract tests include the new command."
+    ]
+  },
+  {
+    "id": "GRAPH-006",
+    "title": "Add graph shortest-path traversal",
+    "priority": "P2",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-005"
+    ],
+    "objective": "Compute shortest note-to-note paths for semantic graph exploration.",
+    "scope": "Read-only BFS traversal over indexed adjacency.",
+    "steps": [
+      "Implement BFS-based shortest path service API with max-depth and max-nodes guardrails.",
+      "Expose command `graph path --from <note> --to <note>`.",
+      "Return path node list and edge count in JSON envelope.",
+      "Add tests for found path, no path, and guardrail limits."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-sdk-service/tests/conformance_harness.rs"
+    ],
+    "notes": "Use adjacency from index; avoid full table scans per step.",
+    "acceptance": [
+      "graph path returns deterministic shortest routes on fixture graph.",
+      "No-path cases return empty path with explicit status.",
+      "Guardrails prevent runaway traversal on dense graphs."
+    ]
+  },
+  {
+    "id": "GRAPH-007",
+    "title": "Add strongly and weakly connected component diagnostics",
+    "priority": "P2",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-005"
+    ],
+    "objective": "Provide topology diagnostics beyond orphan/deadend counts.",
+    "scope": "Component detection APIs and CLI command output.",
+    "steps": [
+      "Implement weak component detection for undirected projection.",
+      "Implement strongly connected components for directed graph.",
+      "Expose command `graph components` with mode selector.",
+      "Add tests with crafted component fixture topology."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "vault/generated"
+    ],
+    "notes": "Use iterative algorithms to avoid recursion overflow on large vaults.",
+    "acceptance": [
+      "graph components returns component counts and member summaries.",
+      "Weak and strong modes produce distinct results on directed cycles.",
+      "Performance remains within existing graph budget constraints."
+    ]
+  },
+  {
+    "id": "GRAPH-008",
+    "title": "Add folder-edge overlay for graph walk",
+    "priority": "P2",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-005"
+    ],
+    "objective": "Support combined semantic traversal over links and folder hierarchy without synthetic hub notes.",
+    "scope": "Graph walk edge-expansion behavior and CLI options.",
+    "steps": [
+      "Add optional folder-parent and sibling edge generation to traversal.",
+      "Expose flag `--include-folders` for graph walk command.",
+      "Ensure traversal output labels edge type (wikilink, folder-parent, folder-sibling).",
+      "Add deterministic test fixtures for mixed edge traversal."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-bench/src/main.rs"
+    ],
+    "notes": "Default behavior remains wikilink-only to preserve existing contract.",
+    "acceptance": [
+      "graph walk with --include-folders traverses folder relationships without hub notes.",
+      "Edge type labels are present in output.",
+      "Without the flag, traversal matches current behavior."
+    ]
+  },
+  {
+    "id": "GRAPH-009",
+    "title": "Add graph query parity snapshot tests",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-001",
+      "GRAPH-005"
+    ],
+    "objective": "Lock graph output behavior using golden snapshots across representative fixtures.",
+    "scope": "Integration tests and deterministic fixture baselines.",
+    "steps": [
+      "Create snapshot fixtures for outgoing, backlinks, unresolved, deadends, orphans, and walk.",
+      "Generate expected JSON outputs and commit as goldens.",
+      "Add test runner to compare live output to goldens.",
+      "Document snapshot update process in test comments."
+    ],
+    "files": [
+      "crates/tao-cli/tests/graph_snapshots.rs",
+      "vault/generated",
+      "plan/checklists/review.md"
+    ],
+    "notes": "Snapshots must be stable by sorting keys and arrays.",
+    "acceptance": [
+      "Graph snapshot tests pass in repeated runs with same seed.",
+      "Any output drift creates a clear diff in test failure.",
+      "Coverage includes frontmatter-only link cases."
+    ]
+  },
+  {
+    "id": "GRAPH-010",
+    "title": "Benchmark graph traversal hot paths",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "GRAPH-005",
+      "GRAPH-006",
+      "GRAPH-008"
+    ],
+    "objective": "Track graph-read performance across critical commands and prevent regressions.",
+    "scope": "Benchmark harness and budget integration.",
+    "steps": [
+      "Add hyperfine cases for graph neighbors, walk, path, unresolved, deadends, and orphans.",
+      "Export machine-readable summaries under .benchmarks/reports.",
+      "Define p50 budget targets in plan/perf-budgets.json.",
+      "Fail budget script when thresholds are exceeded."
+    ],
+    "files": [
+      "scripts/bench.sh",
+      "scripts/budgets.sh",
+      "plan/perf-budgets.json"
+    ],
+    "notes": "Use generated 10k vault profile as baseline.",
+    "acceptance": [
+      "Graph benchmarks run via bun run bench:cli or bench:sdk as applicable.",
+      "Budget report includes graph command p50/p95 metrics.",
+      "Regression causes non-zero exit in budget gate."
+    ]
+  },
+  {
+    "id": "BASE-001",
+    "title": "Split base parser into AST and evaluator modules",
+    "priority": "P0",
+    "status": "todo",
+    "depends_on": [],
+    "objective": "Refactor base parsing into maintainable modules without changing behavior.",
+    "scope": "tao-sdk-bases crate module structure and unit tests.",
+    "steps": [
+      "Create modules for lexer, parser, ast, validation, evaluator.",
+      "Move existing logic out of monolithic lib.rs into those modules.",
+      "Expose a thin public API facade in lib.rs.",
+      "Port and extend tests to new module boundaries."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/lib.rs",
+      "crates/tao-sdk-bases/src/ast.rs",
+      "crates/tao-sdk-bases/src/parser.rs"
+    ],
+    "notes": "No semantic changes in this ticket; only structure and tests.",
+    "acceptance": [
+      "tao-sdk-bases compiles with module split and no public API regressions.",
+      "All existing base tests pass.",
+      "New module-level tests validate parser/evaluator boundaries."
+    ]
+  },
+  {
+    "id": "BASE-002",
+    "title": "Implement strict typed coercion for base fields",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "BASE-001"
+    ],
+    "objective": "Guarantee deterministic coercion behavior for string, number, bool, and date-like fields.",
+    "scope": "Base evaluator typing and schema enforcement.",
+    "steps": [
+      "Define coercion rules per field type with explicit failure paths.",
+      "Apply coercion at row materialization before filters/sorts.",
+      "Return structured errors for invalid coercion when strict mode is enabled.",
+      "Add fixtures and tests for mixed-type datasets."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/evaluator.rs",
+      "crates/tao-sdk-bases/src/types.rs",
+      "crates/tao-sdk-service/tests/conformance_harness.rs"
+    ],
+    "notes": "Preserve permissive fallback mode where currently expected by existing commands.",
+    "acceptance": [
+      "Typed coercion is deterministic across runs.",
+      "Invalid values produce stable error payloads in strict mode.",
+      "Tests cover number, bool, date, and null edge cases."
+    ]
+  },
+  {
+    "id": "BASE-003",
+    "title": "Add complete base filter operator set",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "BASE-001"
+    ],
+    "objective": "Support rich filtering semantics in base views and query adapter.",
+    "scope": "Operator parser and evaluator.",
+    "steps": [
+      "Implement operators: eq, neq, gt, gte, lt, lte, contains, in, starts_with, ends_with.",
+      "Map operators to typed comparator functions.",
+      "Add parser validation for unknown operators.",
+      "Add unit tests for each operator with null and type mismatch behavior."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/parser.rs",
+      "crates/tao-sdk-bases/src/evaluator.rs",
+      "vault/views/projects.base"
+    ],
+    "notes": "Operator semantics must match query adapter behavior.",
+    "acceptance": [
+      "All supported operators evaluate correctly in unit tests.",
+      "Unknown operator yields clear parse error.",
+      "Base view command returns expected filtered rows for fixture cases."
+    ]
+  },
+  {
+    "id": "BASE-004",
+    "title": "Implement stable sorting with null ordering",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "BASE-002"
+    ],
+    "objective": "Provide deterministic multi-column sorting with explicit null placement.",
+    "scope": "Sort evaluator and contract tests.",
+    "steps": [
+      "Add multi-key comparator with stable tie-breaking by canonical path.",
+      "Support per-column nulls-first/nulls-last behavior with default policy.",
+      "Expose null ordering behavior in base/query output metadata.",
+      "Add regression tests for mixed null and numeric/string datasets."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/evaluator.rs",
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/tests/json_contracts.rs"
+    ],
+    "notes": "Deterministic output is mandatory for snapshot tests and agent consumption.",
+    "acceptance": [
+      "Sorting output is stable across repeated runs.",
+      "Null placement follows configured/default policy.",
+      "Contract tests verify sort metadata and row order."
+    ]
+  },
+  {
+    "id": "BASE-005",
+    "title": "Add grouping and aggregate projections",
+    "priority": "P2",
+    "status": "todo",
+    "depends_on": [
+      "BASE-003",
+      "BASE-004"
+    ],
+    "objective": "Enable grouped base views with aggregate columns for count/sum/min/max.",
+    "scope": "Evaluator aggregation pipeline and CLI output shape.",
+    "steps": [
+      "Define group-by syntax and aggregate expression schema.",
+      "Implement grouped row materialization with deterministic key ordering.",
+      "Expose grouped output metadata and aggregate columns in base/query commands.",
+      "Add integration tests with projects and meetings fixtures."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/ast.rs",
+      "crates/tao-sdk-bases/src/evaluator.rs",
+      "crates/tao-cli/src/main.rs"
+    ],
+    "notes": "Keep grouped and flat output modes clearly separated.",
+    "acceptance": [
+      "Base views can return grouped aggregates with stable schema.",
+      "Aggregate functions compute correct values in tests.",
+      "JSON output includes grouping metadata."
+    ]
+  },
+  {
+    "id": "BASE-006",
+    "title": "Implement relation field resolution",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "GRAPH-001",
+      "BASE-002"
+    ],
+    "objective": "Resolve relation fields to note references and expose resolved targets.",
+    "scope": "Base row relation parsing and lookup against note index.",
+    "steps": [
+      "Define relation type in base schema and value encoding.",
+      "Resolve relation entries via canonical note path lookup.",
+      "Store unresolved relation diagnostics separately from graph unresolved.",
+      "Add tests for single, multi, and broken relation values."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/types.rs",
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-sdk-storage/src/bases.rs"
+    ],
+    "notes": "Relation resolution must not trigger full-text scans.",
+    "acceptance": [
+      "Relation fields return resolved note targets where available.",
+      "Broken relation values are reported with reason codes.",
+      "Performance remains bounded by indexed lookups."
+    ]
+  },
+  {
+    "id": "BASE-007",
+    "title": "Add rollup groundwork over relation fields",
+    "priority": "P2",
+    "status": "todo",
+    "depends_on": [
+      "BASE-006"
+    ],
+    "objective": "Enable computed rollup values sourced from related rows.",
+    "scope": "Schema support and evaluator for first rollup operations.",
+    "steps": [
+      "Add rollup field definition syntax tied to relation field and target property.",
+      "Implement rollup functions: count, min, max, sum for numeric fields.",
+      "Cache intermediate relation traversals within request scope.",
+      "Add fixture and tests for projects-to-meetings rollups."
+    ],
+    "files": [
+      "crates/tao-sdk-bases/src/ast.rs",
+      "crates/tao-sdk-bases/src/evaluator.rs",
+      "vault/views/projects.base"
+    ],
+    "notes": "Keep rollup implementation incremental and deterministic.",
+    "acceptance": [
+      "Rollup fields compute correct values in integration tests.",
+      "Invalid rollup definitions return clear parse/validation errors.",
+      "No N+1 relation query pattern in profiler/bench traces."
+    ]
+  },
+  {
+    "id": "BASE-008",
+    "title": "Add base schema introspection command",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "BASE-001"
+    ],
+    "objective": "Expose base/view schema and derived field metadata for tooling and agents.",
+    "scope": "CLI command, SDK API, and JSON contract tests.",
+    "steps": [
+      "Add SDK API returning parsed schema summary for one base file.",
+      "Expose command `base schema --path <base-file>`.",
+      "Return fields, types, filters, sorts, groups, and rollups metadata.",
+      "Add contract tests covering valid and invalid schema files."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-cli/tests/json_contracts.rs"
+    ],
+    "notes": "This command is read-only and should not require write gates.",
+    "acceptance": [
+      "base schema returns structured metadata for valid base files.",
+      "Invalid base files return structured parse errors.",
+      "Command appears in CLI help and JSON contract tests."
+    ]
+  },
+  {
+    "id": "BASE-009",
+    "title": "Unify base execution under query planner",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "BASE-003",
+      "BASE-004",
+      "QUERY-001"
+    ],
+    "objective": "Route base command execution through shared query pipeline to avoid duplicated logic.",
+    "scope": "Service-layer query adapter integration.",
+    "steps": [
+      "Define base adapter for shared planner scan/filter/sort/project stages.",
+      "Replace direct base evaluator command path with planner invocation.",
+      "Add explain metadata to confirm adapter usage.",
+      "Update tests to assert planner-backed execution equivalence."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-sdk-bases/src/lib.rs",
+      "crates/tao-sdk-search/src/lib.rs"
+    ],
+    "notes": "Keep output schema stable while switching execution engine.",
+    "acceptance": [
+      "base view results match pre-migration outputs for fixture set.",
+      "Execution metadata indicates planner path.",
+      "No duplicate evaluator path remains in service code."
+    ]
+  },
+  {
+    "id": "BASE-010",
+    "title": "Add base parity benchmark suite",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "BASE-009"
+    ],
+    "objective": "Measure base query latency and keep parity features within performance targets.",
+    "scope": "Benchmark harness + budget gate entries for base operations.",
+    "steps": [
+      "Add hyperfine cases for base list, base view, base schema, and query-from-base.",
+      "Write summary artifacts under .benchmarks/reports with p50/p95.",
+      "Add budget thresholds to perf config.",
+      "Fail budget script on threshold regressions."
+    ],
+    "files": [
+      "scripts/bench.sh",
+      "scripts/budgets.sh",
+      "plan/perf-budgets.json"
+    ],
+    "notes": "Reuse generated 10k fixture and avoid external datasets.",
+    "acceptance": [
+      "Base benchmarks execute from single bench entrypoint.",
+      "Budget script includes base metrics and threshold checks.",
+      "Regression in base p50 causes non-zero exit."
+    ]
+  },
+  {
+    "id": "QUERY-001",
+    "title": "Split query engine into logical and physical planner modules",
+    "priority": "P0",
+    "status": "todo",
+    "depends_on": [],
+    "objective": "Refactor query engine architecture for maintainability and future optimizer work.",
+    "scope": "tao-sdk-search module decomposition and interface cleanup.",
+    "steps": [
+      "Create modules: logical_plan, physical_plan, optimizer, adapters, execution.",
+      "Move existing query pipeline logic out of monolithic file.",
+      "Keep public API backward compatible for current command handlers.",
+      "Add planner unit tests for plan construction invariants."
+    ],
+    "files": [
+      "crates/tao-sdk-search/src/lib.rs",
+      "crates/tao-sdk-search/src/logical_plan.rs",
+      "crates/tao-sdk-search/src/physical_plan.rs"
+    ],
+    "notes": "This ticket is structural and should not alter query semantics.",
+    "acceptance": [
+      "Query engine compiles with new modules and existing command tests pass.",
+      "Planner unit tests validate deterministic plan generation.",
+      "Public query API remains stable."
+    ]
+  },
+  {
+    "id": "QUERY-002",
+    "title": "Implement typed where-expression parser",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "QUERY-001"
+    ],
+    "objective": "Support expressive where clauses consistently across docs, graph, base, and meta scopes.",
+    "scope": "Parser + evaluator integration.",
+    "steps": [
+      "Define where-expression grammar with typed literal support.",
+      "Implement parser with clear error spans/messages.",
+      "Translate parsed expressions into logical plan filters.",
+      "Add unit tests for valid and invalid expressions."
+    ],
+    "files": [
+      "crates/tao-sdk-search/src/parser.rs",
+      "crates/tao-sdk-search/src/logical_plan.rs",
+      "crates/tao-cli/src/main.rs"
+    ],
+    "notes": "Keep initial grammar minimal but extensible.",
+    "acceptance": [
+      "query --where expressions execute across at least docs and base scopes.",
+      "Syntax errors include location and message.",
+      "Tests cover boolean precedence and type mismatch cases."
+    ]
+  },
+  {
+    "id": "QUERY-003",
+    "title": "Add projection/select support in unified query",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "QUERY-001"
+    ],
+    "objective": "Allow query callers to request explicit columns/fields only.",
+    "scope": "Planner projection stage and CLI select option handling.",
+    "steps": [
+      "Add select list parsing to CLI and query request model.",
+      "Implement projection stage in physical plan.",
+      "Validate field names per scope and return structured errors on invalid fields.",
+      "Add contract tests for projection behavior."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-sdk-search/src/physical_plan.rs",
+      "crates/tao-cli/tests/json_contracts.rs"
+    ],
+    "notes": "Projection must preserve deterministic field ordering in output rows.",
+    "acceptance": [
+      "query --select returns only requested fields.",
+      "Unknown fields fail with stable error code.",
+      "Projection works with limit/offset and sort."
+    ]
+  },
+  {
+    "id": "QUERY-004",
+    "title": "Add query sort grammar and comparator registry",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "QUERY-001"
+    ],
+    "objective": "Standardize sorting behavior across all query scopes.",
+    "scope": "Sort parser and comparator mapping by field type.",
+    "steps": [
+      "Implement sort argument grammar supporting multi-key sort.",
+      "Map each key to a typed comparator with null policy.",
+      "Apply stable tie-breaker by canonical path/id.",
+      "Add tests for mixed sort keys and null values."
+    ],
+    "files": [
+      "crates/tao-sdk-search/src/parser.rs",
+      "crates/tao-sdk-search/src/execution.rs",
+      "crates/tao-sdk-service/tests/conformance_harness.rs"
+    ],
+    "notes": "Keep sort behavior consistent with base sort semantics.",
+    "acceptance": [
+      "query --sort supports multiple keys.",
+      "Sorting is deterministic under ties and nulls.",
+      "Integration tests cover docs and base scopes."
+    ]
+  },
+  {
+    "id": "QUERY-005",
+    "title": "Implement query explain output",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "QUERY-001"
+    ],
+    "objective": "Expose planner/executor decisions for debugging and optimization.",
+    "scope": "Explain metadata generation and CLI surface.",
+    "steps": [
+      "Add explain flag to query command.",
+      "Emit logical plan, physical plan, and selected indexes/adapters.",
+      "Keep explain payload machine-readable JSON.",
+      "Add tests to ensure explain output is deterministic."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-sdk-search/src/logical_plan.rs",
+      "crates/tao-sdk-search/src/physical_plan.rs"
+    ],
+    "notes": "Do not expose internal sensitive paths; only logical identifiers.",
+    "acceptance": [
+      "query --explain returns plan metadata without executing full data fetch when not requested.",
+      "Explain output includes adapter names and filter stages.",
+      "Snapshot tests validate stable explain payload shape."
+    ]
+  },
+  {
+    "id": "QUERY-006",
+    "title": "Implement streaming query output path",
+    "priority": "P2",
+    "status": "done",
+    "depends_on": [
+      "QUERY-003"
+    ],
+    "objective": "Reduce latency and memory for large result sets by streaming serialized rows.",
+    "scope": "CLI output writer and service streaming iterator.",
+    "steps": [
+      "Add streaming iterator in query execution layer.",
+      "Add CLI flag for streaming JSON output mode.",
+      "Preserve existing envelope for non-streaming mode.",
+      "Benchmark streaming vs standard output and record gains."
+    ],
+    "files": [
+      "crates/tao-sdk-search/src/execution.rs",
+      "crates/tao-cli/src/main.rs",
+      "scripts/bench.sh"
+    ],
+    "notes": "Streaming mode must remain read-only and deterministic.",
+    "acceptance": [
+      "Streaming mode handles large result sets without materializing full row arrays.",
+      "Existing non-streaming output remains unchanged.",
+      "Bench report includes streaming comparison metrics."
+    ]
+  },
+  {
+    "id": "QUERY-007",
+    "title": "Add query integration parity matrix tests",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "QUERY-002",
+      "QUERY-003",
+      "QUERY-004",
+      "QUERY-005"
+    ],
+    "objective": "Verify query semantics across all scopes with one parity matrix.",
+    "scope": "Integration tests and fixture matrix.",
+    "steps": [
+      "Define parity matrix covering docs, graph, base, meta, and task scopes.",
+      "Add matrix-driven integration tests for where/sort/select/limit/offset combinations.",
+      "Capture expected row counts and deterministic ordering.",
+      "Record failures with compact diagnostics for fast triage."
+    ],
+    "files": [
+      "crates/tao-sdk-service/tests/conformance_harness.rs",
+      "crates/tao-cli/tests/query_matrix.rs",
+      "vault/generated"
+    ],
+    "notes": "Matrix tests should be deterministic with fixed fixture seed.",
+    "acceptance": [
+      "All matrix cases pass on generated fixtures.",
+      "Failures identify scope, operator, and expected/actual summary.",
+      "Matrix includes frontmatter-link and relation-backed cases."
+    ]
+  },
+  {
+    "id": "QUERY-008",
+    "title": "Benchmark unified query path end to end",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "QUERY-007"
+    ],
+    "objective": "Track and budget unified query latency for key read workloads.",
+    "scope": "Benchmark script and budget gate updates.",
+    "steps": [
+      "Add hyperfine cases for docs, base, graph, meta, and task query scopes.",
+      "Capture p50/p95 and startup vs daemon comparisons.",
+      "Update perf budgets for warm and cold query paths.",
+      "Fail gate on budget regressions."
+    ],
+    "files": [
+      "scripts/bench.sh",
+      "scripts/budgets.sh",
+      "plan/perf-budgets.json"
+    ],
+    "notes": "Use generated fixtures only; never external vaults.",
+    "acceptance": [
+      "bench:cli reports unified query metrics for all scopes.",
+      "budgets.sh validates query thresholds.",
+      "Regression triggers non-zero exit."
+    ]
+  },
+  {
+    "id": "CLI-001",
+    "title": "Remove legacy alias command paths",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [],
+    "objective": "Complete clean-cut command surface with no legacy alias implementation.",
+    "scope": "CLI parser and dispatch only.",
+    "steps": [
+      "Identify and remove any legacy top-level aliases (note, links, properties, bases, search) if still present.",
+      "Keep only vault, doc, base, graph, meta, task, query command groups.",
+      "Update help snapshots and JSON contract tests.",
+      "Update AGENTS contract section to remove alias references."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-cli/tests/help_snapshot.rs",
+      "AGENTS.md"
+    ],
+    "notes": "No compatibility shim layer should remain.",
+    "acceptance": [
+      "tao --help lists only final command surface groups.",
+      "Legacy aliases return unknown-command errors.",
+      "Contract tests pass with clean-cut surface."
+    ]
+  },
+  {
+    "id": "CLI-002",
+    "title": "Standardize structured error codes across CLI",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "CLI-001"
+    ],
+    "objective": "Ensure every command returns stable error codes and contextual messages.",
+    "scope": "Error mapping in command dispatch and SDK error translation.",
+    "steps": [
+      "Define CLI error code registry in one module.",
+      "Map known SDK/storage/parser errors to registry codes.",
+      "Ensure JSON envelope includes code, message, and optional hint.",
+      "Add contract tests for representative error paths."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-sdk-bridge/src/lib.rs",
+      "crates/tao-cli/tests/json_contracts.rs"
+    ],
+    "notes": "Keep messages concise and automation-friendly.",
+    "acceptance": [
+      "All failing command tests assert stable error codes.",
+      "Envelope shape is consistent across command families.",
+      "No internal stack traces leak in user-facing errors."
+    ]
+  },
+  {
+    "id": "CLI-003",
+    "title": "Modularize CLI command wiring",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "CLI-001"
+    ],
+    "objective": "Break monolithic CLI entrypoint into maintainable command modules.",
+    "scope": "CLI source organization only.",
+    "steps": [
+      "Create modules per command family (vault/doc/base/graph/meta/task/query).",
+      "Extract shared argument parsing helpers and envelope writers.",
+      "Keep main.rs as thin bootstrap and dispatch router.",
+      "Update tests/imports with new module paths."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-cli/src/commands/",
+      "crates/tao-cli/src/json_envelope.rs"
+    ],
+    "notes": "No behavior change intended; focus on maintainability.",
+    "acceptance": [
+      "main.rs reduced to bootstrap + dispatch wiring.",
+      "All CLI tests continue passing.",
+      "Command modules are under 400 lines each where practical."
+    ]
+  },
+  {
+    "id": "CLI-004",
+    "title": "Harden daemon socket lifecycle and stale recovery",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "CLI-003"
+    ],
+    "objective": "Ensure daemon mode recovers cleanly from stale sockets and orphaned processes.",
+    "scope": "Daemon start/status/stop logic and tests.",
+    "steps": [
+      "Detect stale socket files before daemon start and recover safely.",
+      "Add liveness checks and clear error messages for dead sockets.",
+      "Add daemon integration tests for stale/restart flows.",
+      "Update bench scripts to tolerate stale sockets via explicit stop/start."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-cli/src/main.rs",
+      "scripts/bench.sh"
+    ],
+    "notes": "Use deterministic socket paths under fixture-local .tao directory.",
+    "acceptance": [
+      "Daemon start succeeds after stale socket cleanup.",
+      "status command reports stale/dead states accurately.",
+      "Integration tests cover stale socket and restart scenarios."
+    ]
+  },
+  {
+    "id": "CLI-005",
+    "title": "Expand CLI contract test matrix",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "CLI-002",
+      "CLI-003",
+      "CLI-004"
+    ],
+    "objective": "Guarantee JSON contract stability for all read-only commands.",
+    "scope": "CLI test suite only.",
+    "steps": [
+      "Enumerate all read-only commands by group and create table-driven tests.",
+      "Validate envelope shape, command identifier, and key payload fields.",
+      "Add negative tests for invalid args, missing files, and invalid base views.",
+      "Ensure tests run against repository fixture/generator output only."
+    ],
+    "files": [
+      "crates/tao-cli/tests/json_contracts.rs",
+      "crates/tao-cli/tests/help_snapshot.rs",
+      "vault/"
+    ],
+    "notes": "Keep tests deterministic and avoid external environment dependencies.",
+    "acceptance": [
+      "Contract tests cover every read-only command route.",
+      "Negative cases assert error code and message shape.",
+      "Test suite passes repeatedly with no order-dependent flakiness."
+    ]
+  },
+  {
+    "id": "DATA-001",
+    "title": "Expand synthetic vault realism profile definitions",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [],
+    "objective": "Model realistic graph, metadata, and base usage patterns while keeping fixtures synthetic and private.",
+    "scope": "fixtures generator profile logic and README docs.",
+    "steps": [
+      "Define profile schemas for 1k, 2k, 5k, and 10k with deterministic distributions.",
+      "Include project, meeting, contact, company, daily, and reference note classes.",
+      "Generate body/frontmatter wikilinks, tags, tasks, aliases, and unresolved ratios.",
+      "Document profiles and seed behavior in vault/README.md."
+    ],
+    "files": [
+      "scripts/fixtures.sh",
+      "vault/README.md",
+      "vault/generated"
+    ],
+    "notes": "Do not copy or derive direct content from real personal vault files.",
+    "acceptance": [
+      "fixtures.sh can generate 1k, 2k, 5k, and 10k deterministic profiles.",
+      "Generated vaults contain mixed realistic note categories and metadata.",
+      "Profile documentation includes counts, ratios, and seed determinism."
+    ]
+  },
+  {
+    "id": "DATA-002",
+    "title": "Integrate fixture validator as strict default",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "DATA-001"
+    ],
+    "objective": "Guarantee generated fixtures meet structural and safety invariants before any bench/test run.",
+    "scope": "fixtures validator logic and failure diagnostics.",
+    "steps": [
+      "Enforce invariants for links, frontmatter links, unresolved ratio, tasks, tags, and required base files.",
+      "Fail validation for hub-like files or personal path leakage markers.",
+      "Keep --skip-validate as explicit opt-out only for debugging.",
+      "Add validator self-tests with injected failure fixtures."
+    ],
+    "files": [
+      "scripts/fixtures.sh",
+      "scripts/tests/fixtures_validator_test.sh"
+    ],
+    "notes": "Validation output should include failing invariant and vault path.",
+    "acceptance": [
+      "fixtures.sh fails with clear message on each invariant breach.",
+      "Validator tests include at least three negative cases.",
+      "Default fixture generation path runs validation automatically."
+    ]
+  },
+  {
+    "id": "DATA-003",
+    "title": "Add generated-vault benchmark smoke in CI scripts",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "DATA-001",
+      "DATA-002"
+    ],
+    "objective": "Ensure repository benchmark entrypoint always runs against generated fixtures.",
+    "scope": "bench scripts and CI helper commands.",
+    "steps": [
+      "Verify bench and budget scripts always call fixtures generation under vault/generated by default.",
+      "Add explicit assertions in scripts for resolved fixture vault path safety.",
+      "Emit fixture profile and seed metadata into benchmark reports.",
+      "Add smoke command to run quick benchmark subset for CI/local validation."
+    ],
+    "files": [
+      "scripts/bench.sh",
+      "scripts/budgets.sh",
+      "package.json"
+    ],
+    "notes": "Keep smoke benchmark runtime bounded for CI use.",
+    "acceptance": [
+      "Bench scripts fail when fixture root is outside repository.",
+      "Benchmark reports include profile and seed metadata.",
+      "A quick smoke benchmark command succeeds on fresh clone after build."
+    ]
+  },
+  {
+    "id": "DATA-004",
+    "title": "Create deterministic graph and base golden fixtures",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "DATA-001"
+    ],
+    "objective": "Provide stable fixture subsets dedicated to parity and snapshot tests.",
+    "scope": "New fixture directories and generation hooks.",
+    "steps": [
+      "Create dedicated deterministic fixture profiles for graph and base parity tests.",
+      "Commit compact fixture subsets with known topology and expected outputs.",
+      "Link fixture generation script to refresh goldens with fixed seed.",
+      "Document fixture refresh workflow for contributors."
+    ],
+    "files": [
+      "vault/fixtures/graph-parity",
+      "vault/fixtures/base-parity",
+      "scripts/fixtures.sh"
+    ],
+    "notes": "Keep committed fixture size small while preserving edge-case coverage.",
+    "acceptance": [
+      "Parity fixture directories are reproducible from fixed seeds.",
+      "Snapshot tests use parity fixtures instead of ad-hoc notes.",
+      "Fixture refresh process is documented and deterministic."
+    ]
+  },
+  {
+    "id": "DATA-005",
+    "title": "Add fixture generation performance benchmark",
+    "priority": "P2",
+    "status": "done",
+    "depends_on": [
+      "DATA-001",
+      "DATA-002"
+    ],
+    "objective": "Track generation throughput so large synthetic vault creation remains practical.",
+    "scope": "Fixture script timing and benchmark report output.",
+    "steps": [
+      "Measure generation duration for 1k, 5k, and 10k profiles.",
+      "Export metrics to .benchmarks/reports fixture-generation summary file.",
+      "Add optional budget thresholds for generation runtime.",
+      "Document tradeoffs for realism vs generation cost."
+    ],
+    "files": [
+      "scripts/fixtures.sh",
+      "scripts/bench.sh",
+      ".benchmarks/reports"
+    ],
+    "notes": "Keep generation deterministic; avoid network dependencies.",
+    "acceptance": [
+      "Fixture generation benchmark outputs profile-level durations.",
+      "Report is produced from single bench entrypoint.",
+      "Optional runtime budgets are enforceable in CI/local flows."
+    ]
+  },
+  {
+    "id": "DOC-001",
+    "title": "Define uniform crate README template",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [],
+    "objective": "Create one concise, information-dense README structure used by every crate.",
+    "scope": "Template/spec only.",
+    "steps": [
+      "Create README template with fixed H2 sections and no decorative formatting.",
+      "Include sections: Purpose, Public API, Internal Design, Data Flow, Dependencies, Testing, Limits.",
+      "Document writing rules (no emojis, concise technical style, no stale ticket references).",
+      "Publish template under plan/templates and reference in AGENTS."
+    ],
+    "files": [
+      "plan/templates/crate-readme-template.md",
+      "AGENTS.md"
+    ],
+    "notes": "Template should optimize AI-agent and maintainer comprehension.",
+    "acceptance": [
+      "Template file exists with required sections.",
+      "AGENTS references the template for crate documentation consistency.",
+      "Template contains no project-specific stale IDs."
+    ]
+  },
+  {
+    "id": "DOC-002",
+    "title": "Rewrite all crate READMEs using uniform template",
+    "priority": "P0",
+    "status": "done",
+    "depends_on": [
+      "DOC-001"
+    ],
+    "objective": "Replace placeholder or stale README content with consistent, accurate crate architecture docs.",
+    "scope": "All crate README.md files under crates/.",
+    "steps": [
+      "Inventory all crate README files and map each to current crate behavior.",
+      "Rewrite each README with the standard section layout.",
+      "Remove outdated ticket IDs and obsolete claims.",
+      "Cross-check README API references against actual code exports."
+    ],
+    "files": [
+      "crates/*/README.md",
+      "plan/templates/crate-readme-template.md"
+    ],
+    "notes": "Keep documentation concise and avoid implementation fiction.",
+    "acceptance": [
+      "Every crate has a non-placeholder README with the same section structure.",
+      "No stale ticket IDs remain in crate READMEs.",
+      "README API names match actual crate exports and command surfaces."
+    ]
+  },
+  {
+    "id": "DOC-003",
+    "title": "Add architecture map linking crates and runtime flow",
+    "priority": "P1",
+    "status": "done",
+    "depends_on": [
+      "DOC-002"
+    ],
+    "objective": "Provide one compact architecture map for agents and maintainers to navigate crate interactions.",
+    "scope": "Top-level AGENTS architecture section + one plan artifact.",
+    "steps": [
+      "Create a dependency and data-flow map from CLI to SDK service/storage/bridge crates.",
+      "Document primary read and write paths with crate boundaries.",
+      "Include benchmark and fixture flow paths.",
+      "Link map from AGENTS and crate READMEs where relevant."
+    ],
+    "files": [
+      "AGENTS.md",
+      "plan/architecture-map.md",
+      "crates/*/README.md"
+    ],
+    "notes": "Use concise lists and minimal diagrams; keep it text-dense.",
+    "acceptance": [
+      "Architecture map file exists and matches current code organization.",
+      "AGENTS links to the map.",
+      "At least core crates reference their place in the runtime flow."
+    ]
+  },
+  {
+    "id": "REF-001",
+    "title": "Refactor tao-sdk-service lib.rs into modules",
+    "priority": "P0",
+    "status": "todo",
+    "depends_on": [],
+    "objective": "Break monolithic tao-sdk-service lib.rs into coherent modules for maintainability.",
+    "scope": "Service crate internal structure and test updates.",
+    "steps": [
+      "Create module boundaries for bootstrap, commands, graph, base, query, meta, and task operations.",
+      "Move logic from lib.rs into modules while preserving public API exports.",
+      "Keep lib.rs as module wiring plus public facade types.",
+      "Run full crate tests and update import paths as needed."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/lib.rs",
+      "crates/tao-sdk-service/src/",
+      "crates/tao-sdk-service/tests/"
+    ],
+    "notes": "No behavior drift; this is structural refactor with parity tests.",
+    "acceptance": [
+      "lib.rs is reduced to wiring/facade responsibilities.",
+      "New modules have focused responsibilities and clear names.",
+      "Service crate tests pass with no regressions."
+    ]
+  },
+  {
+    "id": "REF-002",
+    "title": "Refactor tao-sdk-service indexing.rs into submodules",
+    "priority": "P0",
+    "status": "todo",
+    "depends_on": [
+      "REF-001"
+    ],
+    "objective": "Split indexing pipeline into explicit stages for scan, parse, resolve, and persist.",
+    "scope": "Indexing implementation organization and internal APIs.",
+    "steps": [
+      "Create indexing modules for file_scan, parse_extract, link_resolve, write_batch, reconcile.",
+      "Extract shared structs for stage inputs/outputs.",
+      "Preserve parallelism and batching behavior while improving readability.",
+      "Add stage-level unit tests where absent."
+    ],
+    "files": [
+      "crates/tao-sdk-service/src/indexing.rs",
+      "crates/tao-sdk-service/src/indexing/",
+      "crates/tao-sdk-service/tests/"
+    ],
+    "notes": "Keep existing performance optimizations intact.",
+    "acceptance": [
+      "indexing.rs no longer contains monolithic stage logic.",
+      "Each indexing stage has dedicated module and tests.",
+      "Indexing integration tests still pass and performance does not regress materially."
+    ]
+  },
+  {
+    "id": "REF-003",
+    "title": "Refactor tao-cli main.rs into command modules",
+    "priority": "P0",
+    "status": "todo",
+    "depends_on": [
+      "CLI-003"
+    ],
+    "objective": "Eliminate CLI monolith by splitting command implementation into per-domain modules.",
+    "scope": "CLI crate source layout.",
+    "steps": [
+      "Create src/commands directory with one module per command family.",
+      "Move argument structs and handlers into their command module.",
+      "Create shared JSON envelope and error mapping modules.",
+      "Keep main.rs under 300 lines by limiting it to startup and dispatch."
+    ],
+    "files": [
+      "crates/tao-cli/src/main.rs",
+      "crates/tao-cli/src/commands/",
+      "crates/tao-cli/src/error.rs"
+    ],
+    "notes": "Maintain exact CLI behavior and flags while restructuring.",
+    "acceptance": [
+      "main.rs is significantly reduced and readable.",
+      "Command modules compile and tests pass.",
+      "CLI help and JSON contract outputs are unchanged except intentional changes from other tickets."
+    ]
+  },
+  {
+    "id": "REF-004",
+    "title": "Extract shared parsing and normalization utilities",
+    "priority": "P1",
+    "status": "todo",
+    "depends_on": [
+      "GRAPH-001",
+      "QUERY-001",
+      "BASE-001"
+    ],
+    "objective": "Reduce duplicated logic across crates by introducing shared utility modules/crate.",
+    "scope": "Cross-crate utility extraction for tokenization, normalization, and deterministic sorting.",
+    "steps": [
+      "Identify duplicated helpers in links, query, base, and service crates.",
+      "Extract shared helpers into tao-sdk-core or dedicated utility module.",
+      "Replace duplicate call sites with shared utility usage.",
+      "Add unit tests for utility behavior and migration parity checks."
+    ],
+    "files": [
+      "crates/tao-sdk-core/src/",
+      "crates/tao-sdk-links/src/lib.rs",
+      "crates/tao-sdk-search/src/lib.rs"
+    ],
+    "notes": "Do not over-abstract; extract only stable, repeated primitives.",
+    "acceptance": [
+      "Duplicate utility code is reduced across targeted crates.",
+      "Shared utility tests cover canonicalization and deterministic ordering.",
+      "All dependent crates compile and pass tests after extraction."
+    ]
+  }
+]

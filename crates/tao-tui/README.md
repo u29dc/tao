@@ -1,13 +1,33 @@
-# tao-tui
+## Crate
 
-Terminal UI adapter over the Rust SDK stack.
+`tao-tui`
 
-Current status (`TUI-005`):
+## Purpose
 
-- startup route bootstrapped as `placeholder`
-- alternate-screen route shell with keymap (`1`/`2`/`3`/`4`, `q`)
-- command palette via `:` with `route <name>` and `quit` commands
-- notes route loads indexed note windows via SDK bridge and renders selected note content
-- notes selection keymap: `up`/`down` (`k`/`j`), `enter` to reload, `r` to refresh
-- search route supports query input (`/`), result navigation, and open-note handoff into Notes route
-- bases route loads indexed base files, cycles views, paginates rows, and supports table sort toggle
+Provide a minimal terminal shell entrypoint for Tao operations.
+
+## Public API
+
+- Binary: `tao-tui`
+- Placeholder route shell and command palette scaffolding
+
+## Internal Design
+
+- Keeps terminal route handling isolated from SDK service logic.
+- Intended as lightweight adapter, not primary product surface.
+
+## Data Flow
+
+TUI input -> route command handling -> SDK/bridge calls -> terminal rendering.
+
+## Dependencies
+
+- External: `clap`
+
+## Testing
+
+- `cargo test -p tao-tui --release`
+
+## Limits
+
+- Feature scope is intentionally limited compared with CLI and macOS app.

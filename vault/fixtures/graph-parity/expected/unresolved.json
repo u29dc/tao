@@ -1,0 +1,59 @@
+{
+  "items": [
+    {
+      "block_id": null,
+      "heading_slug": null,
+      "is_unresolved": true,
+      "link_id": "link_aee44035ef4d8ee6",
+      "raw_target": "missing-frontmatter",
+      "resolved_file_id": null,
+      "resolved_path": null,
+      "source_field": "frontmatter:related[1]",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": "missing-note"
+    },
+    {
+      "block_id": null,
+      "heading_slug": null,
+      "is_unresolved": true,
+      "link_id": "link_da6a8e47bbd81cb4",
+      "raw_target": "missing-body",
+      "resolved_file_id": null,
+      "resolved_path": null,
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": "missing-note"
+    },
+    {
+      "block_id": null,
+      "heading_slug": "missing-heading",
+      "is_unresolved": true,
+      "link_id": "link_efc17989b92fa72b",
+      "raw_target": "beta",
+      "resolved_file_id": null,
+      "resolved_path": null,
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": "bad-anchor"
+    },
+    {
+      "block_id": "missing-block",
+      "heading_slug": null,
+      "is_unresolved": true,
+      "link_id": "link_f93cf3f0a594e22d",
+      "raw_target": "beta",
+      "resolved_file_id": null,
+      "resolved_path": null,
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": "bad-block"
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "total": 4
+}

@@ -14,11 +14,14 @@
     - `https://www.rust-lang.org/learn`
     - `https://mozilla.github.io/uniffi-rs/latest/`
 - Internal source references:
-    - Architecture and roadmap: `plan/PLAN.md`
+    - Phase guide and roadmap: `plan/README.md`
     - Ticket ledger: `plan/tickets.csv`
     - Run state: `plan/run-state.json`
     - Progress log: `plan/progress.md`
-    - Blockers: `plan/blockers.md`
+    - Execution checklist: `plan/checklists/execution.md`
+    - Review checklist: `plan/checklists/review.md`
+    - Crate README template: `plan/templates/crate-readme-template.md`
+    - Architecture map: `plan/architecture-map.md`
 
 ## 2. Repository Structure
 
@@ -50,6 +53,7 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 
 - `bun run util:clean` -> remove build/runtime artifacts and local install outputs.
 - `bun run util:ffi` -> build bridge and regenerate Swift UniFFI bindings.
+- `bun run util:safety` -> enforce repository-local safety scan (forbidden personal-path markers).
 - `bun run build` -> full release build pipeline (`util:ffi` + `release:cli` + `release:mac`).
 - `bun run release:all` -> unified release pipeline for CLI + macOS app packaging.
 - `bun run release:cli` -> release Rust binaries install + CLI/TUI bundle output.
@@ -179,7 +183,7 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 
 - Fixture generator:
     - `./scripts/fixtures.sh --profile all --seed 42 --output vault/generated`
-    - profiles: `1k`, `5k`, `10k`, `25k`, `all`
+    - profiles: `1k`, `2k`, `5k`, `10k`, `25k`, `all`
 - Validation:
     - built into `./scripts/fixtures.sh` by default
 - Validation invariants:
@@ -189,3 +193,21 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
     - body + frontmatter wikilinks present
     - unresolved ratio within bounded range
     - no personal vault/path leakage markers
+
+## 14. Hard Safety Rule (Non-Negotiable)
+
+- Never access real personal vaults or personal folders for development, benchmarking, or QA.
+- Forbidden paths include all Dropbox/personal roots, especially:
+    - `/Users/han/Library/CloudStorage/Dropbox/**`
+    - `/Users/han/Dropbox/**`
+    - any path outside this repository root for automated test/bench workflows
+- Allowed vault roots for all automated work:
+    - `vault/`
+    - `vault/generated/**`
+    - temporary directories created under this repository root only
+- Enforcement requirements:
+    - benchmark scripts must generate/use repository-local fixtures only
+    - fixtures validation must fail on leaked personal-path markers
+    - CI/quality checks must include forbidden-path scanning
+- Violation policy:
+    - treat any access attempt to forbidden paths as a hard failure and stop execution.

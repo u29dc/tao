@@ -1,0 +1,16 @@
+views:
+  - name: ActiveProjects
+    type: table
+    source: notes/projects
+    filters:
+      - key: status
+        op: eq
+        value: active
+    sorts:
+      - key: priority
+        direction: desc
+    columns:
+      - title
+      - status
+      - priority
+      - owner

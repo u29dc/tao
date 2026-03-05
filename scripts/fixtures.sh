@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${SCRIPT_DIR}/safety.sh"
+
 usage() {
   cat <<USAGE
 Usage: scripts/fixtures.sh [--profile PROFILE] [--notes N] [--seed N] [--output DIR] [--skip-validate]
 
 Profiles:
-  all      Generate vault-1k, vault-5k, vault-10k, vault-25k (default)
+  all      Generate vault-1k, vault-2k, vault-5k, vault-10k, vault-25k (default)
+  parity   Generate graph-parity and base-parity deterministic fixture sets
   1k       Generate vault-1k
+  2k       Generate vault-2k
   5k       Generate vault-5k
   10k      Generate vault-10k
   25k      Generate vault-25k
@@ -75,6 +80,7 @@ if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
 fi
 
 mkdir -p "$OUTPUT_ROOT"
+assert_safe_path "$OUTPUT_ROOT" "fixture output root"
 
 fail_validation() {
   echo "fixture validation failed: $1" >&2
@@ -170,6 +176,7 @@ validate_generated_vault() {
 
 validate_generated_root() {
   local root="$1"
+  assert_safe_path "$root" "fixture validation root"
   while IFS= read -r vault; do
     validate_generated_vault "$vault"
   done <<< "$(list_generated_vaults "$root")"
@@ -453,18 +460,139 @@ TPL
   echo "generated ${name}: notes=${notes_total} seed=${seed} root=${root}"
 }
 
+generate_parity_fixtures() {
+  local root="$1"
+  local graph_root="$root/graph-parity"
+  local base_root="$root/base-parity"
+
+  rm -rf "$graph_root" "$base_root"
+  mkdir -p "$graph_root/notes" "$graph_root/expected"
+  mkdir -p "$base_root/notes/projects" "$base_root/notes/meetings" "$base_root/views"
+
+  cat > "$graph_root/notes/root.md" <<'MD'
+---
+related:
+  - "[[alpha]]"
+  - "[[missing-frontmatter]]"
+---
+# Root
+
+[[alpha]]
+[[beta#Target Heading]]
+[[beta#^block-a]]
+[[beta#Missing Heading]]
+[[beta#^missing-block]]
+[[missing-body]]
+MD
+  cat > "$graph_root/notes/alpha.md" <<'MD'
+# Alpha
+
+[[beta]]
+MD
+  cat > "$graph_root/notes/beta.md" <<'MD'
+# Target Heading
+
+Paragraph content ^block-a
+MD
+  cat > "$graph_root/notes/incoming.md" <<'MD'
+# Incoming
+
+[[deadend]]
+MD
+  cat > "$graph_root/notes/deadend.md" <<'MD'
+# Deadend
+MD
+  cat > "$graph_root/notes/orphan.md" <<'MD'
+# Orphan
+MD
+
+  cat > "$base_root/views/projects.base" <<'BASE'
+views:
+  - name: ActiveProjects
+    type: table
+    source: notes/projects
+    filters:
+      - key: status
+        op: eq
+        value: active
+    sorts:
+      - key: priority
+        direction: desc
+    columns:
+      - title
+      - status
+      - priority
+      - owner
+BASE
+  cat > "$base_root/notes/projects/project-a.md" <<'MD'
+---
+status: active
+priority: 5
+owner: han
+meeting_refs:
+  - "[[meetings/meeting-1.md]]"
+---
+# Project A
+
+Primary project record.
+MD
+  cat > "$base_root/notes/projects/project-b.md" <<'MD'
+---
+status: paused
+priority: 2
+owner: alex
+---
+# Project B
+
+Secondary project record.
+MD
+  cat > "$base_root/notes/meetings/meeting-1.md" <<'MD'
+---
+project: "[[projects/project-a.md]]"
+duration_minutes: 45
+---
+# Meeting 1
+
+Weekly sync.
+MD
+
+  echo "generated parity fixtures in ${root}"
+}
+
+validate_parity_root() {
+  local root="$1"
+  local graph_root="$root/graph-parity"
+  local base_root="$root/base-parity"
+  assert_safe_path "$root" "parity fixture root"
+  [[ -f "$graph_root/notes/root.md" ]] || fail_validation "missing graph parity root note"
+  [[ -f "$graph_root/notes/alpha.md" ]] || fail_validation "missing graph parity alpha note"
+  [[ -f "$base_root/views/projects.base" ]] || fail_validation "missing base parity projects.base"
+  [[ -f "$base_root/notes/projects/project-a.md" ]] || fail_validation "missing base parity project-a"
+  local graph_links
+  graph_links=$(rg -n '\[\[' "$graph_root" -g '*.md' | wc -l | tr -d ' ')
+  (( graph_links > 0 )) || fail_validation "graph parity fixture has no wikilinks"
+  echo "parity fixtures validated at ${root}"
+}
+
 if [[ -n "$NOTES" ]]; then
   generate_profile "vault-custom" "$NOTES" "$SEED"
 else
   case "$PROFILE" in
+    parity)
+      generate_parity_fixtures "${OUTPUT_ROOT}"
+      ;;
     all)
       generate_profile "vault-1k" 1000 "$((SEED + 1000))"
+      generate_profile "vault-2k" 2000 "$((SEED + 2000))"
       generate_profile "vault-5k" 5000 "$((SEED + 5000))"
       generate_profile "vault-10k" 10000 "$((SEED + 10000))"
       generate_profile "vault-25k" 25000 "$((SEED + 25000))"
       ;;
     1k)
       generate_profile "vault-1k" 1000 "$SEED"
+      ;;
+    2k)
+      generate_profile "vault-2k" 2000 "$SEED"
       ;;
     5k)
       generate_profile "vault-5k" 5000 "$SEED"
@@ -484,5 +612,9 @@ fi
 
 echo "fixtures generated in ${OUTPUT_ROOT}"
 if [[ "${VALIDATE}" -eq 1 ]]; then
-  validate_generated_root "${OUTPUT_ROOT}"
+  if [[ "${PROFILE}" == "parity" ]]; then
+    validate_parity_root "${OUTPUT_ROOT}"
+  else
+    validate_generated_root "${OUTPUT_ROOT}"
+  fi
 fi
