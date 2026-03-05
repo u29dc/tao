@@ -166,7 +166,8 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 
 - Now:
     - compact CLI IA
-    - frontmatter + body wikilink indexing parity
+    - frontmatter wikilinks + body wikilinks/markdown-links/embeds indexing parity
+    - scoped inbound attachment/file audits via `graph inbound-scope`
     - graph diagnostics/traversal (`unresolved`, `deadends`, `orphans`, `components`, `walk`)
     - metadata aggregations (`properties`, `tags`, `aliases`, `tasks`)
     - task extraction + state transitions with write gate

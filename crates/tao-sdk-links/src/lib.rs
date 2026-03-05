@@ -1,7 +1,8 @@
-//! Wikilink parsing and extraction primitives.
+//! Markdown/wikilink parsing and deterministic link-resolution primitives.
 
 use std::collections::{BTreeSet, HashMap};
 
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use tao_sdk_core::{cmp_normalized_paths, normalize_path_like};
 use thiserror::Error;
 
@@ -74,6 +75,56 @@ pub fn extract_wikilinks(markdown: &str) -> Vec<WikiLink> {
     links
 }
 
+/// Parsed markdown inline link or embed target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownLink {
+    /// Raw destination token as emitted by markdown parser.
+    pub raw_target: String,
+    /// Normalized vault-relative target path candidate (fragment/query removed).
+    pub target: String,
+    /// True when source token was an image/embed (`![alt](target)`).
+    pub is_embed: bool,
+}
+
+/// Extract markdown links and embeds from markdown text.
+///
+/// This parser supports inline markdown links/embeds and excludes external URL schemes.
+#[must_use]
+pub fn extract_markdown_links(markdown: &str) -> Vec<MarkdownLink> {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(markdown, options);
+    let mut links = Vec::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if let Some(target) = normalize_markdown_target(dest_url.as_ref()) {
+                    links.push(MarkdownLink {
+                        raw_target: dest_url.into_string(),
+                        target,
+                        is_embed: false,
+                    });
+                }
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                if let Some(target) = normalize_markdown_target(dest_url.as_ref()) {
+                    links.push(MarkdownLink {
+                        raw_target: dest_url.into_string(),
+                        target,
+                        is_embed: true,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    links
+}
+
 /// Deterministic resolution result for a wikilink target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkResolution {
@@ -113,12 +164,22 @@ pub fn resolve_target(
     let target = parse_wikilink(raw_target)
         .map(|link| link.target)
         .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
-    let target = normalize_path_like(&target);
+    let Some(target) = normalize_resolution_target(&target) else {
+        return LinkResolution {
+            resolved_path: None,
+            matched_candidates: Vec::new(),
+            is_ambiguous: false,
+        };
+    };
 
     let mut matched_candidates = Vec::new();
     if target.contains('/') {
+        let source_dir = source_path.map(parent_dir);
+        let resolved_variants = resolve_target_variants(&target, source_dir.as_deref());
         for candidate in candidates {
-            if normalized_candidate_equals_target(candidate, &target) {
+            if resolved_variants.iter().any(|resolved_target| {
+                normalized_candidate_equals_target(candidate, resolved_target)
+            }) {
                 matched_candidates.push(candidate.clone());
             }
         }
@@ -321,6 +382,119 @@ pub fn resolve_block_target(
     }
 }
 
+fn normalize_markdown_target(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(raw.trim());
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_external_target(trimmed) {
+        return None;
+    }
+
+    let without_fragment = trimmed.split_once('#').map_or(trimmed, |(path, _)| path);
+    let without_query = without_fragment
+        .split_once('?')
+        .map_or(without_fragment, |(path, _)| path);
+    let decoded = decode_percent(without_query);
+    normalize_resolution_target(&decoded)
+}
+
+fn normalize_resolution_target(raw: &str) -> Option<String> {
+    let normalized = normalize_path_like(raw);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn is_external_target(target: &str) -> bool {
+    if target.starts_with("//") {
+        return true;
+    }
+    let Some(colon_index) = target.find(':') else {
+        return false;
+    };
+    if colon_index == 1 {
+        let bytes = target.as_bytes();
+        let drive = bytes[0].is_ascii_alphabetic();
+        let has_windows_separator = bytes
+            .get(2)
+            .is_some_and(|byte| *byte == b'/' || *byte == b'\\');
+        if drive && has_windows_separator {
+            return false;
+        }
+    }
+    if colon_index == 0 {
+        return false;
+    }
+    target[..colon_index]
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+}
+
+fn decode_percent(input: &str) -> String {
+    let mut bytes = Vec::<u8>::with_capacity(input.len());
+    let mut index = 0_usize;
+    let source = input.as_bytes();
+
+    while index < source.len() {
+        if source[index] == b'%' && index + 2 < source.len() {
+            let hi = source[index + 1] as char;
+            let lo = source[index + 2] as char;
+            if let (Some(hi), Some(lo)) = (hex_value(hi), hex_value(lo)) {
+                bytes.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        bytes.push(source[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+fn hex_value(value: char) -> Option<u8> {
+    match value {
+        '0'..='9' => Some((value as u8) - b'0'),
+        'a'..='f' => Some((value as u8) - b'a' + 10),
+        'A'..='F' => Some((value as u8) - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn resolve_target_variants(target: &str, source_dir: Option<&str>) -> Vec<String> {
+    let mut variants = vec![collapse_dot_segments(target)];
+    if let Some(source_dir) = source_dir {
+        let combined = if source_dir.is_empty() {
+            target.to_string()
+        } else {
+            format!("{source_dir}/{target}")
+        };
+        variants.push(collapse_dot_segments(&combined));
+    }
+    variants.sort();
+    variants.dedup();
+    variants
+}
+
+fn collapse_dot_segments(path: &str) -> String {
+    let normalized = normalize_path_like(path);
+    let mut parts = Vec::<&str>::new();
+    for segment in normalized.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            let _ = parts.pop();
+            continue;
+        }
+        parts.push(segment);
+    }
+    parts.join("/")
+}
+
 fn strip_wikilink_wrappers(value: &str) -> &str {
     value
         .strip_prefix("[[")
@@ -453,8 +627,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        WikiLinkParseError, extract_block_ids, extract_wikilinks, parse_wikilink,
-        resolve_block_target, resolve_heading_target, resolve_target, slugify_heading,
+        WikiLinkParseError, extract_block_ids, extract_markdown_links, extract_wikilinks,
+        parse_wikilink, resolve_block_target, resolve_heading_target, resolve_target,
+        slugify_heading,
     };
 
     #[test]
@@ -491,6 +666,29 @@ mod tests {
         assert_eq!(links[0].target, "note-one");
         assert_eq!(links[1].display.as_deref(), Some("second"));
         assert_eq!(links[2].heading.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn extract_markdown_links_supports_inline_and_embed_forms() {
+        let markdown = r#"
+[inline](notes/a.md)
+![image](assets/logo.png)
+[external](https://example.com)
+"#;
+        let links = extract_markdown_links(markdown);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].target, "notes/a.md");
+        assert!(!links[0].is_embed);
+        assert_eq!(links[1].target, "assets/logo.png");
+        assert!(links[1].is_embed);
+    }
+
+    #[test]
+    fn extract_markdown_links_decodes_percent_and_preserves_relative_segments() {
+        let markdown = r#"[attachment](../docs/Tax%20Return%202025.pdf#page=1)"#;
+        let links = extract_markdown_links(markdown);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "../docs/Tax Return 2025.pdf");
     }
 
     #[test]
@@ -539,6 +737,24 @@ mod tests {
         );
         assert!(!resolution.is_ambiguous);
         assert_eq!(resolution.matched_candidates, vec!["notes/project/beta.md"]);
+    }
+
+    #[test]
+    fn resolve_target_handles_relative_non_markdown_targets() {
+        let candidates = vec![
+            "notes/attachments/company-deck.pdf".to_string(),
+            "notes/attachments/other.pdf".to_string(),
+        ];
+        let resolution = resolve_target(
+            "../attachments/company-deck.pdf",
+            Some("notes/current/source.md"),
+            &candidates,
+        );
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some("notes/attachments/company-deck.pdf")
+        );
+        assert!(!resolution.is_ambiguous);
     }
 
     #[test]

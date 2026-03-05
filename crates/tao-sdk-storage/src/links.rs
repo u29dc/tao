@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use thiserror::Error;
 
 /// Persisted row model for `links` table.
@@ -20,7 +20,7 @@ pub struct LinkRecord {
     pub is_unresolved: bool,
     /// Stable unresolved reason code when unresolved.
     pub unresolved_reason: Option<String>,
-    /// Link provenance field (`body` or `frontmatter:<field>`).
+    /// Link provenance field (`body`, `body:markdown`, `body:embed`, or `frontmatter:<field>`).
     pub source_field: String,
     /// Creation timestamp.
     pub created_at: String,
@@ -45,7 +45,7 @@ pub struct LinkRecordInput {
     pub is_unresolved: bool,
     /// Stable unresolved reason code when unresolved.
     pub unresolved_reason: Option<String>,
-    /// Link provenance field (`body` or `frontmatter:<field>`).
+    /// Link provenance field (`body`, `body:markdown`, `body:embed`, or `frontmatter:<field>`).
     pub source_field: String,
 }
 
@@ -72,7 +72,7 @@ pub struct LinkWithPaths {
     pub is_unresolved: bool,
     /// Stable unresolved reason code when unresolved.
     pub unresolved_reason: Option<String>,
-    /// Link provenance field (`body` or `frontmatter:<field>`).
+    /// Link provenance field (`body`, `body:markdown`, `body:embed`, or `frontmatter:<field>`).
     pub source_field: String,
 }
 
@@ -96,6 +96,30 @@ pub struct GraphNodeDegree {
     pub incoming_resolved: u64,
     /// Count of resolved outgoing edges.
     pub outgoing_resolved: u64,
+}
+
+/// Scoped inbound-link row for attachment and file-audit workflows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedInboundRow {
+    /// Stable file identifier.
+    pub file_id: String,
+    /// Normalized file path.
+    pub path: String,
+    /// Whether file is markdown.
+    pub is_markdown: bool,
+    /// Number of resolved inbound links.
+    pub inbound_resolved: u64,
+}
+
+/// Scoped inbound-link aggregate summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedInboundSummary {
+    /// Total files matched by scope/filter constraints.
+    pub total_files: u64,
+    /// Files with inbound link count > 0.
+    pub linked_files: u64,
+    /// Files with inbound link count == 0.
+    pub unlinked_files: u64,
 }
 
 /// Repository operations over `links` table.
@@ -682,6 +706,146 @@ ORDER BY l.link_id ASC
         })
         .collect()
     }
+
+    /// Return scoped inbound-link summary counts.
+    pub fn summarize_scoped_inbound(
+        connection: &Connection,
+        scope_prefix: &str,
+        include_markdown: bool,
+        include_non_markdown: bool,
+        exclude_prefixes: &[String],
+    ) -> Result<ScopedInboundSummary, LinksRepositoryError> {
+        let (scope_clause, mut parameters) = scoped_filter_clause(
+            scope_prefix,
+            include_markdown,
+            include_non_markdown,
+            exclude_prefixes,
+        );
+        let query = format!(
+            r#"
+WITH inbound AS (
+  SELECT
+    resolved_file_id AS file_id,
+    COUNT(*) AS inbound_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY resolved_file_id
+),
+scoped AS (
+  SELECT
+    f.file_id AS file_id,
+    f.normalized_path AS path,
+    f.is_markdown AS is_markdown,
+    COALESCE(i.inbound_resolved, 0) AS inbound_resolved
+  FROM files f
+  LEFT JOIN inbound i ON i.file_id = f.file_id
+  WHERE {scope_clause}
+)
+SELECT
+  COUNT(*) AS total_files,
+  COALESCE(SUM(CASE WHEN inbound_resolved > 0 THEN 1 ELSE 0 END), 0) AS linked_files,
+  COALESCE(SUM(CASE WHEN inbound_resolved = 0 THEN 1 ELSE 0 END), 0) AS unlinked_files
+FROM scoped
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&query)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_summarize_scoped_inbound",
+                    source,
+                })?;
+        statement
+            .query_row(params_from_iter(parameters.drain(..)), |row| {
+                Ok(ScopedInboundSummary {
+                    total_files: row.get("total_files")?,
+                    linked_files: row.get("linked_files")?,
+                    unlinked_files: row.get("unlinked_files")?,
+                })
+            })
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "summarize_scoped_inbound",
+                source,
+            })
+    }
+
+    /// Return one scoped inbound-link page in deterministic path order.
+    pub fn list_scoped_inbound_window(
+        connection: &Connection,
+        scope_prefix: &str,
+        include_markdown: bool,
+        include_non_markdown: bool,
+        exclude_prefixes: &[String],
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<ScopedInboundRow>, LinksRepositoryError> {
+        let (scope_clause, mut parameters) = scoped_filter_clause(
+            scope_prefix,
+            include_markdown,
+            include_non_markdown,
+            exclude_prefixes,
+        );
+        parameters.push(Value::Integer(i64::from(limit)));
+        parameters.push(Value::Integer(i64::from(offset)));
+
+        let limit_index = parameters.len() - 1;
+        let offset_index = parameters.len();
+        let query = format!(
+            r#"
+WITH inbound AS (
+  SELECT
+    resolved_file_id AS file_id,
+    COUNT(*) AS inbound_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY resolved_file_id
+),
+scoped AS (
+  SELECT
+    f.file_id AS file_id,
+    f.normalized_path AS path,
+    f.is_markdown AS is_markdown,
+    COALESCE(i.inbound_resolved, 0) AS inbound_resolved
+  FROM files f
+  LEFT JOIN inbound i ON i.file_id = f.file_id
+  WHERE {scope_clause}
+)
+SELECT
+  file_id,
+  path,
+  is_markdown,
+  inbound_resolved
+FROM scoped
+ORDER BY path ASC
+LIMIT ?{limit_index} OFFSET ?{offset_index}
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&query)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_scoped_inbound_window",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params_from_iter(parameters.drain(..)),
+                row_to_scoped_inbound_row,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_scoped_inbound_window",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_scoped_inbound_window_row",
+                source,
+            })
+        })
+        .collect()
+    }
 }
 
 fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
@@ -726,6 +890,70 @@ fn row_to_graph_node_degree(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphNo
         incoming_resolved: row.get("incoming_resolved")?,
         outgoing_resolved: row.get("outgoing_resolved")?,
     })
+}
+
+fn row_to_scoped_inbound_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScopedInboundRow> {
+    let is_markdown: i64 = row.get("is_markdown")?;
+    Ok(ScopedInboundRow {
+        file_id: row.get("file_id")?,
+        path: row.get("path")?,
+        is_markdown: is_markdown != 0,
+        inbound_resolved: row.get("inbound_resolved")?,
+    })
+}
+
+fn scoped_filter_clause(
+    scope_prefix: &str,
+    include_markdown: bool,
+    include_non_markdown: bool,
+    exclude_prefixes: &[String],
+) -> (String, Vec<Value>) {
+    let scope = normalize_scope_prefix(scope_prefix);
+    let include_markdown_value = if include_markdown { 1_i64 } else { 0_i64 };
+    let include_non_markdown_value = if include_non_markdown { 1_i64 } else { 0_i64 };
+
+    let mut parameters = Vec::<Value>::new();
+    let mut clause_parts = Vec::<String>::new();
+
+    if scope.is_empty() {
+        clause_parts.push("1 = 1".to_string());
+    } else {
+        let exact_index = parameters.len() + 1;
+        parameters.push(Value::Text(scope.clone()));
+        let nested_index = parameters.len() + 1;
+        parameters.push(Value::Text(format!("{scope}/%")));
+        clause_parts.push(format!(
+            "(f.normalized_path = ?{exact_index} OR f.normalized_path LIKE ?{nested_index})"
+        ));
+    }
+
+    let markdown_index = parameters.len() + 1;
+    parameters.push(Value::Integer(include_markdown_value));
+    let non_markdown_index = parameters.len() + 1;
+    parameters.push(Value::Integer(include_non_markdown_value));
+    clause_parts.push(format!(
+        "((f.is_markdown = 1 AND ?{markdown_index} = 1) OR (f.is_markdown = 0 AND ?{non_markdown_index} = 1))"
+    ));
+
+    for prefix in exclude_prefixes {
+        let normalized = normalize_scope_prefix(prefix);
+        if normalized.is_empty() {
+            continue;
+        }
+        let exact_index = parameters.len() + 1;
+        parameters.push(Value::Text(normalized.clone()));
+        let nested_index = parameters.len() + 1;
+        parameters.push(Value::Text(format!("{normalized}/%")));
+        clause_parts.push(format!(
+            "(f.normalized_path != ?{exact_index} AND f.normalized_path NOT LIKE ?{nested_index})"
+        ));
+    }
+
+    (clause_parts.join(" AND "), parameters)
+}
+
+fn normalize_scope_prefix(raw: &str) -> String {
+    raw.trim().trim_matches('/').replace('\\', "/")
 }
 
 fn in_clause_placeholders(count: usize, start_index: usize) -> String {
@@ -989,5 +1217,82 @@ mod tests {
         );
         assert_eq!(unresolved[1].source_field, "frontmatter:related");
         assert!(unresolved.iter().all(|row| row.is_unresolved));
+    }
+
+    #[test]
+    fn scoped_inbound_queries_support_attachment_audits() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(&connection, &file("note-index", "notes/index.md"))
+            .expect("insert index note");
+        FilesRepository::insert(&connection, &file("note-source", "notes/source.md"))
+            .expect("insert source note");
+        FilesRepository::insert(
+            &connection,
+            &file("asset-linked", "notes/assets/linked.pdf"),
+        )
+        .expect("insert linked asset");
+        FilesRepository::insert(
+            &connection,
+            &file("asset-orphan", "notes/assets/orphan.pdf"),
+        )
+        .expect("insert orphan asset");
+        FilesRepository::insert(&connection, &file("other", "archive/old.pdf"))
+            .expect("insert out-of-scope asset");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-linked".to_string(),
+                source_file_id: "note-source".to_string(),
+                raw_target: "assets/linked.pdf".to_string(),
+                resolved_file_id: Some("asset-linked".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:markdown".to_string(),
+            },
+        )
+        .expect("insert linked edge");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-index".to_string(),
+                source_file_id: "note-index".to_string(),
+                raw_target: "source".to_string(),
+                resolved_file_id: Some("note-source".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert note edge");
+
+        let summary =
+            LinksRepository::summarize_scoped_inbound(&connection, "notes", false, true, &[])
+                .expect("summarize scoped inbound");
+        assert_eq!(summary.total_files, 2);
+        assert_eq!(summary.linked_files, 1);
+        assert_eq!(summary.unlinked_files, 1);
+
+        let rows = LinksRepository::list_scoped_inbound_window(
+            &connection,
+            "notes",
+            false,
+            true,
+            &[],
+            10,
+            0,
+        )
+        .expect("page scoped inbound");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "notes/assets/linked.pdf");
+        assert_eq!(rows[0].inbound_resolved, 1);
+        assert_eq!(rows[1].path, "notes/assets/orphan.pdf");
+        assert_eq!(rows[1].inbound_resolved, 0);
     }
 }

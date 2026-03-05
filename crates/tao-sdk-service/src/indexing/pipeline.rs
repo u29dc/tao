@@ -9,8 +9,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tao_sdk_links::{
-    WikiLink, extract_block_ids, extract_wikilinks, resolve_block_target, resolve_heading_target,
-    resolve_target, slugify_heading,
+    WikiLink, extract_block_ids, extract_markdown_links, extract_wikilinks, resolve_block_target,
+    resolve_heading_target, resolve_target, slugify_heading,
 };
 use tao_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
 use tao_sdk_properties::{
@@ -72,6 +72,11 @@ impl FullIndexService {
             source: Box::new(source),
         })?;
 
+        let resolution_candidates: Vec<String> = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.normalized.clone())
+            .collect();
         let markdown_candidates: Vec<String> = manifest
             .entries
             .iter()
@@ -138,7 +143,7 @@ impl FullIndexService {
             .map(|document| {
                 resolve_document_link_records(
                     document,
-                    &markdown_candidates,
+                    &resolution_candidates,
                     &file_id_by_path,
                     &heading_index,
                     &block_index,
@@ -343,26 +348,33 @@ impl IncrementalIndexService {
             }
         })?;
         let mut markdown_candidates = Vec::new();
+        let mut resolution_candidates = Vec::new();
         let mut file_id_by_path = HashMap::<String, String>::new();
         for record in existing_records {
             if record.is_markdown {
                 markdown_candidates.push(record.normalized_path.clone());
             }
+            resolution_candidates.push(record.normalized_path.clone());
             file_id_by_path.insert(record.normalized_path, record.file_id);
         }
         for changed_path in changed_paths {
             let normalized = normalize_changed_path(changed_path)?;
             let absolute = vault_root.join(changed_path);
             if absolute.exists() && normalized.ends_with(".md") {
-                markdown_candidates.push(normalized);
+                markdown_candidates.push(normalized.clone());
                 let lookup_key = normalize_changed_path(changed_path)?;
                 file_id_by_path
                     .entry(lookup_key.clone())
                     .or_insert_with(|| deterministic_id("file", &lookup_key));
             }
+            if absolute.exists() {
+                resolution_candidates.push(normalized);
+            }
         }
         markdown_candidates.sort();
         markdown_candidates.dedup();
+        resolution_candidates.sort();
+        resolution_candidates.dedup();
         let mut heading_index =
             build_heading_index(vault_root, &markdown_candidates, &self.parser)?;
         let mut block_index = build_block_index(vault_root, &markdown_candidates, &self.parser)?;
@@ -528,6 +540,10 @@ impl IncrementalIndexService {
                         markdown_candidates.push(normalized.clone());
                         markdown_candidates.sort();
                     }
+                    if !resolution_candidates.iter().any(|path| path == &normalized) {
+                        resolution_candidates.push(normalized.clone());
+                        resolution_candidates.sort();
+                    }
                     let mut heading_slugs = parsed
                         .headings
                         .iter()
@@ -541,7 +557,7 @@ impl IncrementalIndexService {
 
                     let link_records = build_incremental_link_records(
                         &LinkResolutionContext {
-                            markdown_candidates: &markdown_candidates,
+                            resolution_candidates: &resolution_candidates,
                             file_id_by_path: &file_id_by_path,
                             heading_index: &heading_index,
                             block_index: &block_index,
@@ -594,6 +610,7 @@ impl IncrementalIndexService {
                     heading_index.remove(&normalized);
                     block_index.remove(&normalized);
                 }
+                resolution_candidates.retain(|candidate| candidate != &normalized);
                 file_id_by_path.remove(&normalized);
                 removed_files += 1;
             }
@@ -605,7 +622,7 @@ impl IncrementalIndexService {
             .filter(|link| {
                 stored_link_requires_refresh(
                     link,
-                    &markdown_candidates,
+                    &resolution_candidates,
                     &file_id_by_path,
                     &heading_index,
                     &block_index,
@@ -652,7 +669,7 @@ impl IncrementalIndexService {
                 })?;
             let link_records = build_incremental_link_records(
                 &LinkResolutionContext {
-                    markdown_candidates: &markdown_candidates,
+                    resolution_candidates: &resolution_candidates,
                     file_id_by_path: &file_id_by_path,
                     heading_index: &heading_index,
                     block_index: &block_index,
@@ -1931,6 +1948,24 @@ struct ResolvedLinkBatch {
 struct IndexedWikiLink {
     link: WikiLink,
     source: String,
+    kind: IndexedLinkKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum IndexedLinkKind {
+    Wikilink,
+    Markdown,
+    Embed,
+}
+
+impl IndexedLinkKind {
+    fn source_field(self, source: &str) -> String {
+        match self {
+            Self::Wikilink => source.to_string(),
+            Self::Markdown => "body:markdown".to_string(),
+            Self::Embed => "body:embed".to_string(),
+        }
+    }
 }
 
 fn hash_file_blake3(path: &Path) -> Result<String, std::io::Error> {
@@ -2327,7 +2362,7 @@ fn build_task_records(file_id: &str, source_path: &str, markdown: &str) -> Vec<T
 }
 
 struct LinkResolutionContext<'a> {
-    markdown_candidates: &'a [String],
+    resolution_candidates: &'a [String],
     file_id_by_path: &'a HashMap<String, String>,
     heading_index: &'a HashMap<String, Vec<String>>,
     block_index: &'a HashMap<String, Vec<String>>,
@@ -2346,7 +2381,11 @@ fn build_incremental_link_records(
         .enumerate()
     {
         let link = &indexed_link.link;
-        let resolution = resolve_target(&link.raw, Some(source_path), context.markdown_candidates);
+        let resolution = resolve_target(
+            &link.target,
+            Some(source_path),
+            context.resolution_candidates,
+        );
         let mut resolved_file_id = resolution
             .resolved_path
             .as_ref()
@@ -2400,7 +2439,7 @@ fn build_incremental_link_records(
             block_id,
             is_unresolved,
             unresolved_reason,
-            source_field: indexed_link.source.clone(),
+            source_field: indexed_link.kind.source_field(&indexed_link.source),
         });
     }
     records
@@ -2408,7 +2447,7 @@ fn build_incremental_link_records(
 
 fn stored_link_requires_refresh(
     link: &LinkWithPaths,
-    markdown_candidates: &[String],
+    resolution_candidates: &[String],
     file_id_by_path: &HashMap<String, String>,
     heading_index: &HashMap<String, Vec<String>>,
     block_index: &HashMap<String, Vec<String>>,
@@ -2416,7 +2455,7 @@ fn stored_link_requires_refresh(
     let resolution = resolve_target(
         &link.raw_target,
         Some(&link.source_path),
-        markdown_candidates,
+        resolution_candidates,
     );
     let mut resolved_file_id = resolution
         .resolved_path
@@ -2485,6 +2524,26 @@ fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
         links.push(IndexedWikiLink {
             link,
             source: "body".to_string(),
+            kind: IndexedLinkKind::Wikilink,
+        });
+    }
+
+    for markdown_link in extract_markdown_links(body) {
+        links.push(IndexedWikiLink {
+            link: WikiLink {
+                raw: markdown_link.raw_target,
+                target: markdown_link.target,
+                display: None,
+                heading: None,
+                block: None,
+                has_explicit_path: true,
+            },
+            source: "body".to_string(),
+            kind: if markdown_link.is_embed {
+                IndexedLinkKind::Embed
+            } else {
+                IndexedLinkKind::Markdown
+            },
         });
     }
 
@@ -2497,6 +2556,7 @@ fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
     links.sort_by(|left, right| {
         (
             left.source.as_str(),
+            left.kind,
             left.link.raw.as_str(),
             left.link.target.as_str(),
             left.link.heading.as_deref().unwrap_or(""),
@@ -2504,6 +2564,7 @@ fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
         )
             .cmp(&(
                 right.source.as_str(),
+                right.kind,
                 right.link.raw.as_str(),
                 right.link.target.as_str(),
                 right.link.heading.as_deref().unwrap_or(""),
@@ -2512,6 +2573,7 @@ fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
     });
     links.dedup_by(|left, right| {
         left.source == right.source
+            && left.kind == right.kind
             && left.link.raw == right.link.raw
             && left.link.target == right.link.target
             && left.link.heading == right.link.heading
@@ -2532,6 +2594,7 @@ fn collect_frontmatter_links(
                 links.push(IndexedWikiLink {
                     link,
                     source: format!("frontmatter:{path}"),
+                    kind: IndexedLinkKind::Wikilink,
                 });
             }
         }
@@ -2682,7 +2745,7 @@ fn build_prepared_index_entry(
 
 fn resolve_document_link_records(
     document: &MarkdownIndexDocument,
-    markdown_candidates: &[String],
+    resolution_candidates: &[String],
     file_id_by_path: &HashMap<String, String>,
     heading_index: &HashMap<String, Vec<String>>,
     block_index: &HashMap<String, Vec<String>>,
@@ -2692,8 +2755,11 @@ fn resolve_document_link_records(
 
     for (index, indexed_link) in document.links.iter().enumerate() {
         let link = &indexed_link.link;
-        let resolution =
-            resolve_target(&link.raw, Some(&document.source_path), markdown_candidates);
+        let resolution = resolve_target(
+            &link.target,
+            Some(&document.source_path),
+            resolution_candidates,
+        );
 
         let mut resolved_file_id = resolution
             .resolved_path
@@ -2753,7 +2819,7 @@ fn resolve_document_link_records(
             block_id,
             is_unresolved,
             unresolved_reason,
-            source_field: indexed_link.source.clone(),
+            source_field: indexed_link.kind.source_field(&indexed_link.source),
         });
     }
 
@@ -3785,6 +3851,98 @@ mod tests {
                 .expect("list b backlinks");
         assert_eq!(backlinks_b.len(), 1);
         assert_eq!(backlinks_b[0].source_path, "notes/a.md");
+    }
+
+    #[test]
+    fn markdown_links_and_embeds_resolve_to_non_markdown_targets() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes/assets")).expect("create notes/assets");
+        fs::write(
+            temp.path().join("notes/index.md"),
+            "# Index\n[Deck](assets/company%20deck.pdf#page=2)\n![Photo](assets/image.png)",
+        )
+        .expect("write index");
+        fs::write(temp.path().join("notes/assets/company deck.pdf"), "pdf").expect("write pdf");
+        fs::write(temp.path().join("notes/assets/image.png"), "png").expect("write png");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("full index");
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/index.md")
+            .expect("get source")
+            .expect("source exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("outgoing");
+        assert_eq!(outgoing.len(), 2);
+        assert!(outgoing.iter().all(|row| !row.is_unresolved));
+        assert!(outgoing.iter().any(|row| {
+            row.source_field == "body:markdown"
+                && row.resolved_path.as_deref() == Some("notes/assets/company deck.pdf")
+        }));
+        assert!(outgoing.iter().any(|row| {
+            row.source_field == "body:embed"
+                && row.resolved_path.as_deref() == Some("notes/assets/image.png")
+        }));
+
+        let linked_pdf =
+            FilesRepository::get_by_normalized_path(&connection, "notes/assets/company deck.pdf")
+                .expect("get pdf")
+                .expect("pdf exists");
+        let backlinks_pdf =
+            LinksRepository::list_backlinks_with_paths(&connection, &linked_pdf.file_id)
+                .expect("pdf backlinks");
+        assert_eq!(backlinks_pdf.len(), 1);
+        assert_eq!(backlinks_pdf[0].source_path, "notes/index.md");
+    }
+
+    #[test]
+    fn incremental_reindex_refreshes_markdown_attachment_links() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes/assets")).expect("create notes/assets");
+        fs::write(
+            temp.path().join("notes/index.md"),
+            "# Index\n[Deck](assets/company-deck.pdf)",
+        )
+        .expect("write index");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let source = FilesRepository::get_by_normalized_path(&connection, "notes/index.md")
+            .expect("get source")
+            .expect("source exists");
+        let outgoing_before =
+            LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+                .expect("list outgoing before");
+        assert_eq!(outgoing_before.len(), 1);
+        assert!(outgoing_before[0].is_unresolved);
+
+        fs::write(temp.path().join("notes/assets/company-deck.pdf"), "pdf").expect("write pdf");
+        IncrementalIndexService::default()
+            .apply_changes(
+                temp.path(),
+                &mut connection,
+                &[PathBuf::from("notes/assets/company-deck.pdf")],
+                CasePolicy::Sensitive,
+            )
+            .expect("reindex attachment");
+
+        let outgoing_after =
+            LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+                .expect("list outgoing after");
+        assert_eq!(outgoing_after.len(), 1);
+        assert!(!outgoing_after[0].is_unresolved);
+        assert_eq!(
+            outgoing_after[0].resolved_path.as_deref(),
+            Some("notes/assets/company-deck.pdf")
+        );
+        assert_eq!(outgoing_after[0].source_field, "body:markdown");
     }
 
     #[test]

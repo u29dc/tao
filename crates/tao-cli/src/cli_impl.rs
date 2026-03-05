@@ -28,9 +28,9 @@ use tao_sdk_search::{
     parse_where_expression_opt,
 };
 use tao_sdk_service::{
-    BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphWalkDirection,
-    GraphWalkRequest, HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
-    ensure_runtime_paths,
+    BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
+    GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
+    SdkConfigLoader, SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, TasksRepository,
@@ -126,6 +126,8 @@ enum GraphCommands {
     Outgoing(NotePathArgs),
     /// Return backlinks for one note.
     Backlinks(NotePathArgs),
+    /// Return scoped inbound-link counts for file audits.
+    InboundScope(GraphInboundScopeArgs),
     /// Return unresolved graph links.
     Unresolved(GraphWindowArgs),
     /// Return notes with no outgoing resolved edges.
@@ -278,6 +280,34 @@ struct GraphWindowArgs {
     /// Optional sqlite database file path override.
     #[arg(long)]
     db_path: Option<String>,
+    /// Window size.
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    /// Window offset.
+    #[arg(long, default_value_t = 0)]
+    offset: u32,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct GraphInboundScopeArgs {
+    /// Optional absolute vault root path. Falls back to config/env defaults.
+    #[arg(long)]
+    vault_root: Option<String>,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    db_path: Option<String>,
+    /// Vault-relative folder/file prefix to audit.
+    #[arg(long)]
+    scope: String,
+    /// Include markdown files in scoped audit.
+    #[arg(long, default_value_t = false)]
+    include_markdown: bool,
+    /// Include non-markdown files in scoped audit.
+    #[arg(long, default_value_t = false)]
+    include_non_md: bool,
+    /// Optional exclude path prefixes (repeatable).
+    #[arg(long)]
+    exclude_prefix: Vec<String>,
     /// Window size.
     #[arg(long, default_value_t = 100)]
     limit: u32,
@@ -534,6 +564,12 @@ impl BaseSchemaArgs {
 }
 
 impl GraphWindowArgs {
+    fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
+    }
+}
+
+impl GraphInboundScopeArgs {
     fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
@@ -1613,6 +1649,83 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 args: serde_json::json!({
                     "path": args.path,
                     "total": items.len(),
+                    "items": items,
+                }),
+            })
+        }
+        GraphCommands::InboundScope(args) => {
+            if !args.include_markdown && !args.include_non_md {
+                return Err(anyhow!(
+                    "graph inbound-scope requires at least one file-kind selector: --include-markdown and/or --include-non-md"
+                ));
+            }
+
+            let resolved = args.resolve()?;
+            let mut scope = args.scope.trim().trim_matches('/').replace('\\', "/");
+            if scope == "." {
+                scope.clear();
+            }
+            if !scope.is_empty() {
+                validate_relative_vault_path(&scope)
+                    .map_err(|source| anyhow!("invalid --scope '{}': {source}", args.scope))?;
+            }
+
+            let mut exclude_prefixes = Vec::<String>::new();
+            for prefix in &args.exclude_prefix {
+                let mut normalized = prefix.trim().trim_matches('/').replace('\\', "/");
+                if normalized == "." {
+                    normalized.clear();
+                }
+                if normalized.is_empty() {
+                    continue;
+                }
+                validate_relative_vault_path(&normalized)
+                    .map_err(|source| anyhow!("invalid --exclude-prefix '{}': {source}", prefix))?;
+                exclude_prefixes.push(normalized);
+            }
+            exclude_prefixes.sort();
+            exclude_prefixes.dedup();
+
+            let (summary, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.scoped_inbound_page(
+                    connection,
+                    &GraphScopedInboundRequest {
+                        scope_prefix: scope.clone(),
+                        include_markdown: args.include_markdown,
+                        include_non_markdown: args.include_non_md,
+                        exclude_prefixes: exclude_prefixes.clone(),
+                        limit: args.limit,
+                        offset: args.offset,
+                    },
+                )?)
+            })
+            .map_err(|source| anyhow!("graph inbound-scope failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "file_id": row.file_id,
+                        "path": row.path,
+                        "is_markdown": row.is_markdown,
+                        "inbound_resolved": row.inbound_resolved,
+                        "linked": row.inbound_resolved > 0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "graph.inbound-scope".to_string(),
+                summary: "graph inbound-scope completed".to_string(),
+                args: serde_json::json!({
+                    "scope": scope,
+                    "include_markdown": args.include_markdown,
+                    "include_non_md": args.include_non_md,
+                    "exclude_prefixes": exclude_prefixes,
+                    "total_files": summary.total_files,
+                    "linked_files": summary.linked_files,
+                    "unlinked_files": summary.unlinked_files,
+                    "total": summary.total_files,
+                    "limit": args.limit,
+                    "offset": args.offset,
                     "items": items,
                 }),
             })
@@ -2887,6 +3000,7 @@ fn resolve_command_vault_paths(command: &Commands) -> Result<Option<ResolvedVaul
         Commands::Graph { command } => match command {
             GraphCommands::Outgoing(args) => args.resolve()?,
             GraphCommands::Backlinks(args) => args.resolve()?,
+            GraphCommands::InboundScope(args) => args.resolve()?,
             GraphCommands::Unresolved(args) => args.resolve()?,
             GraphCommands::Deadends(args) => args.resolve()?,
             GraphCommands::Orphans(args) => args.resolve()?,
@@ -4133,6 +4247,20 @@ mod tests {
                         &vault_root_string,
                         "--path",
                         "notes/projects/project-a.md",
+                    ],
+                ),
+                (
+                    "graph.inbound-scope",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "inbound-scope",
+                        "--vault-root",
+                        &vault_root_string,
+                        "--scope",
+                        "notes",
+                        "--include-markdown",
                     ],
                 ),
                 (

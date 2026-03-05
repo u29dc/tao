@@ -12,5 +12,6 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+pulldown-cmark = "0.13.0"
 tao-sdk-core = { path = "../tao-sdk-core" }
 thiserror.workspace = true

@@ -1282,6 +1282,10 @@ fn map_link_with_paths(row: LinkWithPaths) -> BridgeLinkRef {
         "block"
     } else if row.heading_slug.is_some() {
         "heading"
+    } else if row.source_field == "body:embed" {
+        "embed"
+    } else if row.source_field == "body:markdown" {
+        "markdown"
     } else {
         "wikilink"
     };
@@ -1777,6 +1781,93 @@ mod tests {
         );
         assert_eq!(value.backlinks.len(), 1);
         assert_eq!(value.backlinks[0].source_path.as_str(), "notes/incoming.md");
+    }
+
+    #[test]
+    fn bridge_kernel_note_links_labels_markdown_and_embed_kinds() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes/assets")).expect("create notes/assets");
+        let db_path = temp.path().join("tao.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let source = note_put_allowed(&mut kernel, "notes/source.md", "# Source");
+        let source_id = source.value.expect("source").file_id;
+        let target_md = note_put_allowed(&mut kernel, "notes/target.md", "# Target");
+        let target_md_id = target_md.value.expect("target md").file_id;
+        let target_pdf_id = "file-pdf".to_string();
+        FilesRepository::insert(
+            &kernel.connection,
+            &FileRecordInput {
+                file_id: target_pdf_id.clone(),
+                normalized_path: "notes/assets/deck.pdf".to_string(),
+                match_key: "notes/assets/deck.pdf".to_string(),
+                absolute_path: vault_root
+                    .join("notes/assets/deck.pdf")
+                    .to_string_lossy()
+                    .to_string(),
+                size_bytes: 3,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: "hash-pdf".to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert target pdf file record");
+
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-wikilink".to_string(),
+                source_file_id: source_id.clone(),
+                raw_target: "target".to_string(),
+                resolved_file_id: Some(target_md_id),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert wikilink");
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-markdown".to_string(),
+                source_file_id: source_id.clone(),
+                raw_target: "assets/deck.pdf".to_string(),
+                resolved_file_id: Some(target_pdf_id.clone()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:markdown".to_string(),
+            },
+        )
+        .expect("insert markdown link");
+        LinksRepository::insert(
+            &kernel.connection,
+            &LinkRecordInput {
+                link_id: "l-embed".to_string(),
+                source_file_id: source_id,
+                raw_target: "assets/deck.pdf".to_string(),
+                resolved_file_id: Some(target_pdf_id),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:embed".to_string(),
+            },
+        )
+        .expect("insert embed link");
+
+        let links = kernel.note_links("notes/source.md");
+        assert!(links.ok);
+        let mut outgoing = links.value.expect("links").outgoing;
+        outgoing.sort_by(|left, right| left.kind.cmp(&right.kind));
+        assert_eq!(outgoing.len(), 3);
+        assert_eq!(outgoing[0].kind, "embed");
+        assert_eq!(outgoing[1].kind, "markdown");
+        assert_eq!(outgoing[2].kind, "wikilink");
     }
 
     #[test]

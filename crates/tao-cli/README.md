@@ -10,6 +10,7 @@ Provide the Tao command-line interface as a thin JSON-first adapter over SDK ser
 
 - Binary: `tao`
 - Command groups: `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
+- Graph audit primitive: `graph inbound-scope` for scoped inbound-link counts (attachment audits).
 - JSON envelope output for automation (`--json`)
 
 ## Internal Design

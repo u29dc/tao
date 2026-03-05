@@ -24,7 +24,7 @@ pub use index_state::{
 };
 pub use links::{
     GraphNodeDegree, LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository,
-    LinksRepositoryError, ResolvedLinkPair,
+    LinksRepositoryError, ResolvedLinkPair, ScopedInboundRow, ScopedInboundSummary,
 };
 pub use properties::{
     PropertiesRepository, PropertiesRepositoryError, PropertyRecord, PropertyRecordInput,

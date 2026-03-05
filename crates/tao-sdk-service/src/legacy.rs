@@ -3264,6 +3264,47 @@ pub struct GraphNodeDegreeRow {
     pub outgoing_resolved: u64,
 }
 
+/// One scoped inbound-link row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphScopedInboundRow {
+    /// Stable file id.
+    pub file_id: String,
+    /// Normalized file path.
+    pub path: String,
+    /// Whether row path is markdown.
+    pub is_markdown: bool,
+    /// Resolved inbound edge count.
+    pub inbound_resolved: u64,
+}
+
+/// Scoped inbound-link summary counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphScopedInboundSummary {
+    /// Total matched files.
+    pub total_files: u64,
+    /// Files with at least one inbound edge.
+    pub linked_files: u64,
+    /// Files with zero inbound edges.
+    pub unlinked_files: u64,
+}
+
+/// Input payload for scoped inbound-link audits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphScopedInboundRequest {
+    /// Vault-relative scope prefix.
+    pub scope_prefix: String,
+    /// Include markdown files in result set.
+    pub include_markdown: bool,
+    /// Include non-markdown files in result set.
+    pub include_non_markdown: bool,
+    /// Optional excluded scope prefixes.
+    pub exclude_prefixes: Vec<String>,
+    /// Page size.
+    pub limit: u32,
+    /// Page offset.
+    pub offset: u32,
+}
+
 /// One connected component summary row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphComponentRow {
@@ -3429,6 +3470,51 @@ impl BacklinkGraphService {
         let rows = LinksRepository::list_orphans_window(connection, limit, offset)
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
         Ok((total, map_graph_node_degrees(rows)))
+    }
+
+    /// Return one scoped inbound-link audit window plus summary counters.
+    pub fn scoped_inbound_page(
+        &self,
+        connection: &Connection,
+        request: &GraphScopedInboundRequest,
+    ) -> Result<(GraphScopedInboundSummary, Vec<GraphScopedInboundRow>), LinkGraphServiceError>
+    {
+        let summary = LinksRepository::summarize_scoped_inbound(
+            connection,
+            &request.scope_prefix,
+            request.include_markdown,
+            request.include_non_markdown,
+            &request.exclude_prefixes,
+        )
+        .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let rows = LinksRepository::list_scoped_inbound_window(
+            connection,
+            &request.scope_prefix,
+            request.include_markdown,
+            request.include_non_markdown,
+            &request.exclude_prefixes,
+            request.limit,
+            request.offset,
+        )
+        .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| GraphScopedInboundRow {
+                file_id: row.file_id,
+                path: row.path,
+                is_markdown: row.is_markdown,
+                inbound_resolved: row.inbound_resolved,
+            })
+            .collect::<Vec<_>>();
+        Ok((
+            GraphScopedInboundSummary {
+                total_files: summary.total_files,
+                linked_files: summary.linked_files,
+                unlinked_files: summary.unlinked_files,
+            },
+            items,
+        ))
     }
 
     /// Build connected components over resolved graph edges and return one deterministic page.
@@ -3961,10 +4047,10 @@ mod tests {
         BacklinkGraphService, BaseColumnConfigPersistError, BaseColumnConfigPersistenceService,
         BaseTableCachedQueryService, BaseTableExecutorError, BaseTableExecutorService,
         BaseValidationError, BaseValidationService, CasePolicy, GraphComponentMode,
-        HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
-        PropertyQueryRequest, PropertyQueryService, PropertyQuerySort, PropertyUpdateService,
-        ReconcileService, SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService,
-        WatcherStatus,
+        GraphScopedInboundRequest, HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError,
+        NoteCrudService, PropertyQueryRequest, PropertyQueryService, PropertyQuerySort,
+        PropertyUpdateService, ReconcileService, SdkTransactionCoordinator, ServiceTraceContext,
+        StorageWriteService, WatcherStatus,
     };
 
     fn file_record(
@@ -4461,6 +4547,89 @@ mod tests {
             Some("missing-note")
         );
         assert_eq!(unresolved[0].source_field, "body");
+    }
+
+    #[test]
+    fn backlink_graph_service_scoped_inbound_audits_non_markdown_targets() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "source",
+                "notes/source.md",
+                "notes/source.md",
+                "/vault/notes/source.md",
+            ),
+        )
+        .expect("insert source");
+        FilesRepository::insert(
+            &connection,
+            &FileRecordInput {
+                file_id: "linked".to_string(),
+                normalized_path: "notes/assets/linked.pdf".to_string(),
+                match_key: "notes/assets/linked.pdf".to_string(),
+                absolute_path: "/vault/notes/assets/linked.pdf".to_string(),
+                size_bytes: 10,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: "hash-linked".to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert linked asset");
+        FilesRepository::insert(
+            &connection,
+            &FileRecordInput {
+                file_id: "orphan".to_string(),
+                normalized_path: "notes/assets/orphan.pdf".to_string(),
+                match_key: "notes/assets/orphan.pdf".to_string(),
+                absolute_path: "/vault/notes/assets/orphan.pdf".to_string(),
+                size_bytes: 10,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: "hash-orphan".to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert orphan asset");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-attachment".to_string(),
+                source_file_id: "source".to_string(),
+                raw_target: "assets/linked.pdf".to_string(),
+                resolved_file_id: Some("linked".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:markdown".to_string(),
+            },
+        )
+        .expect("insert attachment edge");
+
+        let (summary, rows) = BacklinkGraphService
+            .scoped_inbound_page(
+                &connection,
+                &GraphScopedInboundRequest {
+                    scope_prefix: "notes".to_string(),
+                    include_markdown: false,
+                    include_non_markdown: true,
+                    exclude_prefixes: Vec::new(),
+                    limit: 100,
+                    offset: 0,
+                },
+            )
+            .expect("scoped inbound");
+        assert_eq!(summary.total_files, 2);
+        assert_eq!(summary.linked_files, 1);
+        assert_eq!(summary.unlinked_files, 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "notes/assets/linked.pdf");
+        assert_eq!(rows[0].inbound_resolved, 1);
+        assert_eq!(rows[1].path, "notes/assets/orphan.pdf");
+        assert_eq!(rows[1].inbound_resolved, 0);
     }
 
     #[test]
