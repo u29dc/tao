@@ -3288,6 +3288,32 @@ pub struct GraphScopedInboundSummary {
     pub unlinked_files: u64,
 }
 
+/// One strict floating-file row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphFloatingRow {
+    /// Stable file id.
+    pub file_id: String,
+    /// Normalized file path.
+    pub path: String,
+    /// Whether row path is markdown.
+    pub is_markdown: bool,
+    /// Resolved inbound edge count.
+    pub incoming_resolved: u64,
+    /// Resolved outgoing edge count.
+    pub outgoing_resolved: u64,
+}
+
+/// Strict floating-file summary counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphFloatingSummary {
+    /// Total strict floating files.
+    pub total_files: u64,
+    /// Total strict floating markdown files.
+    pub markdown_files: u64,
+    /// Total strict floating non-markdown files.
+    pub non_markdown_files: u64,
+}
+
 /// Input payload for scoped inbound-link audits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphScopedInboundRequest {
@@ -3512,6 +3538,37 @@ impl BacklinkGraphService {
                 total_files: summary.total_files,
                 linked_files: summary.linked_files,
                 unlinked_files: summary.unlinked_files,
+            },
+            items,
+        ))
+    }
+
+    /// Return one strict floating-file window plus summary counters.
+    pub fn floating_page(
+        &self,
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(GraphFloatingSummary, Vec<GraphFloatingRow>), LinkGraphServiceError> {
+        let summary = LinksRepository::summarize_floating_default(connection)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let rows = LinksRepository::list_floating_default_window(connection, limit, offset)
+            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+        let items = rows
+            .into_iter()
+            .map(|row| GraphFloatingRow {
+                file_id: row.file_id,
+                path: row.path,
+                is_markdown: row.is_markdown,
+                incoming_resolved: row.incoming_resolved,
+                outgoing_resolved: row.outgoing_resolved,
+            })
+            .collect::<Vec<_>>();
+        Ok((
+            GraphFloatingSummary {
+                total_files: summary.total_files,
+                markdown_files: summary.markdown_files,
+                non_markdown_files: summary.non_markdown_files,
             },
             items,
         ))
@@ -4630,6 +4687,101 @@ mod tests {
         assert_eq!(rows[0].inbound_resolved, 1);
         assert_eq!(rows[1].path, "notes/assets/orphan.pdf");
         assert_eq!(rows[1].inbound_resolved, 0);
+    }
+
+    #[test]
+    fn backlink_graph_service_floating_returns_strict_disconnected_files() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "note-source",
+                "notes/source.md",
+                "notes/source.md",
+                "/vault/notes/source.md",
+            ),
+        )
+        .expect("insert source note");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "note-linked",
+                "notes/linked.md",
+                "notes/linked.md",
+                "/vault/notes/linked.md",
+            ),
+        )
+        .expect("insert linked note");
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "note-floating",
+                "notes/floating.md",
+                "notes/floating.md",
+                "/vault/notes/floating.md",
+            ),
+        )
+        .expect("insert floating note");
+        FilesRepository::insert(
+            &connection,
+            &FileRecordInput {
+                file_id: "asset-floating".to_string(),
+                normalized_path: "notes/assets/floating.pdf".to_string(),
+                match_key: "notes/assets/floating.pdf".to_string(),
+                absolute_path: "/vault/notes/assets/floating.pdf".to_string(),
+                size_bytes: 10,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: "hash-asset-floating".to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert floating asset");
+        FilesRepository::insert(
+            &connection,
+            &FileRecordInput {
+                file_id: "noise".to_string(),
+                normalized_path: ".DS_Store".to_string(),
+                match_key: ".ds_store".to_string(),
+                absolute_path: "/vault/.DS_Store".to_string(),
+                size_bytes: 10,
+                modified_unix_ms: 1_700_000_000_000,
+                hash_blake3: "hash-noise".to_string(),
+                is_markdown: false,
+            },
+        )
+        .expect("insert noise file");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-note".to_string(),
+                source_file_id: "note-source".to_string(),
+                raw_target: "linked".to_string(),
+                resolved_file_id: Some("note-linked".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert note edge");
+
+        let (summary, rows) = BacklinkGraphService
+            .floating_page(&connection, 100, 0)
+            .expect("floating page");
+        assert_eq!(summary.total_files, 2);
+        assert_eq!(summary.markdown_files, 1);
+        assert_eq!(summary.non_markdown_files, 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "notes/assets/floating.pdf");
+        assert_eq!(rows[0].incoming_resolved, 0);
+        assert_eq!(rows[0].outgoing_resolved, 0);
+        assert_eq!(rows[1].path, "notes/floating.md");
+        assert_eq!(rows[1].incoming_resolved, 0);
+        assert_eq!(rows[1].outgoing_resolved, 0);
     }
 
     #[test]

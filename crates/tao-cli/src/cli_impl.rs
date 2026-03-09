@@ -134,6 +134,8 @@ enum GraphCommands {
     Deadends(GraphWindowArgs),
     /// Return isolated notes with no incoming/outgoing resolved edges.
     Orphans(GraphWindowArgs),
+    /// Return strict floating files with built-in graph-view filtering.
+    Floating(GraphWindowArgs),
     /// Return connected components across resolved graph edges.
     Components(GraphComponentsArgs),
     /// Return one-hop neighbors for one note.
@@ -1808,6 +1810,36 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 }),
             })
         }
+        GraphCommands::Floating(args) => {
+            let resolved = args.resolve()?;
+            let (summary, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.floating_page(connection, args.limit, args.offset)?)
+            })
+            .map_err(|source| anyhow!("query floating files failed: {source}"))?;
+            let items = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "path": row.path,
+                        "reason": "no_incoming_no_outgoing",
+                        "is_markdown": row.is_markdown,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(CommandResult {
+                command: "graph.floating".to_string(),
+                summary: "graph floating completed".to_string(),
+                args: serde_json::json!({
+                    "total_floating": summary.total_files,
+                    "notes_count": summary.markdown_files,
+                    "attachments_count": summary.non_markdown_files,
+                    "total": summary.total_files,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "items": items,
+                }),
+            })
+        }
         GraphCommands::Components(args) => {
             let resolved = args.resolve()?;
             let mode = GraphComponentModeArg::parse(args.mode.trim())?;
@@ -3004,6 +3036,7 @@ fn resolve_command_vault_paths(command: &Commands) -> Result<Option<ResolvedVaul
             GraphCommands::Unresolved(args) => args.resolve()?,
             GraphCommands::Deadends(args) => args.resolve()?,
             GraphCommands::Orphans(args) => args.resolve()?,
+            GraphCommands::Floating(args) => args.resolve()?,
             GraphCommands::Components(args) => args.resolve()?,
             GraphCommands::Neighbors(args) => args.resolve()?,
             GraphCommands::Path(args) => args.resolve()?,
@@ -4292,6 +4325,17 @@ mod tests {
                         "--json",
                         "graph",
                         "orphans",
+                        "--vault-root",
+                        &vault_root_string,
+                    ],
+                ),
+                (
+                    "graph.floating",
+                    vec![
+                        "tao",
+                        "--json",
+                        "graph",
+                        "floating",
                         "--vault-root",
                         &vault_root_string,
                     ],
@@ -6277,6 +6321,21 @@ links fixture
                     "--json",
                     "graph",
                     "orphans",
+                    "--vault-root",
+                    vault_root.to_string_lossy().as_ref(),
+                    "--limit",
+                    "100",
+                    "--offset",
+                    "0",
+                ]),
+            );
+            assert_snapshot(
+                "floating.json",
+                Cli::parse_from([
+                    "tao",
+                    "--json",
+                    "graph",
+                    "floating",
                     "--vault-root",
                     vault_root.to_string_lossy().as_ref(),
                     "--limit",

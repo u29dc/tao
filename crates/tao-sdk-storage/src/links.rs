@@ -98,6 +98,32 @@ pub struct GraphNodeDegree {
     pub outgoing_resolved: u64,
 }
 
+/// One floating-file row with resolved incoming/outgoing degree counters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingFileDegree {
+    /// Stable file identifier.
+    pub file_id: String,
+    /// Normalized file path.
+    pub path: String,
+    /// Whether file is markdown.
+    pub is_markdown: bool,
+    /// Count of resolved incoming edges.
+    pub incoming_resolved: u64,
+    /// Count of resolved outgoing edges.
+    pub outgoing_resolved: u64,
+}
+
+/// Aggregate summary for strict floating-file scans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingFileSummary {
+    /// Total floating files (strict disconnected).
+    pub total_files: u64,
+    /// Total floating markdown files.
+    pub markdown_files: u64,
+    /// Total floating non-markdown files.
+    pub non_markdown_files: u64,
+}
+
 /// Scoped inbound-link row for attachment and file-audit workflows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedInboundRow {
@@ -547,6 +573,57 @@ LIMIT ?1 OFFSET ?2
         .collect()
     }
 
+    /// Return strict floating-file summary using default graph-visible filters.
+    pub fn summarize_floating_default(
+        connection: &Connection,
+    ) -> Result<FloatingFileSummary, LinksRepositoryError> {
+        let sql = floating_default_summary_sql();
+        connection
+            .query_row(&sql, [], |row| {
+                Ok(FloatingFileSummary {
+                    total_files: row.get("total_files")?,
+                    markdown_files: row.get("markdown_files")?,
+                    non_markdown_files: row.get("non_markdown_files")?,
+                })
+            })
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "summarize_floating_default",
+                source,
+            })
+    }
+
+    /// Return one strict floating-file page in deterministic path order.
+    pub fn list_floating_default_window(
+        connection: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<FloatingFileDegree>, LinksRepositoryError> {
+        let sql = floating_default_window_sql();
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_floating_default_window",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(
+                params![i64::from(limit), i64::from(offset)],
+                row_to_floating_file_degree,
+            )
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_floating_default_window",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_floating_default_window_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// List resolved source-target file id pairs used by graph component services.
     pub fn list_resolved_pairs(
         connection: &Connection,
@@ -892,6 +969,17 @@ fn row_to_graph_node_degree(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphNo
     })
 }
 
+fn row_to_floating_file_degree(row: &rusqlite::Row<'_>) -> rusqlite::Result<FloatingFileDegree> {
+    let is_markdown: i64 = row.get("is_markdown")?;
+    Ok(FloatingFileDegree {
+        file_id: row.get("file_id")?,
+        path: row.get("path")?,
+        is_markdown: is_markdown != 0,
+        incoming_resolved: row.get("incoming_resolved")?,
+        outgoing_resolved: row.get("outgoing_resolved")?,
+    })
+}
+
 fn row_to_scoped_inbound_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScopedInboundRow> {
     let is_markdown: i64 = row.get("is_markdown")?;
     Ok(ScopedInboundRow {
@@ -1058,6 +1146,86 @@ ORDER BY path ASC
 LIMIT ?1 OFFSET ?2
 "#,
         degree_cte_sql()
+    )
+}
+
+fn floating_default_degree_cte_sql() -> &'static str {
+    r#"
+WITH incoming AS (
+  SELECT
+    resolved_file_id AS file_id,
+    COUNT(*) AS incoming_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY resolved_file_id
+),
+outgoing AS (
+  SELECT
+    source_file_id AS file_id,
+    COUNT(*) AS outgoing_resolved
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IS NOT NULL
+  GROUP BY source_file_id
+),
+degrees AS (
+  SELECT
+    f.file_id AS file_id,
+    f.normalized_path AS path,
+    f.is_markdown AS is_markdown,
+    COALESCE(i.incoming_resolved, 0) AS incoming_resolved,
+    COALESCE(o.outgoing_resolved, 0) AS outgoing_resolved
+  FROM files f
+  LEFT JOIN incoming i ON i.file_id = f.file_id
+  LEFT JOIN outgoing o ON o.file_id = f.file_id
+  WHERE f.normalized_path != '.DS_Store'
+    AND f.normalized_path != 'Thumbs.db'
+    AND f.normalized_path != 'desktop.ini'
+    AND f.normalized_path != '.gitkeep'
+    AND f.normalized_path != '.gitignore'
+    AND f.normalized_path NOT LIKE '%/.DS_Store'
+    AND f.normalized_path NOT LIKE '%/Thumbs.db'
+    AND f.normalized_path NOT LIKE '%/desktop.ini'
+    AND f.normalized_path NOT LIKE '%/.gitkeep'
+    AND f.normalized_path NOT LIKE '%/.gitignore'
+)
+"#
+}
+
+fn floating_default_summary_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT
+  COUNT(*) AS total_files,
+  COALESCE(SUM(CASE WHEN is_markdown = 1 THEN 1 ELSE 0 END), 0) AS markdown_files,
+  COALESCE(SUM(CASE WHEN is_markdown = 0 THEN 1 ELSE 0 END), 0) AS non_markdown_files
+FROM degrees
+WHERE incoming_resolved = 0
+  AND outgoing_resolved = 0
+"#,
+        floating_default_degree_cte_sql()
+    )
+}
+
+fn floating_default_window_sql() -> String {
+    format!(
+        r#"
+{}
+SELECT
+  file_id,
+  path,
+  is_markdown,
+  incoming_resolved,
+  outgoing_resolved
+FROM degrees
+WHERE incoming_resolved = 0
+  AND outgoing_resolved = 0
+ORDER BY path ASC
+LIMIT ?1 OFFSET ?2
+"#,
+        floating_default_degree_cte_sql()
     )
 }
 
@@ -1294,5 +1462,85 @@ mod tests {
         assert_eq!(rows[0].inbound_resolved, 1);
         assert_eq!(rows[1].path, "notes/assets/orphan.pdf");
         assert_eq!(rows[1].inbound_resolved, 0);
+    }
+
+    #[test]
+    fn floating_queries_return_strict_disconnected_and_ignore_system_noise() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(&connection, &file("note-source", "notes/source.md"))
+            .expect("insert source note");
+        FilesRepository::insert(&connection, &file("note-linked", "notes/linked.md"))
+            .expect("insert linked note");
+        FilesRepository::insert(&connection, &file("note-floating", "notes/floating.md"))
+            .expect("insert floating note");
+        FilesRepository::insert(
+            &connection,
+            &file("asset-linked", "notes/assets/linked.pdf"),
+        )
+        .expect("insert linked asset");
+        FilesRepository::insert(
+            &connection,
+            &file("asset-floating", "notes/assets/floating.pdf"),
+        )
+        .expect("insert floating asset");
+
+        FilesRepository::insert(&connection, &file("noise-root", ".DS_Store"))
+            .expect("insert root noise");
+        FilesRepository::insert(
+            &connection,
+            &file("noise-nested", "notes/assets/.gitignore"),
+        )
+        .expect("insert nested noise");
+
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-note".to_string(),
+                source_file_id: "note-source".to_string(),
+                raw_target: "linked".to_string(),
+                resolved_file_id: Some("note-linked".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body".to_string(),
+            },
+        )
+        .expect("insert note link");
+        LinksRepository::insert(
+            &connection,
+            &LinkRecordInput {
+                link_id: "l-asset".to_string(),
+                source_file_id: "note-source".to_string(),
+                raw_target: "assets/linked.pdf".to_string(),
+                resolved_file_id: Some("asset-linked".to_string()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:markdown".to_string(),
+            },
+        )
+        .expect("insert asset link");
+
+        let summary =
+            LinksRepository::summarize_floating_default(&connection).expect("summarize floating");
+        assert_eq!(summary.total_files, 2);
+        assert_eq!(summary.markdown_files, 1);
+        assert_eq!(summary.non_markdown_files, 1);
+
+        let rows =
+            LinksRepository::list_floating_default_window(&connection, 50, 0).expect("list page");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, "notes/assets/floating.pdf");
+        assert!(!rows[0].is_markdown);
+        assert_eq!(rows[0].incoming_resolved, 0);
+        assert_eq!(rows[0].outgoing_resolved, 0);
+        assert_eq!(rows[1].path, "notes/floating.md");
+        assert!(rows[1].is_markdown);
+        assert_eq!(rows[1].incoming_resolved, 0);
+        assert_eq!(rows[1].outgoing_resolved, 0);
     }
 }

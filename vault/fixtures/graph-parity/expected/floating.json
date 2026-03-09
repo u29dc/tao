@@ -1,0 +1,20 @@
+{
+  "attachments_count": 1,
+  "items": [
+    {
+      "is_markdown": false,
+      "path": "assets/lone.pdf",
+      "reason": "no_incoming_no_outgoing"
+    },
+    {
+      "is_markdown": true,
+      "path": "notes/orphan.md",
+      "reason": "no_incoming_no_outgoing"
+    }
+  ],
+  "limit": 100,
+  "notes_count": 1,
+  "offset": 0,
+  "total": 2,
+  "total_floating": 2
+}
