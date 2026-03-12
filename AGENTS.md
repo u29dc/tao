@@ -4,7 +4,7 @@
 
 - Primary policy: this file is the canonical operational reference for repository architecture, commands, quality gates, and roadmap state.
 - Embedded spec decisions are maintained here (no standalone `docs/` spec directory):
-    - CLI IA and compatibility alias map
+    - CLI IA and removed-legacy-command policy
     - unified query contract and scope semantics
     - parity scope (`now/next/later`)
     - synthetic fixture and performance benchmark runbooks
@@ -66,7 +66,7 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 - `./scripts/bench.sh` -> unified benchmark driver (`--suite all|sdk|cli|daemon|bridge|ffi|startup|parse|resolve|search`).
 - `./scripts/fixtures.sh [output-root]` -> deterministic synthetic vault generation (default `vault/generated`).
 - `./scripts/fixtures.sh --skip-validate` -> opt out of built-in fixture validation.
-- `bun run dev -- --json vault open --vault-root <path>` -> CLI open/bootstrap using vault-root only.
+- `bun run dev -- vault open --vault-root <path>` -> CLI open/bootstrap using vault-root only.
 - `swift run --package-path apps/tao-macos TaoMacOSApp` -> launch macOS app.
 
 ## 5. Architecture
@@ -130,15 +130,18 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
     - update `plan/tickets.csv`, `plan/run-state.json`, and `plan/progress.md` with evidence on each completed ticket
     - keep blockers explicit in `plan/blockers.md`
 
-## 10. CLI IA and Compatibility Contract
+## 10. CLI IA and Contract
 
 - Compact command surface:
-    - `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
+    - `tools`, `health`, `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
 - Legacy aliases are removed from the public CLI:
     - `note`, `links`, `properties`, `bases`, `search` must return unknown-command errors
-- JSON envelope contract for all `--json` commands:
-    - `{ ok, value: { command, summary, args }, error }`
-    - failures return `ok=false`, `value=null`, structured `error`.
+- JSON envelope contract for all non-interactive commands by default:
+    - success: `{ ok: true, data: <payload>, meta: { tool, elapsed, count?, total?, hasMore? } }`
+    - failure: `{ ok: false, error: { code, message, hint, details? }, meta: { tool, elapsed } }`
+    - no `--json` flag exists; JSON is the default non-interactive contract
+    - `--text` is the explicit opt-out for plain-text summaries.
+    - bare `tao` and `tao --help` render clap help, not JSON.
 - Write gate policy:
     - mutating operations require `--allow-writes`
     - read-only operations must never require write gate.

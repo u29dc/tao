@@ -210,7 +210,7 @@ ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
-    "${CLI_BIN}" --json vault daemon stop --socket "${DAEMON_SOCKET}" >/dev/null 2>&1 || true
+    "${CLI_BIN}" vault daemon stop --socket "${DAEMON_SOCKET}" >/dev/null 2>&1 || true
     DAEMON_RUNNING=0
   fi
 }
@@ -252,13 +252,13 @@ prepare_fixture() {
   assert_safe_path "${DB_PATH}" "budget sqlite path"
   assert_safe_path "${DAEMON_SOCKET}" "budget daemon socket path"
 
-  "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
-  "${CLI_BIN}" --json vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  "${CLI_BIN}" vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  "${CLI_BIN}" vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
 }
 
 start_daemon() {
   cleanup_daemon
-  "${CLI_BIN}" --json vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
+  "${CLI_BIN}" vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
   DAEMON_RUNNING=1
 }
 
@@ -279,13 +279,13 @@ prepare_fixture
 start_daemon
 
 CASE_MATRIX=$(cat <<EOF
-query-docs|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path,title --limit 1000 --offset 0 > /dev/null
-query-base|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 100 --offset 0 > /dev/null
-query-graph|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
-graph-neighbors|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
-graph-path|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000 > /dev/null
-graph-walk|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 > /dev/null
-meta-tags|${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0 > /dev/null
+query-docs|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path,title --limit 1000 --offset 0 > /dev/null
+query-base|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 100 --offset 0 > /dev/null
+query-graph|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
+graph-neighbors|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
+graph-path|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000 > /dev/null
+graph-walk|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 > /dev/null
+meta-tags|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0 > /dev/null
 EOF
 )
 

@@ -1,5 +1,5 @@
 mod cli_impl;
 
-fn main() -> anyhow::Result<()> {
-    cli_impl::run()
+fn main() {
+    std::process::exit(cli_impl::run());
 }

@@ -164,7 +164,7 @@ ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 
 cleanup_daemon() {
   if [[ "${DAEMON_RUNNING}" -eq 1 ]]; then
-    "${CLI_BIN}" --json vault daemon stop --socket "${DAEMON_SOCKET}" >/dev/null 2>&1 || true
+    "${CLI_BIN}" vault daemon stop --socket "${DAEMON_SOCKET}" >/dev/null 2>&1 || true
     DAEMON_RUNNING=0
   fi
 }
@@ -214,13 +214,13 @@ prepare_fixture() {
   assert_safe_path "${DAEMON_SOCKET}" "daemon socket path"
 
   echo "Seeding index for CLI benchmarks..."
-  "${CLI_BIN}" --json vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
-  "${CLI_BIN}" --json vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  "${CLI_BIN}" vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  "${CLI_BIN}" vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
 }
 
 start_daemon() {
   cleanup_daemon
-  "${CLI_BIN}" --json vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
+  "${CLI_BIN}" vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
   DAEMON_RUNNING=1
 }
 
@@ -266,14 +266,14 @@ run_baseline_cli_budgets() {
     --warmup "${WARMUP}" \
     --runs "${RUNS}" \
     --export-json "${HYPERFINE_QUERY_REPORT}" \
-    "${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+    "${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
 
   echo "Running baseline graph/unresolved hyperfine budget..."
   hyperfine \
     --warmup "${WARMUP}" \
     --runs "${RUNS}" \
     --export-json "${HYPERFINE_GRAPH_REPORT}" \
-    "${CLI_BIN} --json graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0 > /dev/null"
+    "${CLI_BIN} graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0 > /dev/null"
 
   bun --eval '
     const fs = require("node:fs");
@@ -308,8 +308,8 @@ run_daemon_query_benchmark() {
     --warmup "${WARMUP}" \
     --runs "${RUNS}" \
     --export-json "${DAEMON_REPORT}" \
-    "${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null" \
-    "${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+    "${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null" \
+    "${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
 
   bun --eval '
     const fs = require("node:fs");
@@ -364,10 +364,10 @@ run_query_stream_projection_benchmark() {
 
   start_daemon
   local loop_count=20
-  local standard_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 1000 --offset 0 > /dev/null; done"
-  local projected_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path --limit 1000 --offset 0 > /dev/null; done"
-  local standard_rss_cmd="${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 1000 --offset 0 > /dev/null"
-  local projected_rss_cmd="${CLI_BIN} --json --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path --limit 1000 --offset 0 > /dev/null"
+  local standard_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 1000 --offset 0 > /dev/null; done"
+  local projected_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path --limit 1000 --offset 0 > /dev/null; done"
+  local standard_rss_cmd="${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 1000 --offset 0 > /dev/null"
+  local projected_rss_cmd="${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --select path --limit 1000 --offset 0 > /dev/null"
 
   echo "Running docs standard vs projected-column comparison..."
   hyperfine \
@@ -456,37 +456,37 @@ run_cli_matrix() {
   require_hyperfine
 
   COMMAND_MATRIX=$(cat <<EOF
-vault-stats|${CLI_BIN} --json vault stats --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
-vault-preflight|${CLI_BIN} --json vault preflight --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
-doc-read|${CLI_BIN} --json doc read --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
-doc-list|${CLI_BIN} --json doc list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
-base-list|${CLI_BIN} --json base list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
-base-schema|${CLI_BIN} --json base schema --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE}
-base-view|${CLI_BIN} --json base view --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --page 1 --page-size 50
-graph-outgoing|${CLI_BIN} --json graph outgoing --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
-graph-backlinks|${CLI_BIN} --json graph backlinks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
-graph-unresolved|${CLI_BIN} --json graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
-graph-deadends|${CLI_BIN} --json graph deadends --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
-graph-orphans|${CLI_BIN} --json graph orphans --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
-graph-components|${CLI_BIN} --json graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
-graph-components-strong|${CLI_BIN} --json graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --mode strong --limit 50 --offset 0
-graph-neighbors|${CLI_BIN} --json graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0
-graph-path|${CLI_BIN} --json graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000
-graph-walk|${CLI_BIN} --json graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200
-graph-walk-folders|${CLI_BIN} --json graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 --include-folders
-meta-properties|${CLI_BIN} --json meta properties --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
-meta-tags|${CLI_BIN} --json meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
-meta-aliases|${CLI_BIN} --json meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
-meta-tasks|${CLI_BIN} --json meta tasks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
-task-list|${CLI_BIN} --json task list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
-query-docs|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0
-query-graph|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --limit 50 --offset 0
-query-graph-path|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 50 --offset 0
-query-task|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from task --query follow --limit 50 --offset 0
-query-meta-tags|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:tags --limit 50 --offset 0
-query-meta-aliases|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:aliases --limit 50 --offset 0
-query-meta-properties|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:properties --limit 50 --offset 0
-query-base|${CLI_BIN} --json query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 50 --offset 0
+vault-stats|${CLI_BIN} vault stats --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+vault-preflight|${CLI_BIN} vault preflight --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+doc-read|${CLI_BIN} doc read --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+doc-list|${CLI_BIN} doc list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+base-list|${CLI_BIN} base list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH}
+base-schema|${CLI_BIN} base schema --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE}
+base-view|${CLI_BIN} base view --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path-or-id ${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --page 1 --page-size 50
+graph-outgoing|${CLI_BIN} graph outgoing --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+graph-backlinks|${CLI_BIN} graph backlinks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE}
+graph-unresolved|${CLI_BIN} graph unresolved --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-deadends|${CLI_BIN} graph deadends --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-orphans|${CLI_BIN} graph orphans --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-components|${CLI_BIN} graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50 --offset 0
+graph-components-strong|${CLI_BIN} graph components --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --mode strong --limit 50 --offset 0
+graph-neighbors|${CLI_BIN} graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0
+graph-path|${CLI_BIN} graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000
+graph-walk|${CLI_BIN} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200
+graph-walk-folders|${CLI_BIN} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 --include-folders
+meta-properties|${CLI_BIN} meta properties --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-tags|${CLI_BIN} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-aliases|${CLI_BIN} meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+meta-tasks|${CLI_BIN} meta tasks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+task-list|${CLI_BIN} task list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+query-docs|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0
+query-graph|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --limit 50 --offset 0
+query-graph-path|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 50 --offset 0
+query-task|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from task --query follow --limit 50 --offset 0
+query-meta-tags|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:tags --limit 50 --offset 0
+query-meta-aliases|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:aliases --limit 50 --offset 0
+query-meta-properties|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from meta:properties --limit 50 --offset 0
+query-base|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from base:${SAMPLE_BASE} --view-name ${SAMPLE_VIEW} --limit 50 --offset 0
 EOF
 )
 

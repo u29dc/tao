@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -11,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{
+    ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind as ClapErrorKind,
+};
 use rusqlite::Connection;
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
@@ -40,6 +43,7 @@ use tao_sdk_vault::{CasePolicy, PathCanonicalizationService, validate_relative_v
 use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
 
 mod commands;
+mod registry;
 
 const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_DAEMON_SOCKET_DIR: &str = ".tools/tao/daemons";
@@ -48,8 +52,13 @@ const QUERY_DOCS_POST_FILTER_PAGE_LIMIT: u64 = 1_000;
 #[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 #[command(name = "tao", version, about = "tao cli")]
 struct Cli {
-    /// Emit one JSON envelope to stdout.
-    #[arg(long, global = true)]
+    /// Emit plain-text summaries instead of JSON envelopes.
+    #[arg(
+        long = "text",
+        global = true,
+        default_value_t = true,
+        action = ArgAction::SetFalse
+    )]
     json: bool,
     /// Stream JSON envelope serialization for supported large read commands.
     #[arg(long, global = true, default_value_t = false)]
@@ -66,6 +75,10 @@ struct Cli {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 enum Commands {
+    /// Return public tool registry metadata.
+    Tools(ToolsArgs),
+    /// Return machine-oriented runtime readiness.
+    Health(VaultPathArgs),
     /// Compact document operations.
     Doc {
         #[command(subcommand)]
@@ -98,6 +111,12 @@ enum Commands {
         #[command(subcommand)]
         command: VaultCommands,
     },
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+struct ToolsArgs {
+    /// Optional dotted tool name to inspect.
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -803,16 +822,17 @@ fn project_query_docs_row(
 struct QueryDocsStreamingEnvelope<'a> {
     page: &'a tao_sdk_search::SearchQueryProjectedPage,
     columns: &'a [QueryDocsColumn],
+    elapsed: u128,
 }
 
-struct QueryDocsStreamingValue<'a> {
+struct QueryDocsStreamingData<'a> {
     page: &'a tao_sdk_search::SearchQueryProjectedPage,
     columns: &'a [QueryDocsColumn],
 }
 
-struct QueryDocsStreamingArgs<'a> {
+struct QueryDocsStreamingMeta<'a> {
     page: &'a tao_sdk_search::SearchQueryProjectedPage,
-    columns: &'a [QueryDocsColumn],
+    elapsed: u128,
 }
 
 struct QueryDocsStreamingRows<'a> {
@@ -993,37 +1013,24 @@ impl Serialize for QueryDocsStreamingEnvelope<'_> {
         let mut map = serializer.serialize_map(Some(3))?;
         map.serialize_entry("ok", &true)?;
         map.serialize_entry(
-            "value",
-            &QueryDocsStreamingValue {
+            "data",
+            &QueryDocsStreamingData {
                 page: self.page,
                 columns: self.columns,
             },
         )?;
-        map.serialize_entry("error", &Option::<JsonValue>::None)?;
-        map.end()
-    }
-}
-
-impl Serialize for QueryDocsStreamingValue<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(3))?;
-        map.serialize_entry("command", "query.run")?;
-        map.serialize_entry("summary", "query run completed")?;
         map.serialize_entry(
-            "args",
-            &QueryDocsStreamingArgs {
+            "meta",
+            &QueryDocsStreamingMeta {
                 page: self.page,
-                columns: self.columns,
+                elapsed: self.elapsed,
             },
         )?;
         map.end()
     }
 }
 
-impl Serialize for QueryDocsStreamingArgs<'_> {
+impl Serialize for QueryDocsStreamingData<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -1046,6 +1053,23 @@ impl Serialize for QueryDocsStreamingArgs<'_> {
         map.serialize_entry("total", &self.page.total)?;
         map.serialize_entry("limit", &self.page.limit)?;
         map.serialize_entry("offset", &self.page.offset)?;
+        map.end()
+    }
+}
+
+impl Serialize for QueryDocsStreamingMeta<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let count = u64::try_from(self.page.items.len()).unwrap_or(u64::MAX);
+        let has_more = self.page.offset.saturating_add(count) < self.page.total;
+        let mut map = serializer.serialize_map(Some(5))?;
+        map.serialize_entry("tool", "query.run")?;
+        map.serialize_entry("elapsed", &self.elapsed)?;
+        map.serialize_entry("count", &count)?;
+        map.serialize_entry("total", &self.page.total)?;
+        map.serialize_entry("hasMore", &has_more)?;
         map.end()
     }
 }
@@ -1149,8 +1173,11 @@ enum RuntimeMode {
 #[derive(Debug, Serialize)]
 struct JsonEnvelope<T: Serialize> {
     ok: bool,
-    value: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JsonError>,
+    meta: JsonMeta,
 }
 
 #[derive(Debug, Serialize)]
@@ -1158,7 +1185,57 @@ struct JsonError {
     code: String,
     message: String,
     hint: Option<String>,
-    context: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<JsonValue>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonMeta {
+    tool: String,
+    elapsed: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_more: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitKind {
+    Success = 0,
+    Failure = 1,
+    Blocked = 2,
+}
+
+#[derive(Debug)]
+struct ClassifiedCliError {
+    exit_kind: ExitKind,
+    error: JsonError,
+}
+
+#[derive(Debug)]
+struct CliContractError {
+    exit_kind: ExitKind,
+    code: &'static str,
+    message: String,
+    hint: Option<String>,
+    details: Option<JsonValue>,
+}
+
+#[derive(Debug)]
+struct RunResult {
+    exit_kind: ExitKind,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    clap_output: Option<ClapOutput>,
+}
+
+#[derive(Debug)]
+enum ClapOutput {
+    RootHelp,
+    Error(clap::Error),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1194,99 +1271,443 @@ struct DaemonResponse {
 }
 
 impl<T: Serialize> JsonEnvelope<T> {
-    fn success(value: T) -> Self {
+    fn success(data: T, meta: JsonMeta) -> Self {
         Self {
             ok: true,
-            value: Some(value),
+            data: Some(data),
             error: None,
+            meta,
         }
     }
 
-    fn failure(error: JsonError) -> Self {
+    fn failure(error: JsonError, meta: JsonMeta) -> Self {
         Self {
             ok: false,
-            value: None,
+            data: None,
             error: Some(error),
+            meta,
         }
     }
 }
 
-pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+impl CliContractError {
+    fn blocked(
+        code: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<Option<String>>,
+        details: Option<JsonValue>,
+    ) -> Self {
+        Self {
+            exit_kind: ExitKind::Blocked,
+            code,
+            message: message.into(),
+            hint: hint.into(),
+            details,
+        }
+    }
+}
+
+impl std::fmt::Display for CliContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliContractError {}
+
+pub fn run() -> i32 {
+    let result = run_from_args(std::env::args_os().collect());
+    if let Some(clap_output) = result.clap_output {
+        emit_clap_output(clap_output);
+    } else {
+        if let Some(stdout) = result.stdout.as_deref() {
+            emit_output(stdout, false);
+        }
+        if let Some(stderr) = result.stderr.as_deref() {
+            emit_output(stderr, true);
+        }
+    }
+    result.exit_kind as i32
+}
+
+fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
+    let json_output = !raw_args.iter().any(|arg| arg == "--text");
+    let cli = match Cli::try_parse_from(raw_args) {
+        Ok(cli) => cli,
+        Err(error) => return handle_parse_error(error, json_output),
+    };
+
+    let started_at = Instant::now();
+    let tool = tool_name_for_command(&cli.command);
     let run = || -> Result<String> {
         if cli.json_stream && !cli.json {
-            return Err(anyhow!("--json-stream requires --json"));
+            return Err(anyhow!("--json-stream cannot be used with --text"));
         }
         if let Some(output) = maybe_forward_to_daemon(&cli)? {
             return Ok(output);
         }
-        if let Some(output) = maybe_render_streaming_output(&cli)? {
+        if cli.json
+            && let Some(output) = maybe_render_streaming_output(&cli)?
+        {
             return Ok(output);
         }
 
         let result = dispatch(cli.command.clone(), cli.allow_writes)?;
-        render_output(cli.json, &result)
+        render_output_with_elapsed(cli.json, &result, started_at.elapsed())
     };
 
     match run() {
-        Ok(output) => {
-            println!("{output}");
-            Ok(())
-        }
+        Ok(output) => RunResult {
+            exit_kind: ExitKind::Success,
+            stdout: Some(output),
+            stderr: None,
+            clap_output: None,
+        },
         Err(source) => {
+            let classified = classify_cli_error(&source);
             if cli.json {
-                let rendered = render_error_output(&source)?;
-                println!("{rendered}");
-                return Ok(());
+                let rendered =
+                    render_error_output_for_tool(&tool, started_at.elapsed(), &classified)
+                        .unwrap_or_else(|render_source| {
+                            fallback_json_error(
+                                &tool,
+                                started_at.elapsed(),
+                                &classified.error,
+                                &render_source.to_string(),
+                            )
+                        });
+                RunResult {
+                    exit_kind: classified.exit_kind,
+                    stdout: Some(rendered),
+                    stderr: None,
+                    clap_output: None,
+                }
+            } else {
+                RunResult {
+                    exit_kind: classified.exit_kind,
+                    stdout: None,
+                    stderr: Some(source.to_string()),
+                    clap_output: None,
+                }
             }
-            Err(source)
         }
     }
 }
 
+fn emit_output(output: &str, to_stderr: bool) {
+    if to_stderr {
+        if output.ends_with('\n') {
+            eprint!("{output}");
+        } else {
+            eprintln!("{output}");
+        }
+    } else if output.ends_with('\n') {
+        print!("{output}");
+    } else {
+        println!("{output}");
+    }
+}
+
+fn emit_clap_output(output: ClapOutput) {
+    match output {
+        ClapOutput::RootHelp => {
+            let mut command = Cli::command();
+            command.print_help().expect("print tao root help");
+            println!();
+        }
+        ClapOutput::Error(error) => {
+            error.print().expect("print tao clap output");
+        }
+    }
+}
+
+fn handle_parse_error(error: clap::Error, json_output: bool) -> RunResult {
+    match error.kind() {
+        ClapErrorKind::DisplayHelp
+        | ClapErrorKind::DisplayVersion
+        | ClapErrorKind::MissingSubcommand
+        | ClapErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => RunResult {
+            exit_kind: ExitKind::Success,
+            stdout: None,
+            stderr: None,
+            clap_output: Some(match error.kind() {
+                ClapErrorKind::DisplayHelp | ClapErrorKind::DisplayVersion => {
+                    ClapOutput::Error(error)
+                }
+                _ => ClapOutput::RootHelp,
+            }),
+        },
+        _ if json_output => {
+            let classified = classify_parse_error(&error);
+            let rendered = render_error_output_for_tool("tao", Duration::ZERO, &classified)
+                .unwrap_or_else(|render_source| {
+                    fallback_json_error(
+                        "tao",
+                        Duration::ZERO,
+                        &classified.error,
+                        &render_source.to_string(),
+                    )
+                });
+            RunResult {
+                exit_kind: classified.exit_kind,
+                stdout: Some(rendered),
+                stderr: None,
+                clap_output: None,
+            }
+        }
+        _ => RunResult {
+            exit_kind: ExitKind::Failure,
+            stdout: None,
+            stderr: Some(error.to_string()),
+            clap_output: None,
+        },
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn render_error_output(error: &anyhow::Error) -> Result<String> {
-    let envelope = JsonEnvelope::<CommandResult>::failure(classify_cli_error(error));
+    let classified = classify_cli_error(error);
+    render_error_output_for_tool("tao", Duration::ZERO, &classified)
+}
+
+fn render_error_output_for_tool(
+    tool: &str,
+    elapsed: Duration,
+    classified: &ClassifiedCliError,
+) -> Result<String> {
+    let envelope = JsonEnvelope::<JsonValue>::failure(
+        JsonError {
+            code: classified.error.code.clone(),
+            message: classified.error.message.clone(),
+            hint: classified.error.hint.clone(),
+            details: classified.error.details.clone(),
+        },
+        error_meta(tool, elapsed),
+    );
     serde_json::to_string(&envelope).context("serialize json error envelope")
 }
 
-fn classify_cli_error(error: &anyhow::Error) -> JsonError {
+fn fallback_json_error(
+    tool: &str,
+    elapsed: Duration,
+    classified_error: &JsonError,
+    render_message: &str,
+) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error": {
+            "code": "render_failed",
+            "message": format!("failed to serialize cli envelope: {render_message}"),
+            "hint": "inspect the original error payload in details and retry",
+            "details": {
+                "original": classified_error,
+            },
+        },
+        "meta": error_meta(tool, elapsed),
+    })
+    .to_string()
+}
+
+fn classify_parse_error(error: &clap::Error) -> ClassifiedCliError {
+    ClassifiedCliError {
+        exit_kind: ExitKind::Failure,
+        error: JsonError {
+            code: "invalid_argument".to_string(),
+            message: error.to_string().trim().to_string(),
+            hint: Some(
+                "rerun with --text --help or use `tao tools` to inspect the public surface"
+                    .to_string(),
+            ),
+            details: Some(serde_json::json!({
+                "kind": format!("{:?}", error.kind()),
+            })),
+        },
+    }
+}
+
+fn classify_cli_error(error: &anyhow::Error) -> ClassifiedCliError {
+    if let Some(contract_error) = error.downcast_ref::<CliContractError>() {
+        return ClassifiedCliError {
+            exit_kind: contract_error.exit_kind,
+            error: JsonError {
+                code: contract_error.code.to_string(),
+                message: contract_error.message.clone(),
+                hint: contract_error.hint.clone(),
+                details: contract_error.details.clone(),
+            },
+        };
+    }
+
     let message = error.to_string();
-    let (code, hint) = if message.contains("--allow-writes") {
+    let (exit_kind, code, hint) = if message.contains("--allow-writes") {
         (
+            ExitKind::Blocked,
             "write_disabled",
             Some("pass --allow-writes to enable write operations".to_string()),
         )
     } else if message.contains("parse --where failed") || message.contains("parse --sort failed") {
         (
+            ExitKind::Failure,
             "query_parse_error",
             Some("fix query expression syntax and retry".to_string()),
         )
     } else if message.contains("connect daemon socket") {
         (
+            ExitKind::Blocked,
             "daemon_unavailable",
             Some("daemon auto-start failed; check socket path permissions or override --daemon-socket".to_string()),
         )
+    } else if message.contains("resolve sdk config failed")
+        || message.contains("vault root does not exist")
+        || message.contains("vault root is not a directory")
+        || message.contains("prepare runtime paths failed")
+        || message.contains("open sqlite database")
+    {
+        (
+            ExitKind::Blocked,
+            "blocked_prerequisite",
+            Some("fix the vault or database configuration and retry".to_string()),
+        )
     } else if message.contains("unsupported query scope")
         || message.contains("requires --view-name")
+        || message.contains("unknown tool")
         || message.contains("must not")
     {
         (
+            ExitKind::Failure,
             "invalid_argument",
             Some("check command arguments and retry".to_string()),
         )
     } else {
         (
+            ExitKind::Failure,
             "command_failed",
             Some("inspect message and rerun with corrected inputs".to_string()),
         )
     };
 
-    JsonError {
-        code: code.to_string(),
-        message,
-        hint,
-        context: BTreeMap::new(),
+    ClassifiedCliError {
+        exit_kind,
+        error: JsonError {
+            code: code.to_string(),
+            message,
+            hint,
+            details: None,
+        },
     }
+}
+
+fn tool_name_for_command(command: &Commands) -> String {
+    match command {
+        Commands::Tools(_) => "tools".to_string(),
+        Commands::Health(_) => "health".to_string(),
+        Commands::Doc { command } => match command {
+            DocCommands::Read(_) => "doc.read".to_string(),
+            DocCommands::Write(_) => "doc.write".to_string(),
+            DocCommands::List(_) => "doc.list".to_string(),
+        },
+        Commands::Base { command } => match command {
+            BaseCommands::List(_) => "base.list".to_string(),
+            BaseCommands::View(_) => "base.view".to_string(),
+            BaseCommands::Schema(_) => "base.schema".to_string(),
+        },
+        Commands::Graph { command } => match command {
+            GraphCommands::Outgoing(_) => "graph.outgoing".to_string(),
+            GraphCommands::Backlinks(_) => "graph.backlinks".to_string(),
+            GraphCommands::InboundScope(_) => "graph.inbound-scope".to_string(),
+            GraphCommands::Unresolved(_) => "graph.unresolved".to_string(),
+            GraphCommands::Deadends(_) => "graph.deadends".to_string(),
+            GraphCommands::Orphans(_) => "graph.orphans".to_string(),
+            GraphCommands::Floating(_) => "graph.floating".to_string(),
+            GraphCommands::Components(_) => "graph.components".to_string(),
+            GraphCommands::Neighbors(_) => "graph.neighbors".to_string(),
+            GraphCommands::Path(_) => "graph.path".to_string(),
+            GraphCommands::Walk(_) => "graph.walk".to_string(),
+        },
+        Commands::Meta { command } => match command {
+            MetaCommands::Properties(_) => "meta.properties".to_string(),
+            MetaCommands::Tags(_) => "meta.tags".to_string(),
+            MetaCommands::Aliases(_) => "meta.aliases".to_string(),
+            MetaCommands::Tasks(_) => "meta.tasks".to_string(),
+        },
+        Commands::Task { command } => match command {
+            TaskCommands::List(_) => "task.list".to_string(),
+            TaskCommands::SetState(_) => "task.set-state".to_string(),
+        },
+        Commands::Query(_) => "query.run".to_string(),
+        Commands::Vault { command } => match command {
+            VaultCommands::Open(_) => "vault.open".to_string(),
+            VaultCommands::Stats(_) => "vault.stats".to_string(),
+            VaultCommands::Preflight(_) => "vault.preflight".to_string(),
+            VaultCommands::Reindex(_) => "vault.reindex".to_string(),
+            VaultCommands::Reconcile(_) => "vault.reconcile".to_string(),
+            VaultCommands::Daemon { command } => match command {
+                DaemonCommands::Start(_) => "vault.daemon.start".to_string(),
+                DaemonCommands::Status(_) => "vault.daemon.status".to_string(),
+                DaemonCommands::Stop(_) => "vault.daemon.stop".to_string(),
+                DaemonCommands::StopAll(_) => "vault.daemon.stop_all".to_string(),
+            },
+            VaultCommands::DaemonServe(_) => "vault.daemon.serve".to_string(),
+        },
+    }
+}
+
+fn success_meta(tool: &str, elapsed: Duration, data: &JsonValue) -> JsonMeta {
+    let count = payload_count(data);
+    let total = payload_total(data, count);
+    JsonMeta {
+        tool: tool.to_string(),
+        elapsed: elapsed.as_millis(),
+        count,
+        total,
+        has_more: payload_has_more(data, count, total),
+    }
+}
+
+fn error_meta(tool: &str, elapsed: Duration) -> JsonMeta {
+    JsonMeta {
+        tool: tool.to_string(),
+        elapsed: elapsed.as_millis(),
+        count: None,
+        total: None,
+        has_more: None,
+    }
+}
+
+fn payload_count(data: &JsonValue) -> Option<u64> {
+    for key in ["items", "rows", "tools", "checks"] {
+        if let Some(items) = data.get(key).and_then(JsonValue::as_array) {
+            return Some(u64::try_from(items.len()).unwrap_or(u64::MAX));
+        }
+    }
+    None
+}
+
+fn payload_total(data: &JsonValue, count: Option<u64>) -> Option<u64> {
+    data.get("total").and_then(JsonValue::as_u64).or_else(|| {
+        if data.get("tools").is_some() || data.get("checks").is_some() {
+            count
+        } else {
+            None
+        }
+    })
+}
+
+fn payload_has_more(data: &JsonValue, count: Option<u64>, total: Option<u64>) -> Option<bool> {
+    let total = total?;
+    let count = count.unwrap_or(0);
+
+    if let Some(offset) = data.get("offset").and_then(JsonValue::as_u64) {
+        return Some(offset.saturating_add(count) < total);
+    }
+    if let (Some(page), Some(page_size)) = (
+        data.get("page").and_then(JsonValue::as_u64),
+        data.get("page_size").and_then(JsonValue::as_u64),
+    ) {
+        return Some(page.saturating_mul(page_size) < total);
+    }
+
+    Some(count < total)
 }
 
 fn maybe_render_streaming_output(cli: &Cli) -> Result<Option<String>> {
@@ -1317,6 +1738,7 @@ fn maybe_render_streaming_output_for_command(
     let columns = parse_query_docs_columns(args.select.as_deref())?;
     let projection = query_docs_projection(&columns);
     let resolved = args.resolve()?;
+    let started_at = Instant::now();
     let page = with_connection(runtime, &resolved, |connection| {
         Ok(SearchQueryService.query_projected(
             Path::new(&resolved.vault_root),
@@ -1333,6 +1755,7 @@ fn maybe_render_streaming_output_for_command(
     let rendered = serde_json::to_string(&QueryDocsStreamingEnvelope {
         page: &page,
         columns: &columns,
+        elapsed: started_at.elapsed().as_millis(),
     })
     .context("serialize streamed docs query envelope")?;
     Ok(Some(rendered))
@@ -1349,6 +1772,8 @@ fn dispatch_with_runtime(
     runtime: &mut RuntimeMode,
 ) -> Result<CommandResult> {
     match command {
+        Commands::Tools(args) => handle_tools(args),
+        Commands::Health(args) => handle_health(args, runtime),
         Commands::Doc { command } => commands::doc::dispatch(command, allow_writes, runtime),
         Commands::Base { command } => commands::base::dispatch(command, runtime),
         Commands::Graph { command } => commands::graph::dispatch(command, runtime),
@@ -1359,9 +1784,21 @@ fn dispatch_with_runtime(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn render_output(json: bool, result: &CommandResult) -> Result<String> {
+    render_output_with_elapsed(json, result, Duration::ZERO)
+}
+
+fn render_output_with_elapsed(
+    json: bool,
+    result: &CommandResult,
+    elapsed: Duration,
+) -> Result<String> {
     if json {
-        Ok(serde_json::to_string(&JsonEnvelope::success(result))?)
+        Ok(serde_json::to_string(&JsonEnvelope::success(
+            result.args.clone(),
+            success_meta(&result.command, elapsed, &result.args),
+        ))?)
     } else {
         Ok(result.summary.clone())
     }
@@ -1371,6 +1808,162 @@ fn retag_result(mut result: CommandResult, command: &str, summary: &str) -> Comm
     result.command = command.to_string();
     result.summary = summary.to_string();
     result
+}
+
+fn handle_tools(args: ToolsArgs) -> Result<CommandResult> {
+    let version = env!("CARGO_PKG_VERSION");
+    let args = if let Some(name) = args.name.as_deref() {
+        let tool = registry::tool_detail(name).ok_or_else(|| {
+            anyhow!(
+                "unknown tool '{}'; run `tao tools` to inspect supported tools",
+                name
+            )
+        })?;
+        serde_json::json!({
+            "version": version,
+            "tool": tool,
+            "globalFlags": registry::global_flags(),
+        })
+    } else {
+        serde_json::json!({
+            "version": version,
+            "tools": registry::tools_catalog(),
+            "globalFlags": registry::global_flags(),
+        })
+    };
+
+    Ok(CommandResult {
+        command: "tools".to_string(),
+        summary: "tools completed".to_string(),
+        args,
+    })
+}
+
+fn handle_health(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
+    let resolved = args.resolve().map_err(|source| {
+        health_blocked_error(
+            source.to_string(),
+            "set --vault-root explicitly or configure [vault].root before retrying",
+            args.vault_root
+                .clone()
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+            args.db_path
+                .clone()
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+            "config",
+        )
+    })?;
+
+    let snapshot = with_connection(runtime, &resolved, |connection| {
+        Ok(HealthSnapshotService.snapshot(
+            Path::new(&resolved.vault_root),
+            connection,
+            0,
+            WatcherStatus::Stopped,
+        )?)
+    })
+    .map_err(|source| {
+        health_blocked_error(
+            source.to_string(),
+            "run `tao vault open --vault-root <path>` and verify the database path is writable",
+            JsonValue::String(resolved.vault_root.clone()),
+            JsonValue::String(resolved.db_path.clone()),
+            "runtime",
+        )
+    })?;
+
+    let mut status = "ready";
+    let mut checks = vec![serde_json::json!({
+        "name": "vault",
+        "status": "pass",
+        "message": format!("vault root resolved to '{}'", snapshot.vault_root),
+        "fix": JsonValue::Null,
+    })];
+
+    if snapshot.db_healthy {
+        checks.push(serde_json::json!({
+            "name": "database",
+            "status": "pass",
+            "message": "sqlite database is healthy",
+            "fix": JsonValue::Null,
+        }));
+    } else {
+        status = "degraded";
+        checks.push(serde_json::json!({
+            "name": "database",
+            "status": "degraded",
+            "message": "sqlite database reported an unhealthy state",
+            "fix": "run `tao vault open` to bootstrap paths and verify sqlite permissions",
+        }));
+    }
+
+    if snapshot.index_lag == 0 {
+        checks.push(serde_json::json!({
+            "name": "index",
+            "status": "pass",
+            "message": "index is up to date",
+            "fix": JsonValue::Null,
+        }));
+    } else {
+        status = "degraded";
+        checks.push(serde_json::json!({
+            "name": "index",
+            "status": "degraded",
+            "message": format!("index lag is {}", snapshot.index_lag),
+            "fix": "run `tao vault reconcile` or `tao vault reindex` to refresh index state",
+        }));
+    }
+
+    Ok(CommandResult {
+        command: "health".to_string(),
+        summary: "health completed".to_string(),
+        args: serde_json::json!({
+            "status": status,
+            "vault_root": snapshot.vault_root,
+            "db_path": resolved.db_path,
+            "checks": checks,
+            "stats": {
+                "files_total": snapshot.files_total,
+                "markdown_files": snapshot.markdown_files,
+                "db_healthy": snapshot.db_healthy,
+                "db_migrations": snapshot.db_migrations,
+                "index_lag": snapshot.index_lag,
+                "watcher_status": snapshot.watcher_status,
+                "last_index_updated_at": snapshot.last_index_updated_at,
+            },
+        }),
+    })
+}
+
+fn health_blocked_error(
+    message: String,
+    fix: &str,
+    vault_root: JsonValue,
+    db_path: JsonValue,
+    check_name: &str,
+) -> anyhow::Error {
+    CliContractError::blocked(
+        "blocked_prerequisite",
+        message.clone(),
+        Some(fix.to_string()),
+        Some(serde_json::json!({
+            "status": "blocked",
+            "vault_root": vault_root,
+            "db_path": db_path,
+            "checks": [
+                {
+                    "name": check_name,
+                    "status": "blocked",
+                    "message": message,
+                    "fix": fix,
+                }
+            ],
+            "stats": JsonValue::Null,
+        })),
+    )
+    .into()
 }
 
 fn handle_doc(
@@ -2956,7 +3549,8 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
 }
 
 fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
-    if is_daemon_control_command(&cli.command) {
+    if is_daemon_control_command(&cli.command) || !command_supports_daemon_forwarding(&cli.command)
+    {
         return Ok(None);
     }
 
@@ -3007,11 +3601,18 @@ fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
     }
 }
 
+fn command_supports_daemon_forwarding(command: &Commands) -> bool {
+    !matches!(command, Commands::Tools(_))
+}
+
 fn resolve_daemon_socket_for_cli(cli: &Cli) -> Result<Option<String>> {
     if let Some(socket) = cli.daemon_socket.as_ref() {
         return Ok(Some(socket.clone()));
     }
-    let Some(vault) = resolve_command_vault_paths(&cli.command)? else {
+    let Some(vault) = (match resolve_command_vault_paths(&cli.command) {
+        Ok(vault) => vault,
+        Err(_) => return Ok(None),
+    }) else {
         return Ok(None);
     };
     Ok(Some(derive_daemon_socket_for_vault(&vault.vault_root)?))
@@ -3019,6 +3620,8 @@ fn resolve_daemon_socket_for_cli(cli: &Cli) -> Result<Option<String>> {
 
 fn resolve_command_vault_paths(command: &Commands) -> Result<Option<ResolvedVaultPathArgs>> {
     let resolved = match command {
+        Commands::Tools(_) => return Ok(None),
+        Commands::Health(args) => args.resolve()?,
         Commands::Doc { command } => match command {
             DocCommands::Read(args) => args.resolve()?,
             DocCommands::Write(args) => args.resolve()?,
@@ -3081,6 +3684,8 @@ fn daemon_cache_key(command: &Commands) -> Result<String> {
 
 fn command_is_cacheable(command: &Commands) -> bool {
     match command {
+        Commands::Tools(_) => true,
+        Commands::Health(_) => true,
         Commands::Doc { command } => matches!(command, DocCommands::Read(_) | DocCommands::List(_)),
         Commands::Base { .. } => true,
         Commands::Graph { .. } => true,
@@ -3106,8 +3711,8 @@ fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> 
         return Ok(false);
     };
     let runtime_key = runtime_cache_key(&resolved);
-    let current_generation = if let RuntimeMode::Daemon(cache) = runtime {
-        if !cache.change_monitors.contains_key(&runtime_key) {
+    let (current_generation, first_observation) = if let RuntimeMode::Daemon(cache) = runtime {
+        let first_observation = if !cache.change_monitors.contains_key(&runtime_key) {
             let monitor =
                 VaultChangeMonitor::start(Path::new(&resolved.vault_root)).with_context(|| {
                     format!(
@@ -3116,15 +3721,52 @@ fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> 
                     )
                 })?;
             cache.change_monitors.insert(runtime_key.clone(), monitor);
-        }
-        cache
+            true
+        } else {
+            false
+        };
+        let generation = cache
             .change_monitors
             .get(&runtime_key)
             .map(VaultChangeMonitor::generation)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        (generation, first_observation)
     } else {
-        0
+        (0, false)
     };
+
+    if first_observation {
+        let needs_initial_sync = with_connection(runtime, &resolved, |connection| {
+            let totals = query_index_totals(connection)?;
+            Ok(totals.indexed_files == 0)
+        })?;
+        if needs_initial_sync {
+            let reconcile = with_connection(runtime, &resolved, |connection| {
+                WatchReconcileService::default()
+                    .reconcile_once(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        resolved.case_policy,
+                    )
+                    .map_err(|source| anyhow!("daemon reconcile failed: {source}"))
+            })?;
+            if let RuntimeMode::Daemon(cache) = runtime {
+                cache
+                    .last_reconciled_generation
+                    .insert(runtime_key.clone(), current_generation);
+                if reconcile.drift_paths > 0 {
+                    clear_cached_results_for_runtime(cache, &runtime_key);
+                }
+            }
+            return Ok(reconcile.drift_paths > 0);
+        }
+        if let RuntimeMode::Daemon(cache) = runtime {
+            cache
+                .last_reconciled_generation
+                .insert(runtime_key, current_generation);
+        }
+        return Ok(false);
+    }
 
     if let RuntimeMode::Daemon(cache) = runtime
         && cache
@@ -3537,6 +4179,7 @@ fn run_daemon_server(socket: &str) -> Result<()> {
 
             let response = match request {
                 DaemonRequest::Execute { payload } => {
+                    let started_at = Instant::now();
                     let cacheable = command_is_cacheable(&payload.command);
                     maybe_refresh_daemon_state(&payload.command, &mut runtime)?;
                     let resolved = resolve_command_vault_paths(&payload.command)?;
@@ -3598,7 +4241,11 @@ fn run_daemon_server(socket: &str) -> Result<()> {
                                         error: None,
                                         status: None,
                                     },
-                                    Ok(None) => match render_output(payload.json, &result) {
+                                    Ok(None) => match render_output_with_elapsed(
+                                        payload.json,
+                                        &result,
+                                        started_at.elapsed(),
+                                    ) {
                                         Ok(output) => DaemonResponse {
                                             ok: true,
                                             output: Some(output),
@@ -3620,7 +4267,11 @@ fn run_daemon_server(socket: &str) -> Result<()> {
                                     },
                                 }
                             } else {
-                                match render_output(payload.json, &result) {
+                                match render_output_with_elapsed(
+                                    payload.json,
+                                    &result,
+                                    started_at.elapsed(),
+                                ) {
                                     Ok(output) => DaemonResponse {
                                         ok: true,
                                         output: Some(output),
@@ -4072,14 +4723,15 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        Cli, Commands, DaemonCommands, DaemonSocketArgs, DaemonStopAllArgs, DocCommands,
-        NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode, VaultPathArgs, command_is_cacheable,
-        derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime, handle_daemon,
-        maybe_forward_to_daemon, maybe_refresh_daemon_state, maybe_render_streaming_output,
-        prepare_daemon_socket_path, render_error_output, render_output,
-        resolve_command_vault_paths, resolve_daemon_socket_for_cli, runtime_cache_key,
+        ClapOutput, Cli, Commands, DaemonCommands, DaemonSocketArgs, DaemonStopAllArgs,
+        DocCommands, ExitKind, NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode, VaultPathArgs,
+        classify_cli_error, command_is_cacheable, derive_daemon_socket_for_vault, dispatch,
+        dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
+        maybe_render_streaming_output, prepare_daemon_socket_path, registry, render_error_output,
+        render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli, run_from_args,
+        runtime_cache_key,
     };
-    use clap::{CommandFactory, Parser};
+    use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
     use serde_json::Value as JsonValue;
 
     #[test]
@@ -4098,6 +4750,8 @@ mod tests {
         assert!(rendered.contains("meta"));
         assert!(rendered.contains("task"));
         assert!(rendered.contains("query"));
+        assert!(rendered.contains("tools"));
+        assert!(rendered.contains("health"));
         assert!(!rendered.contains("note"));
         assert!(!rendered.contains("links"));
         assert!(!rendered.contains("properties"));
@@ -4107,13 +4761,42 @@ mod tests {
     }
 
     #[test]
+    fn bare_invocation_prints_help_instead_of_json() {
+        let result = run_from_args(["tao"].into_iter().map(std::ffi::OsString::from).collect());
+
+        assert_eq!(result.exit_kind, ExitKind::Success);
+        assert!(result.stdout.is_none());
+        assert!(result.stderr.is_none());
+        assert!(matches!(result.clap_output, Some(ClapOutput::RootHelp)));
+    }
+
+    #[test]
+    fn help_flag_uses_native_clap_output_path() {
+        let result = run_from_args(
+            ["tao", "--help"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Success);
+        assert!(result.stdout.is_none());
+        assert!(result.stderr.is_none());
+        match result.clap_output {
+            Some(ClapOutput::Error(error)) => {
+                assert_eq!(error.kind(), ClapErrorKind::DisplayHelp);
+            }
+            other => panic!("expected clap help output, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn json_output_is_one_envelope_object() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
             let vault_root = tempdir.path().to_path_buf();
             let cli = Cli::parse_from([
                 "tao".to_string(),
-                "--json".to_string(),
                 "vault".to_string(),
                 "open".to_string(),
                 "--vault-root".to_string(),
@@ -4129,12 +4812,23 @@ mod tests {
             );
             assert_eq!(
                 value
-                    .get("value")
-                    .and_then(|raw| raw.get("command"))
+                    .get("data")
+                    .and_then(|raw| raw.get("db_ready"))
+                    .and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                value
+                    .get("meta")
+                    .and_then(|raw| raw.get("tool"))
                     .and_then(serde_json::Value::as_str),
                 Some("vault.open")
             );
-            assert!(value.get("error").is_some_and(serde_json::Value::is_null));
+            assert!(
+                value
+                    .as_object()
+                    .is_some_and(|envelope| !envelope.contains_key("error"))
+            );
         });
     }
 
@@ -4174,31 +4868,16 @@ mod tests {
             let scenarios = [
                 (
                     "vault.open",
-                    vec![
-                        "tao",
-                        "--json",
-                        "vault",
-                        "open",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "vault", "open", "--vault-root", &vault_root_string],
                 ),
                 (
                     "vault.stats",
-                    vec![
-                        "tao",
-                        "--json",
-                        "vault",
-                        "stats",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "vault", "stats", "--vault-root", &vault_root_string],
                 ),
                 (
                     "vault.preflight",
                     vec![
                         "tao",
-                        "--json",
                         "vault",
                         "preflight",
                         "--vault-root",
@@ -4209,7 +4888,6 @@ mod tests {
                     "vault.reindex",
                     vec![
                         "tao",
-                        "--json",
                         "vault",
                         "reindex",
                         "--vault-root",
@@ -4220,7 +4898,6 @@ mod tests {
                     "doc.read",
                     vec![
                         "tao",
-                        "--json",
                         "doc",
                         "read",
                         "--vault-root",
@@ -4231,20 +4908,12 @@ mod tests {
                 ),
                 (
                     "doc.list",
-                    vec![
-                        "tao",
-                        "--json",
-                        "doc",
-                        "list",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "doc", "list", "--vault-root", &vault_root_string],
                 ),
                 (
                     "doc.write",
                     vec![
                         "tao",
-                        "--json",
                         "--allow-writes",
                         "doc",
                         "write",
@@ -4260,7 +4929,6 @@ mod tests {
                     "graph.outgoing",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "outgoing",
                         "--vault-root",
@@ -4273,7 +4941,6 @@ mod tests {
                     "graph.backlinks",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "backlinks",
                         "--vault-root",
@@ -4286,7 +4953,6 @@ mod tests {
                     "graph.inbound-scope",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "inbound-scope",
                         "--vault-root",
@@ -4300,7 +4966,6 @@ mod tests {
                     "graph.unresolved",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "unresolved",
                         "--vault-root",
@@ -4311,7 +4976,6 @@ mod tests {
                     "graph.deadends",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "deadends",
                         "--vault-root",
@@ -4322,7 +4986,6 @@ mod tests {
                     "graph.orphans",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "orphans",
                         "--vault-root",
@@ -4333,7 +4996,6 @@ mod tests {
                     "graph.floating",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "floating",
                         "--vault-root",
@@ -4344,7 +5006,6 @@ mod tests {
                     "graph.components",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "components",
                         "--vault-root",
@@ -4355,7 +5016,6 @@ mod tests {
                     "graph.neighbors",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "neighbors",
                         "--vault-root",
@@ -4368,7 +5028,6 @@ mod tests {
                     "graph.path",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "path",
                         "--vault-root",
@@ -4383,7 +5042,6 @@ mod tests {
                     "graph.walk",
                     vec![
                         "tao",
-                        "--json",
                         "graph",
                         "walk",
                         "--vault-root",
@@ -4398,20 +5056,12 @@ mod tests {
                 ),
                 (
                     "base.list",
-                    vec![
-                        "tao",
-                        "--json",
-                        "base",
-                        "list",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "base", "list", "--vault-root", &vault_root_string],
                 ),
                 (
                     "base.schema",
                     vec![
                         "tao",
-                        "--json",
                         "base",
                         "schema",
                         "--vault-root",
@@ -4424,7 +5074,6 @@ mod tests {
                     "base.view",
                     vec![
                         "tao",
-                        "--json",
                         "base",
                         "view",
                         "--vault-root",
@@ -4443,7 +5092,6 @@ mod tests {
                     "meta.properties",
                     vec![
                         "tao",
-                        "--json",
                         "meta",
                         "properties",
                         "--vault-root",
@@ -4452,53 +5100,24 @@ mod tests {
                 ),
                 (
                     "meta.tags",
-                    vec![
-                        "tao",
-                        "--json",
-                        "meta",
-                        "tags",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "meta", "tags", "--vault-root", &vault_root_string],
                 ),
                 (
                     "meta.aliases",
-                    vec![
-                        "tao",
-                        "--json",
-                        "meta",
-                        "aliases",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "meta", "aliases", "--vault-root", &vault_root_string],
                 ),
                 (
                     "meta.tasks",
-                    vec![
-                        "tao",
-                        "--json",
-                        "meta",
-                        "tasks",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "meta", "tasks", "--vault-root", &vault_root_string],
                 ),
                 (
                     "task.list",
-                    vec![
-                        "tao",
-                        "--json",
-                        "task",
-                        "list",
-                        "--vault-root",
-                        &vault_root_string,
-                    ],
+                    vec!["tao", "task", "list", "--vault-root", &vault_root_string],
                 ),
                 (
                     "task.set-state",
                     vec![
                         "tao",
-                        "--json",
                         "--allow-writes",
                         "task",
                         "set-state",
@@ -4516,7 +5135,6 @@ mod tests {
                     "query.run",
                     vec![
                         "tao",
-                        "--json",
                         "query",
                         "--vault-root",
                         &vault_root_string,
@@ -4534,7 +5152,6 @@ mod tests {
                     "vault.reconcile",
                     vec![
                         "tao",
-                        "--json",
                         "vault",
                         "reconcile",
                         "--vault-root",
@@ -4558,33 +5175,40 @@ mod tests {
         let envelope = value.as_object().expect("envelope must be object");
         assert_eq!(envelope.len(), 3);
         assert!(envelope.contains_key("ok"));
-        assert!(envelope.contains_key("value"));
-        assert!(envelope.contains_key("error"));
+        assert!(envelope.contains_key("data"));
+        assert!(envelope.contains_key("meta"));
         assert_eq!(
             envelope.get("ok").and_then(JsonValue::as_bool),
             Some(true),
             "expected ok=true for command {expected_command}",
         );
-        assert!(envelope.get("error").is_some_and(JsonValue::is_null));
+        assert!(!envelope.contains_key("error"));
 
         let payload = envelope
-            .get("value")
+            .get("data")
             .and_then(JsonValue::as_object)
-            .expect("value payload must be object");
-        assert_eq!(payload.len(), 3);
+            .expect("data payload must be object");
+        assert!(!payload.is_empty());
         assert_eq!(
-            payload.get("command").and_then(JsonValue::as_str),
+            envelope
+                .get("meta")
+                .and_then(|meta| meta.get("tool"))
+                .and_then(JsonValue::as_str),
             Some(expected_command)
         );
-        assert!(payload.get("summary").is_some_and(JsonValue::is_string));
-        assert!(payload.get("args").is_some_and(JsonValue::is_object));
+        assert!(
+            envelope
+                .get("meta")
+                .and_then(|meta| meta.get("elapsed"))
+                .and_then(JsonValue::as_u64)
+                .is_some()
+        );
     }
 
     #[test]
     fn json_error_envelope_uses_stable_write_disabled_code() {
         let cli = Cli::parse_from([
             "tao",
-            "--json",
             "doc",
             "write",
             "--vault-root",
@@ -4598,7 +5222,11 @@ mod tests {
         let output = render_error_output(&error).expect("render error output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
-        assert!(envelope.get("value").is_some_and(JsonValue::is_null));
+        assert!(
+            envelope
+                .as_object()
+                .is_some_and(|object| !object.contains_key("data"))
+        );
         let error_payload = envelope
             .get("error")
             .and_then(JsonValue::as_object)
@@ -4620,7 +5248,6 @@ mod tests {
     fn json_error_envelope_uses_stable_query_parse_error_code() {
         let cli = Cli::parse_from([
             "tao",
-            "--json",
             "query",
             "--vault-root",
             "/tmp",
@@ -4646,6 +5273,213 @@ mod tests {
     }
 
     #[test]
+    fn runtime_json_failures_return_exit_code_one() {
+        let result = run_from_args(
+            ["tao", "tools", "missing.tool"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Failure);
+        assert!(result.stderr.is_none());
+        let stdout = result.stdout.expect("json stdout");
+        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse json failure");
+        assert_eq!(
+            envelope
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(JsonValue::as_str),
+            Some("invalid_argument")
+        );
+    }
+
+    #[test]
+    fn blocked_json_failures_return_exit_code_two() {
+        let result = run_from_args(
+            [
+                "tao",
+                "vault",
+                "stats",
+                "--vault-root",
+                "/definitely/missing-tao-vault",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Blocked);
+        assert!(result.stderr.is_none());
+        let stdout = result.stdout.expect("json stdout");
+        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse blocked failure");
+        assert_eq!(
+            envelope
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(JsonValue::as_str),
+            Some("blocked_prerequisite")
+        );
+    }
+
+    #[test]
+    fn write_disabled_errors_classify_as_blocked_prerequisites() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "doc",
+                "write",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "notes/test.md",
+                "--content",
+                "# test",
+            ]);
+            let error = dispatch(cli.command, cli.allow_writes).expect_err("write should fail");
+            let classified = classify_cli_error(&error);
+
+            assert_eq!(classified.exit_kind, ExitKind::Blocked);
+            let envelope: JsonValue =
+                serde_json::from_str(&render_error_output(&error).expect("render error"))
+                    .expect("parse blocked failure");
+            assert_eq!(
+                envelope
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(JsonValue::as_str),
+                Some("write_disabled")
+            );
+        });
+    }
+
+    #[test]
+    fn health_blocked_prerequisites_use_error_envelope_and_exit_code_two() {
+        let result = run_from_args(
+            [
+                "tao",
+                "health",
+                "--vault-root",
+                "/definitely/missing-tao-vault",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Blocked);
+        assert!(result.stderr.is_none());
+        let stdout = result.stdout.expect("json stdout");
+        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse blocked failure");
+        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
+        assert_eq!(
+            envelope
+                .get("meta")
+                .and_then(|meta| meta.get("tool"))
+                .and_then(JsonValue::as_str),
+            Some("health")
+        );
+        let details = envelope
+            .get("error")
+            .and_then(|error| error.get("details"))
+            .expect("health blocked details");
+        assert_eq!(
+            details.get("status").and_then(JsonValue::as_str),
+            Some("blocked")
+        );
+    }
+
+    #[test]
+    fn tools_catalog_includes_version_and_optional_query_parameters() {
+        let cli = Cli::parse_from(["tao", "tools"]);
+        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch tools");
+        let output = render_output(cli.json, &result).expect("render tools");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse tools output");
+
+        assert_eq!(
+            envelope
+                .get("data")
+                .and_then(|data| data.get("version"))
+                .and_then(JsonValue::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        let tools_entry = registry::tool_detail("tools").expect("tools registry entry");
+        assert!(
+            tools_entry.output_fields.contains(&"version"),
+            "tools registry outputFields should advertise version"
+        );
+
+        let query_tool = envelope
+            .get("data")
+            .and_then(|data| data.get("tools"))
+            .and_then(JsonValue::as_array)
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("query.run"))
+            })
+            .expect("query.run tool");
+        let parameters = query_tool
+            .get("parameters")
+            .and_then(JsonValue::as_array)
+            .expect("query.run parameters");
+
+        let path = parameters
+            .iter()
+            .find(|parameter| parameter.get("name").and_then(JsonValue::as_str) == Some("path"))
+            .expect("query.run path parameter");
+        assert_eq!(
+            path.get("required").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+
+        let view_name = parameters
+            .iter()
+            .find(|parameter| {
+                parameter.get("name").and_then(JsonValue::as_str) == Some("view_name")
+            })
+            .expect("query.run view_name parameter");
+        assert_eq!(
+            view_name.get("required").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn parse_failures_default_to_json_error_envelope() {
+        let result = run_from_args(
+            ["tao", "note", "read"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Failure);
+        assert!(result.stderr.is_none());
+        let stdout = result.stdout.expect("json stdout");
+        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse cli parse error");
+        assert_eq!(
+            envelope
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(JsonValue::as_str),
+            Some("invalid_argument")
+        );
+        assert_eq!(
+            envelope
+                .get("meta")
+                .and_then(|meta| meta.get("tool"))
+                .and_then(JsonValue::as_str),
+            Some("tao")
+        );
+    }
+
+    #[test]
     fn write_commands_are_blocked_without_allow_writes_flag() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -4658,7 +5492,6 @@ mod tests {
 
             let doc_write = Cli::parse_from([
                 "tao",
-                "--json",
                 "doc",
                 "write",
                 "--vault-root",
@@ -4674,7 +5507,6 @@ mod tests {
 
             let task_set_state = Cli::parse_from([
                 "tao",
-                "--json",
                 "task",
                 "set-state",
                 "--vault-root",
@@ -4705,7 +5537,6 @@ mod tests {
 
             let absolute = Cli::parse_from([
                 "tao",
-                "--json",
                 "--allow-writes",
                 "task",
                 "set-state",
@@ -4728,7 +5559,6 @@ mod tests {
 
             let parent = Cli::parse_from([
                 "tao",
-                "--json",
                 "--allow-writes",
                 "task",
                 "set-state",
@@ -4773,13 +5603,12 @@ read_only = true
             )
             .expect("write root config");
 
-            let cli = Cli::parse_from(["tao", "--json", "vault", "stats"]);
+            let cli = Cli::parse_from(["tao", "vault", "stats"]);
             let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let resolved_root = envelope
-                .get("value")
-                .and_then(|raw| raw.get("args"))
+                .get("data")
                 .and_then(|raw| raw.get("vault_root"))
                 .and_then(JsonValue::as_str)
                 .expect("resolved vault root");
@@ -4817,7 +5646,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "doc",
                 "write",
                 "--path",
@@ -4855,7 +5683,6 @@ read_only = false
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -4864,7 +5691,6 @@ read_only = false
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -4874,7 +5700,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -4893,8 +5718,7 @@ read_only = false
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let columns = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("columns"))
                 .and_then(JsonValue::as_array)
                 .expect("columns array");
@@ -4904,8 +5728,7 @@ read_only = false
                 .collect::<Vec<_>>();
             assert_eq!(column_names, vec!["path", "title"]);
             let rows = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("rows"))
                 .and_then(JsonValue::as_array)
                 .expect("rows array");
@@ -4944,7 +5767,6 @@ read_only = false
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -4953,7 +5775,6 @@ read_only = false
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -4963,7 +5784,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -4986,8 +5806,7 @@ read_only = false
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let rows = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("rows"))
                 .and_then(JsonValue::as_array)
                 .expect("rows array");
@@ -5028,7 +5847,6 @@ read_only = false
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5037,7 +5855,6 @@ read_only = false
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5047,7 +5864,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5068,8 +5884,7 @@ read_only = false
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(JsonValue::as_object)
                 .expect("args object");
             assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(1));
@@ -5104,7 +5919,6 @@ read_only = false
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5113,7 +5927,6 @@ read_only = false
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5123,7 +5936,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5144,8 +5956,7 @@ read_only = false
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(JsonValue::as_object)
                 .expect("args object");
             assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(1105));
@@ -5185,7 +5996,6 @@ read_only = false
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5194,7 +6004,6 @@ read_only = false
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5204,7 +6013,6 @@ read_only = false
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5222,8 +6030,7 @@ read_only = false
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(JsonValue::as_object)
                 .expect("args object");
             assert!(args.contains_key("logical_plan"));
@@ -5287,7 +6094,6 @@ priority: 2
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5296,7 +6102,6 @@ priority: 2
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5306,7 +6111,6 @@ priority: 2
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5327,8 +6131,7 @@ priority: 2
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(JsonValue::as_object)
                 .expect("args object");
             assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(2));
@@ -5378,7 +6181,6 @@ views:
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5387,7 +6189,6 @@ views:
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5397,7 +6198,6 @@ views:
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5416,8 +6216,7 @@ views:
             let output = render_output(cli.json, &result).expect("render output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
             let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(JsonValue::as_object)
                 .expect("args object");
 
@@ -5512,7 +6311,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5521,7 +6319,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5534,7 +6331,6 @@ links fixture
                     "docs",
                     Cli::parse_from([
                         "tao",
-                        "--json",
                         "query",
                         "--vault-root",
                         vault_root.to_string_lossy().as_ref(),
@@ -5557,7 +6353,6 @@ links fixture
                     "base",
                     Cli::parse_from([
                         "tao",
-                        "--json",
                         "query",
                         "--vault-root",
                         vault_root.to_string_lossy().as_ref(),
@@ -5580,7 +6375,6 @@ links fixture
                     "graph",
                     Cli::parse_from([
                         "tao",
-                        "--json",
                         "query",
                         "--vault-root",
                         vault_root.to_string_lossy().as_ref(),
@@ -5604,8 +6398,7 @@ links fixture
                 let envelope: JsonValue =
                     serde_json::from_str(&output).expect("parse matrix output");
                 let total = envelope
-                    .get("value")
-                    .and_then(|value| value.get("args"))
+                    .get("data")
                     .and_then(|args| args.get("total"))
                     .and_then(JsonValue::as_u64)
                     .unwrap_or(0);
@@ -5630,7 +6423,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5639,7 +6431,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5649,7 +6440,6 @@ links fixture
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "query",
                 "--vault-root",
                 vault_root.to_string_lossy().as_ref(),
@@ -5665,10 +6455,7 @@ links fixture
             let result = dispatch(cli.command, cli.allow_writes).expect("dispatch graph query");
             let output = render_output(cli.json, &result).expect("render graph query");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
-            let args = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
-                .expect("query args");
+            let args = envelope.get("data").expect("query args");
             assert_eq!(
                 args.get("outgoing_total").and_then(JsonValue::as_u64),
                 Some(1)
@@ -5707,7 +6494,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5716,7 +6502,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5726,7 +6511,6 @@ links fixture
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "--json-stream",
                 "query",
                 "--vault-root",
@@ -5748,14 +6532,13 @@ links fixture
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse streaming json");
             assert_eq!(
                 envelope
-                    .get("value")
-                    .and_then(|value| value.get("command"))
+                    .get("meta")
+                    .and_then(|value| value.get("tool"))
                     .and_then(JsonValue::as_str),
                 Some("query.run")
             );
             let columns = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("columns"))
                 .and_then(JsonValue::as_array)
                 .expect("columns");
@@ -5782,7 +6565,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5791,7 +6573,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5801,7 +6582,6 @@ links fixture
 
             let neighbors = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "neighbors",
                 "--vault-root",
@@ -5818,8 +6598,7 @@ links fixture
             .expect("render neighbors");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse neighbors");
             let items = envelope
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("neighbors items");
@@ -5848,7 +6627,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5857,7 +6635,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5867,7 +6644,6 @@ links fixture
 
             let found = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "path",
                 "--vault-root",
@@ -5886,8 +6662,7 @@ links fixture
                 serde_json::from_str(&found_output).expect("parse found path");
             assert_eq!(
                 found_envelope
-                    .get("value")
-                    .and_then(|value| value.get("args"))
+                    .get("data")
                     .and_then(|args| args.get("found"))
                     .and_then(JsonValue::as_bool),
                 Some(true)
@@ -5895,7 +6670,6 @@ links fixture
 
             let missing = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "path",
                 "--vault-root",
@@ -5914,8 +6688,7 @@ links fixture
                 serde_json::from_str(&missing_output).expect("parse missing path");
             assert_eq!(
                 missing_envelope
-                    .get("value")
-                    .and_then(|value| value.get("args"))
+                    .get("data")
                     .and_then(|args| args.get("found"))
                     .and_then(JsonValue::as_bool),
                 Some(false)
@@ -5923,7 +6696,6 @@ links fixture
 
             let guardrail = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "path",
                 "--vault-root",
@@ -5957,7 +6729,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -5966,7 +6737,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -5976,7 +6746,6 @@ links fixture
 
             let weak = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "components",
                 "--vault-root",
@@ -5992,8 +6761,7 @@ links fixture
             .expect("render weak components");
             let weak_json: JsonValue = serde_json::from_str(&weak_output).expect("parse weak json");
             let weak_items = weak_json
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("weak items");
@@ -6005,7 +6773,6 @@ links fixture
 
             let strong = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "components",
                 "--vault-root",
@@ -6022,8 +6789,7 @@ links fixture
             let strong_json: JsonValue =
                 serde_json::from_str(&strong_output).expect("parse strong json");
             let strong_items = strong_json
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("strong items");
@@ -6048,7 +6814,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6057,7 +6822,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -6067,7 +6831,6 @@ links fixture
 
             let plain_walk = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "walk",
                 "--vault-root",
@@ -6086,8 +6849,7 @@ links fixture
             let plain_json: JsonValue =
                 serde_json::from_str(&plain_output).expect("parse plain walk");
             let plain_items = plain_json
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("plain items");
@@ -6098,7 +6860,6 @@ links fixture
 
             let folder_walk = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "walk",
                 "--vault-root",
@@ -6118,8 +6879,7 @@ links fixture
             let folder_json: JsonValue =
                 serde_json::from_str(&folder_output).expect("parse folder walk");
             let folder_items = folder_json
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("folder walk items");
@@ -6144,7 +6904,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6153,7 +6912,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -6163,7 +6921,6 @@ links fixture
 
             let unresolved = Cli::parse_from([
                 "tao",
-                "--json",
                 "graph",
                 "unresolved",
                 "--vault-root",
@@ -6181,8 +6938,7 @@ links fixture
             .expect("render unresolved");
             let payload: JsonValue = serde_json::from_str(&output).expect("parse unresolved");
             let items = payload
-                .get("value")
-                .and_then(|value| value.get("args"))
+                .get("data")
                 .and_then(|args| args.get("items"))
                 .and_then(JsonValue::as_array)
                 .expect("unresolved items");
@@ -6219,7 +6975,6 @@ links fixture
 
             let open = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6228,7 +6983,6 @@ links fixture
             dispatch(open.command, open.allow_writes).expect("open vault");
             let reindex = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "reindex",
                 "--vault-root",
@@ -6244,10 +6998,7 @@ links fixture
                 .expect("render output");
                 let actual: JsonValue =
                     serde_json::from_str(&rendered).expect("parse json envelope");
-                let actual_args = actual
-                    .get("value")
-                    .and_then(|value| value.get("args"))
-                    .expect("value.args");
+                let actual_args = actual.get("data").expect("data");
                 let expected_raw = fs::read_to_string(expected_root.join(expected_name))
                     .expect("read expected snapshot");
                 let expected: JsonValue =
@@ -6262,7 +7013,6 @@ links fixture
                 "outgoing.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "outgoing",
                     "--vault-root",
@@ -6275,7 +7025,6 @@ links fixture
                 "backlinks.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "backlinks",
                     "--vault-root",
@@ -6288,7 +7037,6 @@ links fixture
                 "unresolved.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "unresolved",
                     "--vault-root",
@@ -6303,7 +7051,6 @@ links fixture
                 "deadends.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "deadends",
                     "--vault-root",
@@ -6318,7 +7065,6 @@ links fixture
                 "orphans.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "orphans",
                     "--vault-root",
@@ -6333,7 +7079,6 @@ links fixture
                 "floating.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "floating",
                     "--vault-root",
@@ -6348,7 +7093,6 @@ links fixture
                 "walk.json",
                 Cli::parse_from([
                     "tao",
-                    "--json",
                     "graph",
                     "walk",
                     "--vault-root",
@@ -6369,7 +7113,6 @@ links fixture
     fn daemon_control_commands_bypass_client_forwarding() {
         let cli = Cli::parse_from([
             "tao",
-            "--json",
             "--daemon-socket",
             "/tmp/tao-test.sock",
             "vault",
@@ -6386,7 +7129,6 @@ links fixture
     fn daemon_socket_resolution_prefers_explicit_override() {
         let cli = Cli::parse_from([
             "tao",
-            "--json",
             "--daemon-socket",
             "/tmp/tao-explicit.sock",
             "vault",
@@ -6409,7 +7151,6 @@ links fixture
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6549,7 +7290,6 @@ links fixture
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6560,8 +7300,7 @@ links fixture
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
             let db_path = envelope
-                .get("value")
-                .and_then(|raw| raw.get("args"))
+                .get("data")
                 .and_then(|raw| raw.get("db_path"))
                 .and_then(JsonValue::as_str)
                 .expect("db_path in response");
@@ -6583,7 +7322,6 @@ links fixture
 
             let cli = Cli::parse_from([
                 "tao",
-                "--json",
                 "vault",
                 "open",
                 "--vault-root",
@@ -6596,8 +7334,7 @@ links fixture
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
             let db_path = envelope
-                .get("value")
-                .and_then(|raw| raw.get("args"))
+                .get("data")
                 .and_then(|raw| raw.get("db_path"))
                 .and_then(JsonValue::as_str)
                 .expect("db_path in response");
