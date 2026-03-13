@@ -24,8 +24,8 @@ pub use planner::{
 };
 pub use types::{BaseCoercionError, BaseCoercionMode, BaseFieldType, coerce_json_value};
 pub use validation::{
-    BaseDiagnostic, BaseDiagnosticSeverity, validate_base_config_json, validate_base_document,
-    validate_base_yaml,
+    BaseConfigDecodeError, BaseDiagnostic, BaseDiagnosticSeverity, decode_base_config_json,
+    validate_base_config_json, validate_base_document, validate_base_yaml,
 };
 
 #[cfg(test)]
@@ -504,6 +504,24 @@ views:
         )
         .expect("parse document");
         let config_json = serde_json::to_string(&document).expect("serialize config");
+
+        let diagnostics = validate_base_config_json(&config_json);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn base_validation_accepts_raw_wrapped_yaml_payloads() {
+        let config_json = serde_json::json!({
+            "raw": r#"
+views:
+  - name: Projects
+    type: table
+    columns:
+      - status
+      - due
+"#,
+        })
+        .to_string();
 
         let diagnostics = validate_base_config_json(&config_json);
         assert!(diagnostics.is_empty());

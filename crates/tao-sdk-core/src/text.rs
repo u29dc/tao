@@ -19,6 +19,15 @@ pub fn note_folder_from_path(path: &str) -> String {
         .map_or_else(String::new, |parent| parent.to_string())
 }
 
+/// Derive a stable file extension from a normalized vault-relative path.
+#[must_use]
+pub fn note_extension_from_path(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or_else(String::new, |extension| extension.to_string())
+}
+
 /// Normalize one path-like token for deterministic comparisons.
 #[must_use]
 pub fn normalize_path_like(value: &str) -> String {
@@ -36,7 +45,8 @@ pub fn cmp_normalized_paths(left: &str, right: &str) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmp_normalized_paths, normalize_path_like, note_folder_from_path, note_title_from_path,
+        cmp_normalized_paths, normalize_path_like, note_extension_from_path, note_folder_from_path,
+        note_title_from_path,
     };
 
     #[test]
@@ -46,6 +56,8 @@ mod tests {
             note_folder_from_path("notes/projects/alpha.md"),
             "notes/projects"
         );
+        assert_eq!(note_extension_from_path("notes/projects/alpha.md"), "md");
+        assert_eq!(note_extension_from_path("notes/projects/archive"), "");
     }
 
     #[test]

@@ -433,9 +433,89 @@ fn parse_obsidian_filter_expression(
         return Ok(ObsidianFilterExpr::Clause(clause));
     }
 
+    if let Some(clause) = parse_obsidian_comparison_clause(body, negated, expression)? {
+        return Ok(ObsidianFilterExpr::Clause(clause));
+    }
+
     Err(BaseParseError::UnsupportedRootFilter {
         expression: expression.to_string(),
     })
+}
+
+fn parse_obsidian_comparison_clause(
+    body: &str,
+    negated: bool,
+    expression: &str,
+) -> Result<Option<BaseFilterClause>, BaseParseError> {
+    let Some((field_expr, op, raw_value)) = parse_obsidian_comparison_parts(body) else {
+        return Ok(None);
+    };
+    if negated {
+        return Err(BaseParseError::UnsupportedRootFilter {
+            expression: expression.to_string(),
+        });
+    }
+
+    let field_expr = field_expr.trim();
+    if field_expr.is_empty()
+        || field_expr.contains('(')
+        || field_expr.contains(')')
+        || field_expr.contains('"')
+        || field_expr.contains('\'')
+    {
+        return Err(BaseParseError::UnsupportedRootFilter {
+            expression: expression.to_string(),
+        });
+    }
+
+    let value = parse_obsidian_scalar_value(raw_value).ok_or_else(|| {
+        BaseParseError::UnsupportedRootFilter {
+            expression: expression.to_string(),
+        }
+    })?;
+
+    Ok(Some(BaseFilterClause {
+        key: normalize_obsidian_field_key(field_expr),
+        op,
+        value,
+    }))
+}
+
+fn parse_obsidian_comparison_parts(expression: &str) -> Option<(&str, BaseFilterOp, &str)> {
+    const OPERATORS: [(&str, BaseFilterOp); 6] = [
+        ("!=", BaseFilterOp::NotEq),
+        (">=", BaseFilterOp::Gte),
+        ("<=", BaseFilterOp::Lte),
+        ("==", BaseFilterOp::Eq),
+        (">", BaseFilterOp::Gt),
+        ("<", BaseFilterOp::Lt),
+    ];
+
+    for (symbol, op) in OPERATORS {
+        if let Some((lhs, rhs)) = expression.split_once(symbol) {
+            return Some((lhs, op, rhs));
+        }
+    }
+
+    None
+}
+
+fn parse_obsidian_scalar_value(raw: &str) -> Option<serde_json::Value> {
+    let parsed = serde_yaml::from_str::<Value>(raw.trim()).ok()?;
+    match parsed {
+        Value::Null => Some(serde_json::Value::Null),
+        Value::Bool(value) => Some(serde_json::Value::Bool(value)),
+        Value::Number(value) => serde_json::to_value(value).ok(),
+        Value::String(value) => Some(serde_json::Value::String(value)),
+        Value::Tagged(tagged) => match tagged.value {
+            Value::Null => Some(serde_json::Value::Null),
+            Value::Bool(value) => Some(serde_json::Value::Bool(value)),
+            Value::Number(value) => serde_json::to_value(value).ok(),
+            Value::String(value) => Some(serde_json::Value::String(value)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn parse_filters(
@@ -1110,6 +1190,47 @@ views:
                 direction: BaseSortDirection::Desc,
                 null_order: BaseNullOrder::First,
             }]
+        );
+    }
+
+    #[test]
+    fn parser_maps_obsidian_comparison_filters() {
+        let document = parse_base_document(
+            r#"
+filters:
+  and:
+    - file.inFolder("WORK/13-RELATIONS/Contents")
+    - file.ext == "md"
+    - note.status == "published"
+    - priority >= 2
+views:
+  - type: table
+    name: Table
+"#,
+        )
+        .expect("parse");
+
+        let table = &document.views[0];
+        assert_eq!(table.source.as_deref(), Some("WORK/13-RELATIONS/Contents"));
+        assert_eq!(
+            table.filters,
+            vec![
+                BaseFilterClause {
+                    key: "file_ext".to_string(),
+                    op: BaseFilterOp::Eq,
+                    value: json!("md"),
+                },
+                BaseFilterClause {
+                    key: "status".to_string(),
+                    op: BaseFilterOp::Eq,
+                    value: json!("published"),
+                },
+                BaseFilterClause {
+                    key: "priority".to_string(),
+                    op: BaseFilterOp::Gte,
+                    value: json!(2),
+                },
+            ]
         );
     }
 }

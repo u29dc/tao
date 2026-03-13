@@ -30,6 +30,9 @@ pub(crate) fn normalize_obsidian_field_key(raw: &str) -> String {
     if normalized.eq_ignore_ascii_case("file.folder") {
         return "file_folder".to_string();
     }
+    if normalized.eq_ignore_ascii_case("file.ext") {
+        return "file_ext".to_string();
+    }
     if let Some(rest) = normalized.strip_prefix("note.") {
         return rest.to_string();
     }
@@ -62,6 +65,7 @@ mod tests {
         assert_eq!(normalize_obsidian_field_key("file.name"), "title");
         assert_eq!(normalize_obsidian_field_key("file.path"), "path");
         assert_eq!(normalize_obsidian_field_key("file.folder"), "file_folder");
+        assert_eq!(normalize_obsidian_field_key("file.ext"), "file_ext");
         assert_eq!(normalize_obsidian_field_key("note.status"), "status");
     }
 }

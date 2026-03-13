@@ -20,8 +20,8 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
-    BaseDocument, BaseTableQueryPlanner, BaseViewRegistry, TableQueryPlanRequest,
-    parse_base_document,
+    BaseDiagnosticSeverity, BaseDocument, BaseTableQueryPlanner, BaseViewRegistry,
+    TableQueryPlanRequest, decode_base_config_json, validate_base_config_json,
 };
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_search::{
@@ -32,8 +32,9 @@ use tao_sdk_search::{
 };
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
-    GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
-    SdkConfigLoader, SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
+    BaseValidationService, GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest,
+    HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
+    ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, TasksRepository,
@@ -137,6 +138,8 @@ enum BaseCommands {
     View(BaseViewArgs),
     /// Return one base schema contract.
     Schema(BaseSchemaArgs),
+    /// Validate one base config and return diagnostics.
+    Validate(BaseSchemaArgs),
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -1610,6 +1613,7 @@ fn tool_name_for_command(command: &Commands) -> String {
             BaseCommands::List(_) => "base.list".to_string(),
             BaseCommands::View(_) => "base.view".to_string(),
             BaseCommands::Schema(_) => "base.schema".to_string(),
+            BaseCommands::Validate(_) => "base.validate".to_string(),
         },
         Commands::Graph { command } => match command {
             GraphCommands::Outgoing(_) => "graph.outgoing".to_string(),
@@ -2052,11 +2056,11 @@ fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<Comma
                 Ok(BasesRepository::list_with_paths(connection)?)
             })
             .map_err(|source| anyhow!("query bases failed: {source}"))?;
-            let items = bases
-                .into_iter()
-                .map(|base| -> Result<JsonValue> {
-                    let document = decode_base_document(&base.config_json)?;
-                    Ok(serde_json::json!({
+            let mut items = Vec::with_capacity(bases.len());
+            let mut invalid = Vec::new();
+            for base in bases {
+                match decode_base_document(&base.config_json) {
+                    Ok(document) => items.push(serde_json::json!({
                         "base_id": base.base_id,
                         "file_path": base.file_path,
                         "views": document
@@ -2065,15 +2069,24 @@ fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<Comma
                             .map(|view| view.name)
                             .collect::<Vec<_>>(),
                         "updated_at": base.updated_at,
-                    }))
-                })
-                .collect::<Result<Vec<_>>>()?;
+                    })),
+                    Err(_) => invalid.push(serde_json::json!({
+                        "base_id": base.base_id,
+                        "file_path": base.file_path,
+                        "updated_at": base.updated_at,
+                        "diagnostics": validate_base_config_json(&base.config_json),
+                    })),
+                }
+            }
             Ok(CommandResult {
                 command: "base.list".to_string(),
                 summary: "base list completed".to_string(),
                 args: serde_json::json!({
-                    "total": items.len(),
+                    "total": items.len() + invalid.len(),
+                    "valid_total": items.len(),
+                    "invalid_total": invalid.len(),
                     "items": items,
+                    "invalid": invalid,
                 }),
             })
         }
@@ -2086,7 +2099,8 @@ fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<Comma
             .into_iter()
             .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
             .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
-            let document = decode_base_document(&base.config_json)?;
+            let document = decode_base_document(&base.config_json)
+                .with_context(|| format!("decode base document '{}'", base.file_path))?;
             let registry = BaseViewRegistry::from_document(&document)
                 .map_err(|source| anyhow!("decode base view registry failed: {source}"))?;
             let plan = BaseTableQueryPlanner
@@ -2151,7 +2165,8 @@ fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<Comma
             .into_iter()
             .find(|base| base.base_id == args.path_or_id || base.file_path == args.path_or_id)
             .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
-            let document = decode_base_document(&base.config_json)?;
+            let document = decode_base_document(&base.config_json)
+                .with_context(|| format!("decode base document '{}'", base.file_path))?;
             let views = document
                 .views
                 .iter()
@@ -2180,6 +2195,28 @@ fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<Comma
                     "base_id": base.base_id,
                     "file_path": base.file_path,
                     "views": views,
+                }),
+            })
+        }
+        BaseCommands::Validate(args) => {
+            let resolved = args.resolve()?;
+            let result = with_connection(runtime, &resolved, |connection| {
+                Ok(BaseValidationService.validate(connection, &args.path_or_id)?)
+            })
+            .map_err(|source| anyhow!("validate base failed: {source}"))?;
+            let valid = !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == BaseDiagnosticSeverity::Error);
+            Ok(CommandResult {
+                command: "base.validate".to_string(),
+                summary: "base validate completed".to_string(),
+                args: serde_json::json!({
+                    "base_id": result.base_id,
+                    "file_id": result.file_id,
+                    "file_path": result.file_path,
+                    "valid": valid,
+                    "diagnostics": result.diagnostics,
                 }),
             })
         }
@@ -3631,6 +3668,7 @@ fn resolve_command_vault_paths(command: &Commands) -> Result<Option<ResolvedVaul
             BaseCommands::List(args) => args.resolve()?,
             BaseCommands::View(args) => args.resolve()?,
             BaseCommands::Schema(args) => args.resolve()?,
+            BaseCommands::Validate(args) => args.resolve()?,
         },
         Commands::Graph { command } => match command {
             GraphCommands::Outgoing(args) => args.resolve()?,
@@ -4625,18 +4663,7 @@ fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str) -> Result<
 }
 
 fn decode_base_document(config_json: &str) -> Result<BaseDocument> {
-    if let Ok(document) = serde_json::from_str::<BaseDocument>(config_json) {
-        return Ok(document);
-    }
-
-    let raw_value = serde_json::from_str::<JsonValue>(config_json)
-        .map_err(|source| anyhow!("parse base config json failed: {source}"))?;
-    let Some(raw_yaml) = raw_value.get("raw").and_then(JsonValue::as_str) else {
-        return Err(anyhow!(
-            "base config json is not a supported document payload"
-        ));
-    };
-    parse_base_document(raw_yaml).map_err(|source| anyhow!("parse base yaml failed: {source}"))
+    decode_base_config_json(config_json).map_err(|source| anyhow!("{source}"))
 }
 
 fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connection> {
@@ -6242,6 +6269,263 @@ views:
                 })
                 .collect::<Vec<_>>();
             assert_eq!(priorities, vec!["50", "49", "48", "47", "46"]);
+        });
+    }
+
+    #[test]
+    fn base_view_supports_obsidian_file_ext_root_filter() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/contents")).expect("create contents");
+            fs::create_dir_all(vault_root.join("views")).expect("create views");
+
+            fs::write(
+                vault_root.join("views/contents.base"),
+                r#"
+filters:
+  and:
+    - file.inFolder("notes/contents")
+    - file.ext == "md"
+    - '!file.name.startsWith("index_")'
+views:
+  - type: table
+    name: Table
+    columns:
+      - file.name
+"#,
+            )
+            .expect("write base");
+            fs::write(vault_root.join("notes/contents/alpha.md"), "# Alpha\n")
+                .expect("write alpha");
+            fs::write(vault_root.join("notes/contents/index_home.md"), "# Index\n")
+                .expect("write index");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "base",
+                "view",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path-or-id",
+                "views/contents.base",
+                "--view-name",
+                "Table",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base view");
+            let output = render_output(cli.json, &result).expect("render base view");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope.get("data").expect("data");
+            assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(1));
+            let rows = args
+                .get("rows")
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0]
+                    .get("values")
+                    .and_then(|values| values.get("title"))
+                    .and_then(JsonValue::as_str),
+                Some("alpha")
+            );
+        });
+    }
+
+    #[test]
+    fn base_list_reports_invalid_entries_without_failing() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::create_dir_all(vault_root.join("views")).expect("create views");
+
+            fs::write(
+                vault_root.join("views/a-valid.base"),
+                r#"
+views:
+  - name: Valid
+    type: table
+    columns:
+      - title
+"#,
+            )
+            .expect("write valid base");
+            fs::write(
+                vault_root.join("views/z-invalid.base"),
+                r#"
+filters:
+  and:
+    - file.name.endsWith("hub_")
+views:
+  - name: Invalid
+    type: table
+    columns:
+      - title
+"#,
+            )
+            .expect("write invalid base");
+            fs::write(vault_root.join("notes/alpha.md"), "# Alpha\n").expect("write note");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "base",
+                "list",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base list");
+            let output = render_output(cli.json, &result).expect("render base list");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope.get("data").expect("data");
+
+            assert_eq!(args.get("total").and_then(JsonValue::as_u64), Some(2));
+            assert_eq!(args.get("valid_total").and_then(JsonValue::as_u64), Some(1));
+            assert_eq!(
+                args.get("invalid_total").and_then(JsonValue::as_u64),
+                Some(1)
+            );
+
+            let items = args
+                .get("items")
+                .and_then(JsonValue::as_array)
+                .expect("valid items");
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                items[0].get("file_path").and_then(JsonValue::as_str),
+                Some("views/a-valid.base")
+            );
+
+            let invalid = args
+                .get("invalid")
+                .and_then(JsonValue::as_array)
+                .expect("invalid items");
+            assert_eq!(invalid.len(), 1);
+            assert_eq!(
+                invalid[0].get("file_path").and_then(JsonValue::as_str),
+                Some("views/z-invalid.base")
+            );
+            let diagnostics = invalid[0]
+                .get("diagnostics")
+                .and_then(JsonValue::as_array)
+                .expect("diagnostics");
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].get("code").and_then(JsonValue::as_str),
+                Some("bases.parse.invalid_schema")
+            );
+            assert!(
+                diagnostics[0]
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|message| message.contains("unsupported root filter expression"))
+            );
+        });
+    }
+
+    #[test]
+    fn base_validate_returns_diagnostics_for_invalid_base() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::create_dir_all(vault_root.join("views")).expect("create views");
+
+            fs::write(
+                vault_root.join("views/invalid.base"),
+                r#"
+filters:
+  and:
+    - file.name.endsWith("hub_")
+views:
+  - name: Invalid
+    type: table
+    columns:
+      - title
+"#,
+            )
+            .expect("write invalid base");
+            fs::write(vault_root.join("notes/alpha.md"), "# Alpha\n").expect("write note");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "base",
+                "validate",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path-or-id",
+                "views/invalid.base",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base validate");
+            let output = render_output(cli.json, &result).expect("render base validate");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let args = envelope.get("data").expect("data");
+
+            assert_eq!(
+                args.get("file_path").and_then(JsonValue::as_str),
+                Some("views/invalid.base")
+            );
+            assert_eq!(args.get("valid").and_then(JsonValue::as_bool), Some(false));
+            let diagnostics = args
+                .get("diagnostics")
+                .and_then(JsonValue::as_array)
+                .expect("diagnostics");
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(
+                diagnostics[0].get("field").and_then(JsonValue::as_str),
+                Some("filters.and")
+            );
         });
     }
 

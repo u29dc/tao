@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use thiserror::Error;
 
 use crate::ast::{BaseDocument, BaseViewKind};
 use crate::parser::{BaseParseError, parse_base_document};
@@ -28,6 +30,43 @@ pub struct BaseDiagnostic {
     pub field: Option<String>,
 }
 
+/// Persisted base config decode failures.
+#[derive(Debug, Error)]
+pub enum BaseConfigDecodeError {
+    /// Persisted config JSON could not be decoded at all.
+    #[error("failed to decode base config json: {source}")]
+    DeserializeConfigJson {
+        /// Underlying JSON parse error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Persisted config JSON did not match a supported payload shape.
+    #[error("base config json is not a supported document payload")]
+    UnsupportedPayload,
+    /// Raw wrapped yaml could not be parsed into a base document.
+    #[error("parse base yaml failed: {source}")]
+    ParseRawYaml {
+        /// Underlying base YAML parse error.
+        #[source]
+        source: BaseParseError,
+    },
+}
+
+/// Decode persisted base config JSON into one parsed base document.
+pub fn decode_base_config_json(config_json: &str) -> Result<BaseDocument, BaseConfigDecodeError> {
+    if let Ok(document) = serde_json::from_str::<BaseDocument>(config_json) {
+        return Ok(document);
+    }
+
+    let raw_value = serde_json::from_str::<JsonValue>(config_json)
+        .map_err(|source| BaseConfigDecodeError::DeserializeConfigJson { source })?;
+    let Some(raw_yaml) = raw_value.get("raw").and_then(JsonValue::as_str) else {
+        return Err(BaseConfigDecodeError::UnsupportedPayload);
+    };
+
+    parse_base_document(raw_yaml).map_err(|source| BaseConfigDecodeError::ParseRawYaml { source })
+}
+
 /// Validate raw `.base` YAML content and return diagnostics.
 #[must_use]
 pub fn validate_base_yaml(input: &str) -> Vec<BaseDiagnostic> {
@@ -40,12 +79,13 @@ pub fn validate_base_yaml(input: &str) -> Vec<BaseDiagnostic> {
 /// Validate persisted base config JSON payload and return diagnostics.
 #[must_use]
 pub fn validate_base_config_json(config_json: &str) -> Vec<BaseDiagnostic> {
-    match serde_json::from_str::<BaseDocument>(config_json) {
+    match decode_base_config_json(config_json) {
         Ok(document) => validate_base_document(&document),
+        Err(BaseConfigDecodeError::ParseRawYaml { source }) => vec![parse_error_diagnostic(source)],
         Err(source) => vec![BaseDiagnostic {
             code: "bases.parse.invalid_schema".to_string(),
             severity: BaseDiagnosticSeverity::Error,
-            message: format!("failed to decode base config json: {source}"),
+            message: source.to_string(),
             field: None,
         }],
     }

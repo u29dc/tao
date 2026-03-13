@@ -51,7 +51,8 @@ use tao_sdk_bases::{
     compare_optional_json_values, evaluate_filter, validate_base_config_json,
 };
 use tao_sdk_core::{
-    DomainEvent, DomainEventBus, NoteChangeKind, note_folder_from_path, note_title_from_path,
+    DomainEvent, DomainEventBus, NoteChangeKind, note_extension_from_path, note_folder_from_path,
+    note_title_from_path,
 };
 use tao_sdk_links::resolve_target;
 use tao_sdk_markdown::{
@@ -1693,6 +1694,9 @@ impl TableRowCandidate {
         }
         if key.eq_ignore_ascii_case("folder") || key.eq_ignore_ascii_case("file_folder") {
             return Some(JsonValue::String(note_folder_from_path(&self.file_path)));
+        }
+        if key.eq_ignore_ascii_case("ext") || key.eq_ignore_ascii_case("file_ext") {
+            return Some(JsonValue::String(note_extension_from_path(&self.file_path)));
         }
         if key.eq_ignore_ascii_case("title") {
             return Some(JsonValue::String(note_title_from_path(&self.file_path)));
@@ -6027,6 +6031,57 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].file_path, "notes/projects/alpha.md");
+    }
+
+    #[test]
+    fn base_table_executor_exposes_file_extension_builtin() {
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+
+        FilesRepository::insert(
+            &connection,
+            &file_record(
+                "f1",
+                "notes/projects/alpha.md",
+                "notes/projects/alpha.md",
+                "/vault/notes/projects/alpha.md",
+            ),
+        )
+        .expect("insert markdown");
+
+        let plan = TableQueryPlan {
+            view_name: "Projects".to_string(),
+            source_prefix: Some("notes/projects".to_string()),
+            required_property_keys: vec!["file_ext".to_string()],
+            filters: vec![BaseFilterClause {
+                key: "file_ext".to_string(),
+                op: BaseFilterOp::Eq,
+                value: serde_json::json!("md"),
+            }],
+            sorts: Vec::new(),
+            columns: vec![BaseColumnConfig {
+                key: "file_ext".to_string(),
+                label: None,
+                width: None,
+                hidden: false,
+            }],
+            group_by: Vec::new(),
+            aggregates: Vec::new(),
+            relations: Vec::new(),
+            rollups: Vec::new(),
+            limit: 10,
+            offset: 0,
+            property_queries: Vec::new(),
+        };
+
+        let page = BaseTableExecutorService
+            .execute(&connection, &plan)
+            .expect("execute table plan");
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            page.rows[0].values.get("file_ext"),
+            Some(&serde_json::json!("md"))
+        );
     }
 
     #[test]
