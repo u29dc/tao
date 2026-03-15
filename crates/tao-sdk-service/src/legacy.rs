@@ -30,13 +30,14 @@ pub use import_export::{
     TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
 };
 pub use indexing::{
-    CheckpointedIndexError, CheckpointedIndexResult, CheckpointedIndexService,
-    CoalescedBatchIndexResult, CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexError,
-    FullIndexResult, FullIndexService, IncrementalIndexResult, IncrementalIndexService,
-    IndexConsistencyChecker, IndexConsistencyError, IndexConsistencyIssue, IndexConsistencyReport,
-    IndexSelfHealError, IndexSelfHealResult, IndexSelfHealService, ReconciliationScanError,
-    ReconciliationScanResult, ReconciliationScannerService, StaleCleanupError, StaleCleanupResult,
-    StaleCleanupService,
+    CURRENT_LINK_RESOLUTION_VERSION, CheckpointedIndexError, CheckpointedIndexResult,
+    CheckpointedIndexService, CoalescedBatchIndexResult, CoalescedBatchIndexService,
+    ConsistencyIssueKind, FullIndexError, FullIndexResult, FullIndexService,
+    IncrementalIndexResult, IncrementalIndexService, IndexConsistencyChecker,
+    IndexConsistencyError, IndexConsistencyIssue, IndexConsistencyReport, IndexSelfHealError,
+    IndexSelfHealResult, IndexSelfHealService, LINK_RESOLUTION_VERSION_STATE_KEY,
+    ReconciliationScanError, ReconciliationScanResult, ReconciliationScannerService,
+    StaleCleanupError, StaleCleanupResult, StaleCleanupService,
 };
 use rayon::prelude::*;
 pub use tracing_hooks::ServiceTraceContext;

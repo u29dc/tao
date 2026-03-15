@@ -31,6 +31,8 @@ use thiserror::Error;
 
 const CHECKPOINT_STATE_KEY: &str = "checkpoint.incremental_index";
 const CHECKPOINT_SUMMARY_KEY: &str = "last_checkpointed_index_summary";
+pub const LINK_RESOLUTION_VERSION_STATE_KEY: &str = "link_resolution_version";
+pub const CURRENT_LINK_RESOLUTION_VERSION: u32 = 2;
 
 /// Result payload for full rebuild indexing workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +194,16 @@ impl FullIndexService {
             &IndexStateRecordInput {
                 key: "last_index_at".to_string(),
                 value_json: now_unix_ms.to_string(),
+            },
+        )
+        .map_err(|source| FullIndexError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+        IndexStateRepository::upsert(
+            &transaction,
+            &IndexStateRecordInput {
+                key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
+                value_json: CURRENT_LINK_RESOLUTION_VERSION.to_string(),
             },
         )
         .map_err(|source| FullIndexError::UpsertIndexState {
@@ -691,6 +703,16 @@ impl IncrementalIndexService {
             &IndexStateRecordInput {
                 key: "last_index_at".to_string(),
                 value_json: now_unix_ms.to_string(),
+            },
+        )
+        .map_err(|source| FullIndexError::UpsertIndexState {
+            source: Box::new(source),
+        })?;
+        IndexStateRepository::upsert(
+            &transaction,
+            &IndexStateRecordInput {
+                key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
+                value_json: CURRENT_LINK_RESOLUTION_VERSION.to_string(),
             },
         )
         .map_err(|source| FullIndexError::UpsertIndexState {
@@ -1202,6 +1224,37 @@ pub struct ReconciliationScanResult {
     pub bases_reindexed: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReconciliationDrift {
+    scanned_files: u64,
+    inserted_changed_paths: Vec<PathBuf>,
+    updated_changed_paths: Vec<PathBuf>,
+    removed_changed_paths: Vec<PathBuf>,
+    inserted_paths: u64,
+    updated_paths: u64,
+    removed_paths: u64,
+}
+
+impl ReconciliationDrift {
+    fn drift_paths(&self) -> u64 {
+        (self.inserted_changed_paths.len()
+            + self.updated_changed_paths.len()
+            + self.removed_changed_paths.len()) as u64
+    }
+
+    fn into_changed_paths(self) -> Vec<PathBuf> {
+        let mut changed_paths = Vec::with_capacity(
+            self.inserted_changed_paths.len()
+                + self.updated_changed_paths.len()
+                + self.removed_changed_paths.len(),
+        );
+        changed_paths.extend(self.inserted_changed_paths);
+        changed_paths.extend(self.updated_changed_paths);
+        changed_paths.extend(self.removed_changed_paths);
+        changed_paths
+    }
+}
+
 /// Scanner that detects drift and repairs it via bounded incremental index batches.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReconciliationScannerService {
@@ -1209,6 +1262,30 @@ pub struct ReconciliationScannerService {
 }
 
 impl ReconciliationScannerService {
+    /// Scan vault vs index metadata and return drift counts without mutating the index.
+    pub fn scan(
+        &self,
+        vault_root: &Path,
+        connection: &Connection,
+        case_policy: CasePolicy,
+    ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
+        let drift = collect_reconciliation_drift(vault_root, connection, case_policy)?;
+
+        Ok(ReconciliationScanResult {
+            scanned_files: drift.scanned_files,
+            inserted_paths: drift.inserted_paths,
+            updated_paths: drift.updated_paths,
+            removed_paths: drift.removed_paths,
+            drift_paths: drift.drift_paths(),
+            batches_applied: 0,
+            upserted_files: 0,
+            removed_files: 0,
+            links_reindexed: 0,
+            properties_reindexed: 0,
+            bases_reindexed: 0,
+        })
+    }
+
     /// Scan vault vs index metadata and repair missed watcher events.
     pub fn scan_and_repair(
         &self,
@@ -1221,83 +1298,16 @@ impl ReconciliationScannerService {
             return Err(ReconciliationScanError::InvalidBatchSize { value: 0 });
         }
 
-        let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
-            ReconciliationScanError::CreateScanner {
-                source: Box::new(source),
-            }
-        })?;
-        let manifest = scanner
-            .scan()
-            .map_err(|source| ReconciliationScanError::Scan {
-                source: Box::new(source),
-            })?;
+        let drift = collect_reconciliation_drift(vault_root, connection, case_policy)?;
+        let drift_paths = drift.drift_paths();
+        let scanned_files = drift.scanned_files;
+        let inserted_paths = drift.inserted_paths;
+        let updated_paths = drift.updated_paths;
+        let removed_paths = drift.removed_paths;
 
-        let existing = FilesRepository::list_reconcile(connection).map_err(|source| {
-            ReconciliationScanError::ListIndexedFiles {
-                source: Box::new(source),
-            }
-        })?;
-        let mut inserted_changed_paths = Vec::new();
-        let mut updated_changed_paths = Vec::new();
-        let mut removed_changed_paths = Vec::new();
-        let mut inserted_paths = 0_u64;
-        let mut updated_paths = 0_u64;
-        let mut removed_paths = 0_u64;
-        let mut scan_index = 0_usize;
-        let mut existing_index = 0_usize;
-
-        while scan_index < manifest.entries.len() && existing_index < existing.len() {
-            let scanned = &manifest.entries[scan_index];
-            let indexed = &existing[existing_index];
-            let order = scanned
-                .match_key
-                .cmp(&indexed.match_key)
-                .then(scanned.normalized.cmp(&indexed.normalized_path));
-
-            match order {
-                std::cmp::Ordering::Less => {
-                    inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
-                    inserted_paths += 1;
-                    scan_index += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
-                    removed_paths += 1;
-                    existing_index += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    if !indexed_record_matches_manifest_entry(indexed, scanned) {
-                        updated_changed_paths.push(PathBuf::from(&scanned.normalized));
-                        updated_paths += 1;
-                    }
-                    scan_index += 1;
-                    existing_index += 1;
-                }
-            }
-        }
-
-        for scanned in &manifest.entries[scan_index..] {
-            inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
-            inserted_paths += 1;
-        }
-
-        for indexed in &existing[existing_index..] {
-            removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
-            removed_paths += 1;
-        }
-
-        let mut changed_paths = Vec::with_capacity(
-            inserted_changed_paths.len()
-                + updated_changed_paths.len()
-                + removed_changed_paths.len(),
-        );
-        changed_paths.extend(inserted_changed_paths);
-        changed_paths.extend(updated_changed_paths);
-        changed_paths.extend(removed_changed_paths);
-
-        if changed_paths.is_empty() {
+        if drift_paths == 0 {
             return Ok(ReconciliationScanResult {
-                scanned_files: manifest.entries.len() as u64,
+                scanned_files,
                 inserted_paths,
                 updated_paths,
                 removed_paths,
@@ -1311,6 +1321,7 @@ impl ReconciliationScannerService {
             });
         }
 
+        let changed_paths = drift.into_changed_paths();
         let batch_result = self
             .coalesced
             .apply_coalesced(
@@ -1325,11 +1336,11 @@ impl ReconciliationScannerService {
             })?;
 
         Ok(ReconciliationScanResult {
-            scanned_files: manifest.entries.len() as u64,
+            scanned_files,
             inserted_paths,
             updated_paths,
             removed_paths,
-            drift_paths: batch_result.unique_paths,
+            drift_paths,
             batches_applied: batch_result.batches_applied,
             upserted_files: batch_result.upserted_files,
             removed_files: batch_result.removed_files,
@@ -1338,6 +1349,88 @@ impl ReconciliationScannerService {
             bases_reindexed: batch_result.bases_reindexed,
         })
     }
+}
+
+fn collect_reconciliation_drift(
+    vault_root: &Path,
+    connection: &Connection,
+    case_policy: CasePolicy,
+) -> Result<ReconciliationDrift, ReconciliationScanError> {
+    let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
+        ReconciliationScanError::CreateScanner {
+            source: Box::new(source),
+        }
+    })?;
+    let manifest = scanner
+        .scan()
+        .map_err(|source| ReconciliationScanError::Scan {
+            source: Box::new(source),
+        })?;
+
+    let existing = FilesRepository::list_reconcile(connection).map_err(|source| {
+        ReconciliationScanError::ListIndexedFiles {
+            source: Box::new(source),
+        }
+    })?;
+
+    let mut inserted_changed_paths = Vec::new();
+    let mut updated_changed_paths = Vec::new();
+    let mut removed_changed_paths = Vec::new();
+    let mut inserted_paths = 0_u64;
+    let mut updated_paths = 0_u64;
+    let mut removed_paths = 0_u64;
+    let mut scan_index = 0_usize;
+    let mut existing_index = 0_usize;
+
+    while scan_index < manifest.entries.len() && existing_index < existing.len() {
+        let scanned = &manifest.entries[scan_index];
+        let indexed = &existing[existing_index];
+        let order = scanned
+            .match_key
+            .cmp(&indexed.match_key)
+            .then(scanned.normalized.cmp(&indexed.normalized_path));
+
+        match order {
+            std::cmp::Ordering::Less => {
+                inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
+                inserted_paths += 1;
+                scan_index += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
+                removed_paths += 1;
+                existing_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if !indexed_record_matches_manifest_entry(indexed, scanned) {
+                    updated_changed_paths.push(PathBuf::from(&scanned.normalized));
+                    updated_paths += 1;
+                }
+                scan_index += 1;
+                existing_index += 1;
+            }
+        }
+    }
+
+    for scanned in &manifest.entries[scan_index..] {
+        inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
+        inserted_paths += 1;
+    }
+
+    for indexed in &existing[existing_index..] {
+        removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
+        removed_paths += 1;
+    }
+
+    Ok(ReconciliationDrift {
+        scanned_files: manifest.entries.len() as u64,
+        inserted_changed_paths,
+        updated_changed_paths,
+        removed_changed_paths,
+        inserted_paths,
+        updated_paths,
+        removed_paths,
+    })
 }
 
 fn indexed_record_matches_manifest_entry(
@@ -3506,15 +3599,18 @@ mod tests {
     use rusqlite::Connection;
     use serde_json::Value as JsonValue;
     use tao_sdk_storage::{
-        BasesRepository, FilesRepository, IndexStateRepository, LinksRepository,
+        BasesRepository, FileRecordInput, FilesRepository, IndexStateRepository, LinksRepository,
         PropertiesRepository, run_migrations,
     };
     use tempfile::tempdir;
 
+    use crate::BacklinkGraphService;
+
     use super::{
-        CasePolicy, CheckpointedIndexService, CoalescedBatchIndexService, ConsistencyIssueKind,
-        FullIndexService, IncrementalIndexService, IndexConsistencyChecker, IndexSelfHealService,
-        ReconciliationScannerService, StaleCleanupService,
+        CURRENT_LINK_RESOLUTION_VERSION, CasePolicy, CheckpointedIndexService,
+        CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexService,
+        IncrementalIndexService, IndexConsistencyChecker, IndexSelfHealService,
+        LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, StaleCleanupService,
     };
 
     #[test]
@@ -3582,6 +3678,14 @@ mod tests {
             IndexStateRepository::get_by_key(&connection, "last_full_index_summary")
                 .expect("get summary state")
                 .is_some()
+        );
+        let version =
+            IndexStateRepository::get_by_key(&connection, LINK_RESOLUTION_VERSION_STATE_KEY)
+                .expect("get link resolution version")
+                .expect("version state exists");
+        assert_eq!(
+            serde_json::from_str::<u32>(&version.value_json).expect("parse version"),
+            CURRENT_LINK_RESOLUTION_VERSION
         );
     }
 
@@ -3896,6 +4000,49 @@ mod tests {
                 .expect("pdf backlinks");
         assert_eq!(backlinks_pdf.len(), 1);
         assert_eq!(backlinks_pdf[0].source_path, "notes/index.md");
+    }
+
+    #[test]
+    fn wikilink_attachments_resolve_from_frontmatter_and_body_with_ancestor_relative_paths() {
+        let temp = tempdir().expect("tempdir");
+        let contents_root = temp.path().join("WORK/13-RELATIONS/Contents");
+        fs::create_dir_all(contents_root.join("Media")).expect("create media dir");
+        fs::write(
+            contents_root.join("post.md"),
+            "---\nassets:\n  - \"[[Contents/Media/foo.jpg]]\"\n---\n# Post\n![[Contents/Media/foo.jpg]]",
+        )
+        .expect("write post");
+        fs::write(contents_root.join("Media/foo.jpg"), "jpg").expect("write image");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+            .expect("full index");
+
+        let source = FilesRepository::get_by_normalized_path(
+            &connection,
+            "WORK/13-RELATIONS/Contents/post.md",
+        )
+        .expect("get source")
+        .expect("source exists");
+        let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
+            .expect("list outgoing");
+
+        assert_eq!(outgoing.len(), 2);
+        assert!(outgoing.iter().all(|row| !row.is_unresolved));
+        assert!(outgoing.iter().all(|row| {
+            row.resolved_path.as_deref() == Some("WORK/13-RELATIONS/Contents/Media/foo.jpg")
+        }));
+        assert!(
+            outgoing
+                .iter()
+                .any(|row| row.source_field == "body" && row.raw_target == "Contents/Media/foo.jpg")
+        );
+        assert!(outgoing.iter().any(|row| {
+            row.source_field.starts_with("frontmatter:assets")
+                && row.raw_target == "Contents/Media/foo.jpg"
+        }));
     }
 
     #[test]
@@ -4281,6 +4428,89 @@ mod tests {
         assert_eq!(outgoing[0].resolved_path, None);
         assert_eq!(outgoing[0].heading_slug.as_deref(), Some("known-heading"));
         assert_eq!(outgoing[0].unresolved_reason.as_deref(), Some("bad-anchor"));
+    }
+
+    #[test]
+    fn reconciliation_scan_detects_malformed_normalized_rows_without_mutating_and_repair_removes_them()
+     {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(vault_root.join("notes/a.md"), "# A\n[[b]]\n").expect("write a");
+        fs::write(vault_root.join("notes/b.md"), "# B\n").expect("write b");
+
+        let mut connection = Connection::open_in_memory().expect("open db");
+        run_migrations(&mut connection).expect("run migrations");
+        FullIndexService::default()
+            .rebuild(&vault_root, &mut connection, CasePolicy::Sensitive)
+            .expect("seed full index");
+
+        let bogus_absolute = vault_root
+            .join("notes/a.md")
+            .canonicalize()
+            .expect("canonicalize note");
+        let bogus_path = bogus_absolute
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_string();
+        let metadata = fs::metadata(&bogus_absolute).expect("read metadata");
+
+        FilesRepository::insert(
+            &connection,
+            &FileRecordInput {
+                file_id: "file-bogus-a".to_string(),
+                normalized_path: bogus_path.clone(),
+                match_key: bogus_path.to_lowercase(),
+                absolute_path: bogus_absolute.to_string_lossy().to_string(),
+                size_bytes: metadata.len(),
+                modified_unix_ms: metadata
+                    .modified()
+                    .expect("modified time")
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("modified after epoch")
+                    .as_millis()
+                    .try_into()
+                    .expect("modified fits in i64"),
+                hash_blake3: "hash-bogus".to_string(),
+                is_markdown: true,
+            },
+        )
+        .expect("insert bogus row");
+
+        let (orphans_total_before, orphans_before) = BacklinkGraphService
+            .orphans_page(&connection, 50, 0)
+            .expect("orphans before repair");
+        assert_eq!(orphans_total_before, 1);
+        assert_eq!(orphans_before[0].path, bogus_path);
+
+        let scan = ReconciliationScannerService::default()
+            .scan(&vault_root, &connection, CasePolicy::Sensitive)
+            .expect("scan drift");
+        assert_eq!(scan.removed_paths, 1);
+        assert_eq!(scan.drift_paths, 1);
+        assert!(
+            FilesRepository::get_by_normalized_path(&connection, &bogus_path)
+                .expect("lookup bogus before repair")
+                .is_some()
+        );
+
+        let repair = ReconciliationScannerService::default()
+            .scan_and_repair(&vault_root, &mut connection, CasePolicy::Sensitive, 128)
+            .expect("repair drift");
+        assert_eq!(repair.removed_paths, 1);
+        assert_eq!(repair.drift_paths, 1);
+        assert_eq!(repair.removed_files, 1);
+        assert!(
+            FilesRepository::get_by_normalized_path(&connection, &bogus_path)
+                .expect("lookup bogus after repair")
+                .is_none()
+        );
+
+        let (orphans_total_after, orphans_after) = BacklinkGraphService
+            .orphans_page(&connection, 50, 0)
+            .expect("orphans after repair");
+        assert_eq!(orphans_total_after, 0);
+        assert!(orphans_after.is_empty());
     }
 
     #[test]

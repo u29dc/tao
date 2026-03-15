@@ -467,16 +467,36 @@ fn hex_value(value: char) -> Option<u8> {
 fn resolve_target_variants(target: &str, source_dir: Option<&str>) -> Vec<String> {
     let mut variants = vec![collapse_dot_segments(target)];
     if let Some(source_dir) = source_dir {
-        let combined = if source_dir.is_empty() {
-            target.to_string()
-        } else {
-            format!("{source_dir}/{target}")
-        };
-        variants.push(collapse_dot_segments(&combined));
+        for ancestor in ancestor_dirs(source_dir) {
+            let combined = if ancestor.is_empty() {
+                target.to_string()
+            } else {
+                format!("{ancestor}/{target}")
+            };
+            variants.push(collapse_dot_segments(&combined));
+        }
     }
     variants.sort();
     variants.dedup();
     variants
+}
+
+fn ancestor_dirs(path: &str) -> Vec<String> {
+    let normalized = normalize_path_like(path);
+    if normalized.is_empty() {
+        return vec![String::new()];
+    }
+
+    let parts = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let mut ancestors = Vec::with_capacity(parts.len() + 1);
+    ancestors.push(String::new());
+    for index in 1..=parts.len() {
+        ancestors.push(parts[..index].join("/"));
+    }
+    ancestors
 }
 
 fn collapse_dot_segments(path: &str) -> String {
@@ -755,6 +775,26 @@ mod tests {
             Some("notes/attachments/company-deck.pdf")
         );
         assert!(!resolution.is_ambiguous);
+    }
+
+    #[test]
+    fn resolve_target_handles_ancestor_relative_explicit_paths() {
+        let candidates = vec!["WORK/13-RELATIONS/Contents/Media/foo.jpg".to_string()];
+        let resolution = resolve_target(
+            "[[Contents/Media/foo.jpg]]",
+            Some("WORK/13-RELATIONS/Contents/post.md"),
+            &candidates,
+        );
+
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some("WORK/13-RELATIONS/Contents/Media/foo.jpg")
+        );
+        assert!(!resolution.is_ambiguous);
+        assert_eq!(
+            resolution.matched_candidates,
+            vec!["WORK/13-RELATIONS/Contents/Media/foo.jpg"]
+        );
     }
 
     #[test]

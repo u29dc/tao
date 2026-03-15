@@ -32,13 +32,14 @@ use tao_sdk_search::{
 };
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
-    BaseValidationService, GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest,
-    HealthSnapshotService, SdkConfigLoader, SdkConfigOverrides, WatcherStatus,
-    ensure_runtime_paths,
+    BaseValidationService, CURRENT_LINK_RESOLUTION_VERSION, FullIndexService,
+    GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
+    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, SdkConfigLoader,
+    SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
-    BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, TasksRepository,
-    preflight_migrations, run_migrations,
+    BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,
+    TasksRepository, preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::{CasePolicy, PathCanonicalizationService, validate_relative_vault_path};
 use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
@@ -1861,10 +1862,15 @@ fn handle_health(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<Comma
     })?;
 
     let snapshot = with_connection(runtime, &resolved, |connection| {
+        let refresh = query_index_refresh_status(
+            Path::new(&resolved.vault_root),
+            connection,
+            resolved.case_policy,
+        )?;
         Ok(HealthSnapshotService.snapshot(
             Path::new(&resolved.vault_root),
             connection,
-            0,
+            refresh.drift_paths,
             WatcherStatus::Stopped,
         )?)
     })
@@ -2227,8 +2233,9 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
     match command {
         GraphCommands::Outgoing(args) => {
             let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
             let panels = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(kernel.note_links(&args.path), "graph.outgoing")
+                expect_bridge_value(kernel.note_links(&path), "graph.outgoing")
             })?;
             let items = panels
                 .outgoing
@@ -2249,7 +2256,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.outgoing".to_string(),
                 summary: "graph outgoing completed".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
+                    "path": path,
                     "total": items.len(),
                     "items": items,
                 }),
@@ -2257,8 +2264,9 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         GraphCommands::Backlinks(args) => {
             let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
             let panels = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(kernel.note_links(&args.path), "graph.backlinks")
+                expect_bridge_value(kernel.note_links(&path), "graph.backlinks")
             })?;
             let items = panels
                 .backlinks
@@ -2279,7 +2287,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.backlinks".to_string(),
                 summary: "graph backlinks completed".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
+                    "path": path,
                     "total": items.len(),
                     "items": items,
                 }),
@@ -2510,6 +2518,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         GraphCommands::Neighbors(args) => {
             let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
             let direction = GraphNeighborDirection::parse(args.direction.trim())?;
             let (total, items) = with_connection(runtime, &resolved, |connection| {
                 let mut rows = Vec::<serde_json::Value>::new();
@@ -2518,8 +2527,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                     direction,
                     GraphNeighborDirection::All | GraphNeighborDirection::Outgoing
                 ) {
-                    let outgoing =
-                        BacklinkGraphService.outgoing_for_path(connection, &args.path)?;
+                    let outgoing = BacklinkGraphService.outgoing_for_path(connection, &path)?;
                     for edge in outgoing {
                         let Some(target_path) = edge.resolved_path.clone() else {
                             continue;
@@ -2538,8 +2546,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                     direction,
                     GraphNeighborDirection::All | GraphNeighborDirection::Incoming
                 ) {
-                    let incoming =
-                        BacklinkGraphService.backlinks_for_path(connection, &args.path)?;
+                    let incoming = BacklinkGraphService.backlinks_for_path(connection, &path)?;
                     for edge in incoming {
                         rows.push(serde_json::json!({
                             "path": edge.source_path,
@@ -2586,7 +2593,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.neighbors".to_string(),
                 summary: "graph neighbors completed".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
+                    "path": path,
                     "direction": args.direction,
                     "total": total,
                     "limit": args.limit,
@@ -2600,11 +2607,13 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 return Err(anyhow!("--max-nodes must be greater than zero"));
             }
             let resolved = args.resolve()?;
+            let from = normalize_relative_note_path_arg(&args.from, "--from")?;
+            let to = normalize_relative_note_path_arg(&args.to, "--to")?;
             let (found, explored_nodes, path) = with_connection(runtime, &resolved, |connection| {
-                let Some(from_file) = FilesRepository::get_by_normalized_path(connection, &args.from)? else {
+                let Some(from_file) = FilesRepository::get_by_normalized_path(connection, &from)? else {
                     return Ok((false, 0_u32, Vec::<String>::new()));
                 };
-                let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &args.to)? else {
+                let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &to)? else {
                     return Ok((false, 0_u32, Vec::<String>::new()));
                 };
 
@@ -2698,8 +2707,8 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.path".to_string(),
                 summary: "graph path completed".to_string(),
                 args: serde_json::json!({
-                    "from": args.from,
-                    "to": args.to,
+                    "from": from,
+                    "to": to,
                     "found": found,
                     "max_depth": args.max_depth,
                     "max_nodes": args.max_nodes,
@@ -2711,11 +2720,12 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         GraphCommands::Walk(args) => {
             let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
             let traversed = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.walk(
                     connection,
                     &GraphWalkRequest {
-                        path: args.path.clone(),
+                        path: path.clone(),
                         depth: args.depth,
                         limit: args.limit,
                         include_unresolved: args.include_unresolved,
@@ -2752,7 +2762,7 @@ fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<Com
                 command: "graph.walk".to_string(),
                 summary: "graph walk completed".to_string(),
                 args: serde_json::json!({
-                    "path": args.path,
+                    "path": path,
                     "depth": args.depth,
                     "include_folders": args.include_folders,
                     "total": items.len(),
@@ -3297,9 +3307,10 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
 
     if from.eq_ignore_ascii_case("graph") {
         let graph_result = if let Some(path) = &args.path {
+            let normalized_path = normalize_relative_note_path_arg(path, "--path")?;
             let resolved = args.resolve()?;
             let panels = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(kernel.note_links(path), "query.graph")
+                expect_bridge_value(kernel.note_links(&normalized_path), "query.graph")
             })?;
             let outgoing = panels
                 .outgoing
@@ -3339,7 +3350,7 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
                 command: "graph.links".to_string(),
                 summary: "graph links completed".to_string(),
                 args: serde_json::json!({
-                    "path": path,
+                    "path": normalized_path,
                     "outgoing_total": outgoing.len(),
                     "backlinks_total": backlinks.len(),
                     "total": outgoing.len() + backlinks.len(),
@@ -3456,10 +3467,15 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
         VaultCommands::Stats(args) => {
             let resolved = args.resolve()?;
             let snapshot = with_connection(runtime, &resolved, |connection| {
+                let refresh = query_index_refresh_status(
+                    Path::new(&resolved.vault_root),
+                    connection,
+                    resolved.case_policy,
+                )?;
                 Ok(HealthSnapshotService.snapshot(
                     Path::new(&resolved.vault_root),
                     connection,
-                    0,
+                    refresh.drift_paths,
                     WatcherStatus::Stopped,
                 )?)
             })
@@ -3512,32 +3528,73 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         VaultCommands::Reindex(args) => {
             let resolved = args.resolve()?;
-            let (reconcile, totals) = with_connection(runtime, &resolved, |connection| {
-                let reconcile = WatchReconcileService::default()
-                    .reconcile_once(
+            let (mode, reason, drift_paths, batches_applied, upserted_files, removed_files, totals) =
+                with_connection(runtime, &resolved, |connection| {
+                    let refresh = query_index_refresh_status(
                         Path::new(&resolved.vault_root),
                         connection,
                         resolved.case_policy,
-                    )
-                    .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
-                let totals = query_index_totals(connection)
-                    .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
-                Ok((reconcile, totals))
-            })?;
+                    )?;
+
+                    if let Some(reason) = refresh.rebuild_reason {
+                        let rebuild = FullIndexService::default()
+                            .rebuild(
+                                Path::new(&resolved.vault_root),
+                                connection,
+                                resolved.case_policy,
+                            )
+                            .map_err(|source| {
+                                anyhow!("vault reindex full rebuild failed: {source}")
+                            })?;
+                        let totals = query_index_totals(connection).map_err(|source| {
+                            anyhow!("vault reindex total query failed: {source}")
+                        })?;
+                        return Ok((
+                            "full_rebuild",
+                            Some(reason.to_string()),
+                            refresh.drift_paths,
+                            1_u64,
+                            rebuild.indexed_files,
+                            0_u64,
+                            totals,
+                        ));
+                    }
+
+                    let reconcile = WatchReconcileService::default()
+                        .reconcile_once(
+                            Path::new(&resolved.vault_root),
+                            connection,
+                            resolved.case_policy,
+                        )
+                        .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+                    let totals = query_index_totals(connection)
+                        .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+                    Ok((
+                        "reconcile",
+                        None,
+                        reconcile.drift_paths,
+                        reconcile.batches_applied,
+                        reconcile.upserted_files,
+                        reconcile.removed_files,
+                        totals,
+                    ))
+                })?;
             Ok(CommandResult {
                 command: "vault.reindex".to_string(),
                 summary: "vault reindex completed".to_string(),
                 args: serde_json::json!({
+                    "mode": mode,
+                    "reason": reason,
                     "indexed_files": totals.indexed_files,
                     "markdown_files": totals.markdown_files,
                     "links_total": totals.links_total,
                     "unresolved_links": totals.unresolved_links,
                     "properties_total": totals.properties_total,
                     "bases_total": totals.bases_total,
-                    "drift_paths": reconcile.drift_paths,
-                    "batches_applied": reconcile.batches_applied,
-                    "upserted_files": reconcile.upserted_files,
-                    "removed_files": reconcile.removed_files,
+                    "drift_paths": drift_paths,
+                    "batches_applied": batches_applied,
+                    "upserted_files": upserted_files,
+                    "removed_files": removed_files,
                 }),
             })
         }
@@ -4545,6 +4602,13 @@ fn update_task_line_state(line: &str, state: &str) -> Result<String> {
     Ok(format!("{indent}- {marker} {content}"))
 }
 
+fn normalize_relative_note_path_arg(path: &str, flag: &str) -> Result<String> {
+    let normalized = path.trim().trim_matches('/').replace('\\', "/");
+    validate_relative_vault_path(&normalized)
+        .map_err(|source| anyhow!("invalid {flag} '{}': {source}", path))?;
+    Ok(normalized)
+}
+
 fn resolve_existing_vault_note_path(
     resolved: &ResolvedVaultPathArgs,
     path: &str,
@@ -4708,6 +4772,12 @@ struct IndexTotals {
     bases_total: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IndexRefreshStatus {
+    drift_paths: u64,
+    rebuild_reason: Option<&'static str>,
+}
+
 fn query_index_totals(connection: &Connection) -> Result<IndexTotals> {
     let (indexed_files, markdown_files): (u64, u64) = connection
         .query_row(
@@ -4740,6 +4810,69 @@ fn query_index_totals(connection: &Connection) -> Result<IndexTotals> {
     })
 }
 
+fn query_index_refresh_status(
+    vault_root: &Path,
+    connection: &Connection,
+    case_policy: CasePolicy,
+) -> Result<IndexRefreshStatus> {
+    let drift = ReconciliationScannerService::default()
+        .scan(vault_root, connection, case_policy)
+        .map_err(|source| anyhow!("scan index drift failed: {source}"))?;
+    let inconsistent_paths = count_inconsistent_file_rows(vault_root, connection, case_policy)?;
+    let rebuild_reason = if index_requires_full_rebuild(connection)? {
+        Some("link_resolution_version_mismatch")
+    } else if inconsistent_paths > 0 {
+        Some("file_path_mismatch")
+    } else {
+        None
+    };
+    Ok(IndexRefreshStatus {
+        drift_paths: if rebuild_reason.is_some() {
+            drift.drift_paths.max(inconsistent_paths).max(1)
+        } else {
+            drift.drift_paths
+        },
+        rebuild_reason,
+    })
+}
+
+fn index_requires_full_rebuild(connection: &Connection) -> Result<bool> {
+    let Some(record) =
+        IndexStateRepository::get_by_key(connection, LINK_RESOLUTION_VERSION_STATE_KEY)
+            .map_err(|source| anyhow!("read link resolution version failed: {source}"))?
+    else {
+        return Ok(true);
+    };
+
+    let stored_version = serde_json::from_str::<u32>(&record.value_json).unwrap_or_default();
+    Ok(stored_version != CURRENT_LINK_RESOLUTION_VERSION)
+}
+
+fn count_inconsistent_file_rows(
+    vault_root: &Path,
+    connection: &Connection,
+    case_policy: CasePolicy,
+) -> Result<u64> {
+    let canonicalizer = PathCanonicalizationService::new(vault_root, case_policy)
+        .map_err(|source| anyhow!("create vault canonicalizer failed: {source}"))?;
+    let files = FilesRepository::list_all(connection)
+        .map_err(|source| anyhow!("list indexed files failed: {source}"))?;
+
+    let mut mismatches = 0_u64;
+    for file in files {
+        let absolute = Path::new(&file.absolute_path);
+        let Ok(canonical) = canonicalizer.canonicalize(absolute) else {
+            mismatches = mismatches.saturating_add(1);
+            continue;
+        };
+        if canonical.normalized != file.normalized_path {
+            mismatches = mismatches.saturating_add(1);
+        }
+    }
+
+    Ok(mismatches)
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -4750,16 +4883,22 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        ClapOutput, Cli, Commands, DaemonCommands, DaemonSocketArgs, DaemonStopAllArgs,
-        DocCommands, ExitKind, NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode, VaultPathArgs,
-        classify_cli_error, command_is_cacheable, derive_daemon_socket_for_vault, dispatch,
-        dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
-        maybe_render_streaming_output, prepare_daemon_socket_path, registry, render_error_output,
-        render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli, run_from_args,
-        runtime_cache_key,
+        CURRENT_LINK_RESOLUTION_VERSION, ClapOutput, Cli, Commands, DaemonCommands,
+        DaemonSocketArgs, DaemonStopAllArgs, DocCommands, ExitKind,
+        LINK_RESOLUTION_VERSION_STATE_KEY, NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode,
+        VaultPathArgs, classify_cli_error, command_is_cacheable, derive_daemon_socket_for_vault,
+        dispatch, dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon,
+        maybe_refresh_daemon_state, maybe_render_streaming_output, prepare_daemon_socket_path,
+        registry, render_error_output, render_output, resolve_command_vault_paths,
+        resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key,
     };
     use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
+    use rusqlite::Connection;
     use serde_json::Value as JsonValue;
+    use tao_sdk_storage::{
+        FilesRepository, IndexStateRecordInput, IndexStateRepository, LinkRecordInput,
+        LinksRepository,
+    };
 
     #[test]
     fn cli_help_contains_grouped_command_names() {
@@ -7389,6 +7528,530 @@ links fixture
                     "50",
                     "--include-unresolved",
                 ]),
+            );
+        });
+    }
+
+    #[test]
+    fn graph_outgoing_normalizes_note_path_input_before_lookup() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/source.md"), "# Source\n[[target]]")
+                .expect("write source");
+            fs::write(vault_root.join("notes/target.md"), "# Target").expect("write target");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let outgoing = Cli::parse_from([
+                "tao",
+                "graph",
+                "outgoing",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "/notes\\source.md/",
+            ]);
+            let output = render_output(
+                outgoing.json,
+                &dispatch(outgoing.command, outgoing.allow_writes).expect("dispatch outgoing"),
+            )
+            .expect("render outgoing");
+            let payload: JsonValue = serde_json::from_str(&output).expect("parse outgoing");
+
+            assert_eq!(
+                payload
+                    .get("data")
+                    .and_then(|data| data.get("path"))
+                    .and_then(JsonValue::as_str),
+                Some("notes/source.md")
+            );
+            assert_eq!(
+                payload
+                    .get("data")
+                    .and_then(|data| data.get("total"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+        });
+    }
+
+    #[test]
+    fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            fs::write(vault_root.join("notes/b.md"), "# B").expect("write drifted file");
+
+            let health = Cli::parse_from([
+                "tao",
+                "health",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let health_output = render_output(
+                health.json,
+                &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            )
+            .expect("render health");
+            let health_payload: JsonValue =
+                serde_json::from_str(&health_output).expect("parse health");
+
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("status"))
+                    .and_then(JsonValue::as_str),
+                Some("degraded")
+            );
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("stats"))
+                    .and_then(|stats| stats.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+
+            let stats = Cli::parse_from([
+                "tao",
+                "vault",
+                "stats",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let stats_output = render_output(
+                stats.json,
+                &dispatch(stats.command, stats.allow_writes).expect("dispatch stats"),
+            )
+            .expect("render stats");
+            let stats_payload: JsonValue =
+                serde_json::from_str(&stats_output).expect("parse stats");
+
+            assert_eq!(
+                stats_payload
+                    .get("data")
+                    .and_then(|data| data.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+        });
+    }
+
+    #[test]
+    fn health_and_vault_stats_report_stale_link_resolution_version() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+            fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let open_output = render_output(
+                open.json,
+                &dispatch(open.command, open.allow_writes).expect("dispatch open"),
+            )
+            .expect("render open");
+            let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
+            let db_path = open_payload
+                .get("data")
+                .and_then(|data| data.get("db_path"))
+                .and_then(JsonValue::as_str)
+                .expect("db path")
+                .to_string();
+
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let connection = Connection::open(&db_path).expect("open db");
+            IndexStateRepository::upsert(
+                &connection,
+                &IndexStateRecordInput {
+                    key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
+                    value_json: "1".to_string(),
+                },
+            )
+            .expect("downgrade link resolution version");
+
+            let health = Cli::parse_from([
+                "tao",
+                "health",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let health_output = render_output(
+                health.json,
+                &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            )
+            .expect("render health");
+            let health_payload: JsonValue =
+                serde_json::from_str(&health_output).expect("parse health");
+
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("status"))
+                    .and_then(JsonValue::as_str),
+                Some("degraded")
+            );
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("stats"))
+                    .and_then(|stats| stats.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+
+            let stats = Cli::parse_from([
+                "tao",
+                "vault",
+                "stats",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let stats_output = render_output(
+                stats.json,
+                &dispatch(stats.command, stats.allow_writes).expect("dispatch stats"),
+            )
+            .expect("render stats");
+            let stats_payload: JsonValue =
+                serde_json::from_str(&stats_output).expect("parse stats");
+
+            assert_eq!(
+                stats_payload
+                    .get("data")
+                    .and_then(|data| data.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+        });
+    }
+
+    #[test]
+    fn vault_reindex_performs_full_rebuild_when_link_resolution_version_is_stale() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            let contents_root = vault_root.join("WORK/13-RELATIONS/Contents");
+            fs::create_dir_all(contents_root.join("Media")).expect("create media dir");
+            fs::write(
+                contents_root.join("post.md"),
+                "# Post\n![[Contents/Media/foo.jpg]]\n",
+            )
+            .expect("write post");
+            fs::write(contents_root.join("Media/foo.jpg"), "jpg").expect("write image");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let open_output = render_output(
+                open.json,
+                &dispatch(open.command, open.allow_writes).expect("dispatch open"),
+            )
+            .expect("render open");
+            let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
+            let db_path = open_payload
+                .get("data")
+                .and_then(|data| data.get("db_path"))
+                .and_then(JsonValue::as_str)
+                .expect("db path")
+                .to_string();
+
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command.clone(), reindex.allow_writes).expect("initial reindex");
+
+            let connection = Connection::open(&db_path).expect("open db");
+            let source = FilesRepository::get_by_normalized_path(
+                &connection,
+                "WORK/13-RELATIONS/Contents/post.md",
+            )
+            .expect("lookup source")
+            .expect("source exists");
+            connection
+                .execute(
+                    "DELETE FROM links WHERE source_file_id = ?1",
+                    rusqlite::params![source.file_id],
+                )
+                .expect("delete source links");
+            LinksRepository::insert(
+                &connection,
+                &LinkRecordInput {
+                    link_id: "stale-link".to_string(),
+                    source_file_id: source.file_id.clone(),
+                    raw_target: "Contents/Media/foo.jpg".to_string(),
+                    resolved_file_id: None,
+                    heading_slug: None,
+                    block_id: None,
+                    is_unresolved: true,
+                    unresolved_reason: Some("missing-note".to_string()),
+                    source_field: "body".to_string(),
+                },
+            )
+            .expect("insert stale unresolved link");
+            IndexStateRepository::upsert(
+                &connection,
+                &IndexStateRecordInput {
+                    key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
+                    value_json: "1".to_string(),
+                },
+            )
+            .expect("downgrade link resolution version");
+
+            let reindex_output = render_output(
+                reindex.json,
+                &dispatch(reindex.command, reindex.allow_writes).expect("dispatch reindex"),
+            )
+            .expect("render reindex");
+            let reindex_payload: JsonValue =
+                serde_json::from_str(&reindex_output).expect("parse reindex");
+
+            assert_eq!(
+                reindex_payload
+                    .get("data")
+                    .and_then(|data| data.get("mode"))
+                    .and_then(JsonValue::as_str),
+                Some("full_rebuild")
+            );
+            assert_eq!(
+                reindex_payload
+                    .get("data")
+                    .and_then(|data| data.get("reason"))
+                    .and_then(JsonValue::as_str),
+                Some("link_resolution_version_mismatch")
+            );
+            assert_eq!(
+                reindex_payload
+                    .get("data")
+                    .and_then(|data| data.get("unresolved_links"))
+                    .and_then(JsonValue::as_u64),
+                Some(0)
+            );
+
+            let refreshed = Connection::open(&db_path).expect("reopen db");
+            let version =
+                IndexStateRepository::get_by_key(&refreshed, LINK_RESOLUTION_VERSION_STATE_KEY)
+                    .expect("load version")
+                    .expect("version exists");
+            assert_eq!(
+                serde_json::from_str::<u32>(&version.value_json).expect("parse version"),
+                CURRENT_LINK_RESOLUTION_VERSION
+            );
+
+            let outgoing = Cli::parse_from([
+                "tao",
+                "graph",
+                "outgoing",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--path",
+                "WORK/13-RELATIONS/Contents/post.md",
+            ]);
+            let outgoing_output = render_output(
+                outgoing.json,
+                &dispatch(outgoing.command, outgoing.allow_writes).expect("dispatch outgoing"),
+            )
+            .expect("render outgoing");
+            let outgoing_payload: JsonValue =
+                serde_json::from_str(&outgoing_output).expect("parse outgoing");
+            let items = outgoing_payload
+                .get("data")
+                .and_then(|data| data.get("items"))
+                .and_then(JsonValue::as_array)
+                .expect("outgoing items");
+
+            assert_eq!(items.len(), 1);
+            assert_eq!(
+                items[0].get("target_path").and_then(JsonValue::as_str),
+                Some("WORK/13-RELATIONS/Contents/Media/foo.jpg")
+            );
+            assert_eq!(
+                items[0].get("resolved").and_then(JsonValue::as_bool),
+                Some(true)
+            );
+        });
+    }
+
+    #[test]
+    fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A\n[[b]]\n").expect("write a");
+            fs::write(vault_root.join("notes/b.md"), "# B\n").expect("write b");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let open_output = render_output(
+                open.json,
+                &dispatch(open.command, open.allow_writes).expect("dispatch open"),
+            )
+            .expect("render open");
+            let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
+            let db_path = open_payload
+                .get("data")
+                .and_then(|data| data.get("db_path"))
+                .and_then(JsonValue::as_str)
+                .expect("db path")
+                .to_string();
+
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command.clone(), reindex.allow_writes).expect("initial reindex");
+
+            let connection = Connection::open(&db_path).expect("open db");
+            let bogus_absolute = vault_root
+                .join("notes/a.md")
+                .canonicalize()
+                .expect("canonicalize note");
+            let bogus_path = bogus_absolute
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .to_string();
+            let metadata = fs::metadata(&bogus_absolute).expect("read metadata");
+
+            FilesRepository::insert(
+                &connection,
+                &tao_sdk_storage::FileRecordInput {
+                    file_id: "file-bogus-a".to_string(),
+                    normalized_path: bogus_path.clone(),
+                    match_key: bogus_path.to_lowercase(),
+                    absolute_path: bogus_path.clone(),
+                    size_bytes: metadata.len(),
+                    modified_unix_ms: metadata
+                        .modified()
+                        .expect("modified time")
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("modified after epoch")
+                        .as_millis()
+                        .try_into()
+                        .expect("mtime fits"),
+                    hash_blake3: "hash-bogus".to_string(),
+                    is_markdown: true,
+                },
+            )
+            .expect("insert bogus row");
+            IndexStateRepository::upsert(
+                &connection,
+                &IndexStateRecordInput {
+                    key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
+                    value_json: CURRENT_LINK_RESOLUTION_VERSION.to_string(),
+                },
+            )
+            .expect("keep current link version");
+
+            let health = Cli::parse_from([
+                "tao",
+                "health",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            let health_output = render_output(
+                health.json,
+                &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            )
+            .expect("render health");
+            let health_payload: JsonValue =
+                serde_json::from_str(&health_output).expect("parse health");
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("stats"))
+                    .and_then(|stats| stats.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+
+            let reindex_output = render_output(
+                reindex.json,
+                &dispatch(reindex.command, reindex.allow_writes).expect("dispatch reindex"),
+            )
+            .expect("render reindex");
+            let reindex_payload: JsonValue =
+                serde_json::from_str(&reindex_output).expect("parse reindex");
+
+            assert_eq!(
+                reindex_payload
+                    .get("data")
+                    .and_then(|data| data.get("mode"))
+                    .and_then(JsonValue::as_str),
+                Some("full_rebuild")
+            );
+            assert_eq!(
+                reindex_payload
+                    .get("data")
+                    .and_then(|data| data.get("reason"))
+                    .and_then(JsonValue::as_str),
+                Some("file_path_mismatch")
             );
         });
     }
