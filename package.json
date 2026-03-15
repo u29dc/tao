@@ -42,10 +42,10 @@
 		"bench:startup": "./scripts/bench.sh --suite startup"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.6",
+		"@biomejs/biome": "^2.4.7",
 		"@commitlint/cli": "^20.4.4",
 		"@commitlint/config-conventional": "^20.4.4",
 		"husky": "^9.1.7",
-		"lint-staged": "^16.3.3"
+		"lint-staged": "^16.4.0"
 	}
 }
