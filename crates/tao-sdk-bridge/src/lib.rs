@@ -14,6 +14,10 @@ use tao_sdk_bases::{
     parse_base_document,
 };
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
+use tao_sdk_properties::{
+    FrontMatterStatus, TypedProperty, TypedPropertyValue, extract_front_matter,
+    project_typed_properties,
+};
 use tao_sdk_service::{
     BaseTableExecutorService, FullIndexService, HealthSnapshotService, IncrementalIndexService,
     NoteCrudService, ReconciliationScannerService, WatcherStatus,
@@ -240,10 +244,23 @@ pub struct BridgeNoteView {
     pub title: String,
     /// Optional front matter payload.
     pub front_matter: Option<String>,
+    /// Structured front matter properties for display.
+    pub properties: Vec<BridgeNoteProperty>,
     /// Markdown body without front matter fences.
     pub body: String,
     /// Heading count parsed from note body.
     pub headings_total: u64,
+}
+
+/// Structured note property projection for bridge note views.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeNoteProperty {
+    /// Canonical property key.
+    pub key: String,
+    /// Normalized property kind.
+    pub kind: String,
+    /// Display-safe value string.
+    pub display_value: String,
 }
 
 /// Bridge note summary DTO for paged list endpoints.
@@ -546,6 +563,7 @@ impl BridgeKernel {
                 );
             }
         };
+        let properties = bridge_note_properties(&raw);
 
         match self.parser.parse(MarkdownParseRequest {
             normalized_path: normalized_path.to_string(),
@@ -555,6 +573,7 @@ impl BridgeKernel {
                 path: normalized_path.to_string(),
                 title: parsed.title,
                 front_matter: parsed.front_matter,
+                properties,
                 body: parsed.body,
                 headings_total: parsed.headings.len() as u64,
             }),
@@ -1052,6 +1071,71 @@ impl BridgeKernel {
                     .with_context("limit", JsonValue::String(limit.to_string())),
             ),
         }
+    }
+}
+
+fn bridge_note_properties(markdown: &str) -> Vec<BridgeNoteProperty> {
+    let extraction = extract_front_matter(markdown);
+    let FrontMatterStatus::Parsed { value } = extraction.status else {
+        return Vec::new();
+    };
+    let Ok(properties) = project_typed_properties(&value) else {
+        return Vec::new();
+    };
+    properties
+        .into_iter()
+        .map(map_bridge_note_property)
+        .collect::<Vec<_>>()
+}
+
+fn map_bridge_note_property(property: TypedProperty) -> BridgeNoteProperty {
+    BridgeNoteProperty {
+        key: property.key,
+        kind: bridge_note_property_kind(&property.value).to_string(),
+        display_value: bridge_note_property_display_value(&property.value),
+    }
+}
+
+fn bridge_note_property_kind(value: &TypedPropertyValue) -> &'static str {
+    match value {
+        TypedPropertyValue::Bool(_) => "bool",
+        TypedPropertyValue::Number(_) => "number",
+        TypedPropertyValue::Date(_) => "date",
+        TypedPropertyValue::String(_) => "string",
+        TypedPropertyValue::List(_) => "list",
+        TypedPropertyValue::Null => "null",
+    }
+}
+
+fn bridge_note_property_display_value(value: &TypedPropertyValue) -> String {
+    match value {
+        TypedPropertyValue::Bool(value) => value.to_string(),
+        TypedPropertyValue::Number(value) => value.to_string(),
+        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => value.clone(),
+        TypedPropertyValue::List(_) => {
+            serde_json::to_string(&bridge_note_property_json_value(value))
+                .unwrap_or_else(|_| "[]".to_string())
+        }
+        TypedPropertyValue::Null => "null".to_string(),
+    }
+}
+
+fn bridge_note_property_json_value(value: &TypedPropertyValue) -> JsonValue {
+    match value {
+        TypedPropertyValue::Bool(value) => JsonValue::Bool(*value),
+        TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => {
+            JsonValue::String(value.clone())
+        }
+        TypedPropertyValue::List(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(bridge_note_property_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        TypedPropertyValue::Null => JsonValue::Null,
     }
 }
 
@@ -1577,7 +1661,23 @@ mod tests {
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
         fs::write(
             vault_root.join("notes/a.md"),
-            "---\nstatus: draft\n---\n# Alpha\ncontent",
+            concat!(
+                "---\n",
+                "status: draft\n",
+                "slug: \"alpha:beta\"\n",
+                "tags:\n",
+                "  - alpha\n",
+                "  - beta\n",
+                "meta:\n",
+                "  owner: han\n",
+                "  priority: 2\n",
+                "summary: |\n",
+                "  line one\n",
+                "  line two\n",
+                "---\n",
+                "# Alpha\n",
+                "content"
+            ),
         )
         .expect("write markdown");
         let db_path = temp.path().join("tao.db");
@@ -1588,7 +1688,48 @@ mod tests {
         assert!(note.ok);
         let value = note.value.expect("note value");
         assert_eq!(value.title, "Alpha");
-        assert_eq!(value.front_matter.as_deref(), Some("status: draft"));
+        assert!(value.front_matter.as_deref().is_some_and(|front_matter| {
+            front_matter.contains("status: draft")
+                && front_matter.contains("slug: \"alpha:beta\"")
+                && front_matter.contains("summary: |")
+        }));
+        assert_eq!(value.properties.len(), 5);
+        let status = value
+            .properties
+            .iter()
+            .find(|property| property.key == "status")
+            .expect("status property");
+        assert_eq!(status.kind, "string");
+        assert_eq!(status.display_value, "draft");
+        let slug = value
+            .properties
+            .iter()
+            .find(|property| property.key == "slug")
+            .expect("slug property");
+        assert_eq!(slug.kind, "string");
+        assert_eq!(slug.display_value, "alpha:beta");
+        let tags = value
+            .properties
+            .iter()
+            .find(|property| property.key == "tags")
+            .expect("tags property");
+        assert_eq!(tags.kind, "list");
+        assert_eq!(tags.display_value, "[\"alpha\",\"beta\"]");
+        let meta = value
+            .properties
+            .iter()
+            .find(|property| property.key == "meta")
+            .expect("meta property");
+        assert_eq!(meta.kind, "string");
+        assert!(meta.display_value.contains("owner: han"));
+        assert!(meta.display_value.contains("priority: 2"));
+        let summary = value
+            .properties
+            .iter()
+            .find(|property| property.key == "summary")
+            .expect("summary property");
+        assert_eq!(summary.kind, "string");
+        assert!(summary.display_value.contains("line one\nline two"));
         assert_eq!(value.body, "# Alpha\ncontent");
         assert_eq!(value.headings_total, 1);
     }
@@ -1904,6 +2045,7 @@ mod tests {
         let value = context.value.expect("note context value");
         assert_eq!(value.note.path, "notes/source.md");
         assert_eq!(value.note.title, "Source");
+        assert!(value.note.properties.is_empty());
         assert_eq!(value.links.outgoing.len(), 1);
         assert_eq!(
             value.links.outgoing[0].target_path.as_deref(),

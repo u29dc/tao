@@ -94,6 +94,16 @@ import Foundation
     try """
     ---
     status: draft
+    slug: "alpha:beta"
+    tags:
+      - alpha
+      - beta
+    meta:
+      owner: han
+      priority: 2
+    summary: |
+      line one
+      line two
     ---
     # Alpha
     bridge test
@@ -126,6 +136,30 @@ import Foundation
     #expect(note.title == "Alpha")
     #expect(note.headingsTotal == 1)
     #expect(note.body.contains("bridge test"))
+    #expect(note.frontMatter?.contains("status: draft") == true)
+    #expect(note.properties.count == 5)
+    #expect(note.properties.first(where: { $0.key == "status" }) == BridgeNoteProperty(
+        key: "status",
+        kind: "string",
+        displayValue: "draft"
+    ))
+    #expect(note.properties.first(where: { $0.key == "slug" }) == BridgeNoteProperty(
+        key: "slug",
+        kind: "string",
+        displayValue: "alpha:beta"
+    ))
+    #expect(note.properties.first(where: { $0.key == "tags" }) == BridgeNoteProperty(
+        key: "tags",
+        kind: "list",
+        displayValue: "[\"alpha\",\"beta\"]"
+    ))
+    let summary = try #require(note.properties.first(where: { $0.key == "summary" }))
+    #expect(summary.kind == "string")
+    #expect(summary.displayValue.contains("line one\nline two"))
+    let meta = try #require(note.properties.first(where: { $0.key == "meta" }))
+    #expect(meta.kind == "string")
+    #expect(meta.displayValue.contains("owner: han"))
+    #expect(meta.displayValue.contains("priority: 2"))
 }
 
 @Test func bridge_client_note_context_returns_note_and_links_in_single_call() throws {
@@ -166,6 +200,7 @@ import Foundation
     )
     #expect(context.note.path == "notes/source.md")
     #expect(context.note.title == "Source")
+    #expect(context.note.properties.isEmpty)
     #expect(context.links.outgoing.count >= 0)
     #expect(context.links.backlinks.count >= 0)
 }

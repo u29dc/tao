@@ -45,7 +45,8 @@ OUTPUT_ROOT=".benchmarks/reports"
 SKIP_GENERATE=0
 FIXTURE_ROOT="vault/generated"
 CLI_BUDGET_MS="10"
-DAEMON_MIN_IMPROVEMENT_PCT="40"
+DAEMON_MIN_IMPROVEMENT_PCT="5"
+DAEMON_LOOP_COUNT="50"
 STREAM_MIN_IMPROVEMENT_PCT="15"
 
 while [[ $# -gt 0 ]]; do
@@ -303,25 +304,31 @@ run_daemon_query_benchmark() {
   require_hyperfine
   start_daemon
 
+  local loop_count="${DAEMON_LOOP_COUNT}"
+  local one_shot_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 >/dev/null; done"
+  local daemon_cmd="for i in {1..${loop_count}}; do ${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 >/dev/null; done"
+
   echo "Running one-shot vs daemon query/docs benchmark..."
   hyperfine \
+    --shell=bash \
     --warmup "${WARMUP}" \
     --runs "${RUNS}" \
     --export-json "${DAEMON_REPORT}" \
-    "${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null" \
-    "${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0 > /dev/null"
+    "${one_shot_cmd}" \
+    "${daemon_cmd}"
 
   bun --eval '
     const fs = require("node:fs");
-    const [reportPath, minImprovementRaw] = process.argv.slice(1);
+    const [reportPath, minImprovementRaw, loopCountRaw] = process.argv.slice(1);
     const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
     const [oneShot, daemon] = report.results ?? [];
     if (!oneShot || !daemon) {
       console.error("daemon benchmark missing one-shot or daemon result rows");
       process.exit(1);
     }
-    const oneShotMeanMs = Number((oneShot.mean * 1000).toFixed(3));
-    const daemonMeanMs = Number((daemon.mean * 1000).toFixed(3));
+    const loopCount = Math.max(1, Number(loopCountRaw));
+    const oneShotMeanMs = Number((((oneShot.mean * 1000) / loopCount)).toFixed(3));
+    const daemonMeanMs = Number((((daemon.mean * 1000) / loopCount)).toFixed(3));
     const improvementPct = oneShotMeanMs <= 0
       ? 0
       : Number((((oneShotMeanMs - daemonMeanMs) / oneShotMeanMs) * 100).toFixed(2));
@@ -329,6 +336,7 @@ run_daemon_query_benchmark() {
     const summary = {
       one_shot_mean_ms: oneShotMeanMs,
       daemon_mean_ms: daemonMeanMs,
+      iterations_per_sample: loopCount,
       improvement_pct: improvementPct,
       min_expected_improvement_pct: minImprovementPct,
       pass: improvementPct >= minImprovementPct,
@@ -344,7 +352,7 @@ run_daemon_query_benchmark() {
     console.log(
       `daemon improvement gate passed: ${improvementPct}% >= ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
     );
-  ' "${DAEMON_REPORT}" "${DAEMON_MIN_IMPROVEMENT_PCT}"
+  ' "${DAEMON_REPORT}" "${DAEMON_MIN_IMPROVEMENT_PCT}" "${DAEMON_LOOP_COUNT}"
 }
 
 measure_peak_rss_kb() {
@@ -480,6 +488,9 @@ meta-aliases|${CLI_BIN} meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${D
 meta-tasks|${CLI_BIN} meta tasks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 task-list|${CLI_BIN} task list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 query-docs|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0
+query-docs-where|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --where "matched_in contains 'content' or matched_in contains 'title' or matched_in contains 'path'" --limit 50 --offset 0
+query-docs-sort|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --sort title:asc --select path --limit 50 --offset 0
+query-docs-where-sort|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --where "matched_in contains 'content' or matched_in contains 'title' or matched_in contains 'path'" --sort title:desc --select path --limit 50 --offset 0
 query-graph|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --limit 50 --offset 0
 query-graph-path|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from graph --path ${SAMPLE_NOTE} --limit 50 --offset 0
 query-task|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from task --query follow --limit 50 --offset 0

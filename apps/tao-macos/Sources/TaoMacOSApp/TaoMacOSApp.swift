@@ -208,11 +208,11 @@ private struct NoteDetailPane: View {
     let showNoteLoading: Bool
     let vaultRoot: String
 
-    private var properties: [(key: String, value: String)] {
+    private var properties: [BridgeNoteProperty] {
         guard let noteContext else {
             return []
         }
-        return parseFrontMatter(noteContext.note.frontMatter)
+        return noteContext.note.properties
     }
 
     var body: some View {
@@ -245,9 +245,10 @@ private struct NoteDetailPane: View {
                                         .font(.caption.weight(.semibold))
                                         .foregroundStyle(.secondary)
                                         .frame(width: 160, alignment: .leading)
-                                    Text(entry.value)
+                                    Text(entry.displayValue)
                                         .font(.callout.monospaced())
                                         .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     Spacer(minLength: 0)
                                 }
                             }
@@ -317,22 +318,4 @@ private struct TaoSettingsView: View {
             draftVaultRoot = url.path
         }
     }
-}
-
-private func parseFrontMatter(_ raw: String?) -> [(key: String, value: String)] {
-    guard let raw else {
-        return []
-    }
-    return raw
-        .split(separator: "\n")
-        .compactMap { line in
-            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else {
-                return nil
-            }
-            return (
-                key: parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
-                value: parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
 }

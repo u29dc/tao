@@ -783,44 +783,50 @@ fn project_query_docs_row(
     item: SearchQueryProjectedItem,
     columns: &[QueryDocsColumn],
 ) -> JsonValue {
+    let row = query_docs_row(item);
+    JsonValue::Object(project_query_docs_row_map(&row, columns))
+}
+
+fn query_docs_row(item: SearchQueryProjectedItem) -> serde_json::Map<String, JsonValue> {
+    let mut map = serde_json::Map::with_capacity(5);
+    map.insert(
+        QueryDocsColumn::FileId.key().to_string(),
+        JsonValue::String(item.file_id.unwrap_or_default()),
+    );
+    map.insert(
+        QueryDocsColumn::Path.key().to_string(),
+        JsonValue::String(item.path.unwrap_or_default()),
+    );
+    map.insert(
+        QueryDocsColumn::Title.key().to_string(),
+        JsonValue::String(item.title.unwrap_or_default()),
+    );
+    map.insert("indexed_at".to_string(), JsonValue::String(item.indexed_at));
+    map.insert(
+        QueryDocsColumn::MatchedIn.key().to_string(),
+        JsonValue::Array(
+            item.matched_in
+                .unwrap_or_default()
+                .into_iter()
+                .map(JsonValue::String)
+                .collect::<Vec<_>>(),
+        ),
+    );
+    map
+}
+
+fn project_query_docs_row_map(
+    row: &serde_json::Map<String, JsonValue>,
+    columns: &[QueryDocsColumn],
+) -> serde_json::Map<String, JsonValue> {
     let mut map = serde_json::Map::with_capacity(columns.len());
     for column in columns {
-        match column {
-            QueryDocsColumn::FileId => {
-                map.insert(
-                    QueryDocsColumn::FileId.key().to_string(),
-                    JsonValue::String(item.file_id.clone().unwrap_or_default()),
-                );
-            }
-            QueryDocsColumn::Path => {
-                map.insert(
-                    QueryDocsColumn::Path.key().to_string(),
-                    JsonValue::String(item.path.clone().unwrap_or_default()),
-                );
-            }
-            QueryDocsColumn::Title => {
-                map.insert(
-                    QueryDocsColumn::Title.key().to_string(),
-                    JsonValue::String(item.title.clone().unwrap_or_default()),
-                );
-            }
-            QueryDocsColumn::MatchedIn => {
-                map.insert(
-                    QueryDocsColumn::MatchedIn.key().to_string(),
-                    JsonValue::Array(
-                        item.matched_in
-                            .clone()
-                            .unwrap_or_default()
-                            .iter()
-                            .cloned()
-                            .map(JsonValue::String)
-                            .collect::<Vec<_>>(),
-                    ),
-                );
-            }
+        let key = column.key();
+        if let Some(value) = row.get(key) {
+            map.insert(key.to_string(), value.clone());
         }
     }
-    JsonValue::Object(map)
+    map
 }
 
 struct QueryDocsStreamingEnvelope<'a> {
@@ -894,16 +900,16 @@ impl QueryPostFilterAccumulator {
         }
 
         let window_size = self.offset.saturating_add(self.limit);
-        for row in batch {
-            self.total = self.total.saturating_add(1);
-            if window_size == 0 {
-                continue;
-            }
-            self.rows.push(row);
-            apply_sort(&mut self.rows, &self.sort_keys);
-            if self.rows.len() > window_size {
-                self.rows.pop();
-            }
+        self.total = self
+            .total
+            .saturating_add(u64::try_from(batch.len()).unwrap_or(u64::MAX));
+        if window_size == 0 {
+            return;
+        }
+        self.rows.extend(batch);
+        apply_sort(&mut self.rows, &self.sort_keys);
+        if self.rows.len() > window_size {
+            self.rows.truncate(window_size);
         }
     }
 
@@ -922,6 +928,21 @@ impl QueryPostFilterAccumulator {
         (
             self.total,
             rows.into_iter().map(JsonValue::Object).collect::<Vec<_>>(),
+        )
+    }
+
+    fn finish_query_docs(self, columns: &[QueryDocsColumn]) -> (u64, Vec<JsonValue>) {
+        let (total, rows) = self.finish();
+        (
+            total,
+            rows.into_iter()
+                .filter_map(|row| match row {
+                    JsonValue::Object(row) => {
+                        Some(JsonValue::Object(project_query_docs_row_map(&row, columns)))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
         )
     }
 }
@@ -985,16 +1006,13 @@ fn collect_docs_rows_for_where_only(
             let batch_rows = page
                 .items
                 .into_iter()
-                .filter_map(|item| match project_query_docs_row(item, columns) {
-                    JsonValue::Object(map) => Some(map),
-                    _ => None,
-                })
+                .map(query_docs_row)
                 .collect::<Vec<_>>();
             let filtered = apply_where_filter(batch_rows, Some(where_expr))
                 .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
             for row in filtered {
                 if total >= u64::from(offset) && rows.len() < limit as usize {
-                    rows.push(JsonValue::Object(row));
+                    rows.push(JsonValue::Object(project_query_docs_row_map(&row, columns)));
                 }
                 total = total.saturating_add(1);
             }
@@ -3035,10 +3053,7 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
                         let batch_rows = page
                             .items
                             .into_iter()
-                            .filter_map(|item| match project_query_docs_row(item, &columns) {
-                                JsonValue::Object(map) => Some(map),
-                                _ => None,
-                            })
+                            .map(query_docs_row)
                             .collect::<Vec<_>>();
                         let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
                         accumulator.push_batch(filtered);
@@ -3052,7 +3067,7 @@ fn handle_query(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandRes
                     Ok::<(), anyhow::Error>(())
                 })
                 .map_err(|source| anyhow!("query docs failed: {source}"))?;
-                accumulator.finish()
+                accumulator.finish_query_docs(&columns)
             }
         } else {
             let page = with_connection(runtime, &resolved, |connection| {
@@ -5910,6 +5925,147 @@ read_only = false
     }
 
     #[test]
+    fn query_docs_where_uses_unselected_title_field() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+            fs::write(
+                vault_root.join("notes/projects/alpha.md"),
+                "# Alpha\nproject roadmap",
+            )
+            .expect("write alpha");
+            fs::write(
+                vault_root.join("notes/projects/beta.md"),
+                "# Beta\nproject roadmap",
+            )
+            .expect("write beta");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--where",
+                "title starts_with 'a'",
+                "--select",
+                "path",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let rows = envelope
+                .get("data")
+                .and_then(|args| args.get("rows"))
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            assert_eq!(rows.len(), 1);
+            let row = rows[0].as_object().expect("row object");
+            assert_eq!(
+                row.get("path").and_then(JsonValue::as_str),
+                Some("notes/projects/alpha.md")
+            );
+            assert!(!row.contains_key("title"));
+        });
+    }
+
+    #[test]
+    fn query_docs_sort_uses_unselected_title_field() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/a")).expect("create first dir");
+            fs::create_dir_all(vault_root.join("notes/z")).expect("create second dir");
+            fs::write(vault_root.join("notes/a/zeta.md"), "# Zeta\nproject").expect("write zeta");
+            fs::write(vault_root.join("notes/z/alpha.md"), "# Alpha\nproject")
+                .expect("write alpha");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--sort",
+                "title:asc",
+                "--select",
+                "path",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let rows = envelope
+                .get("data")
+                .and_then(|args| args.get("rows"))
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            let paths = rows
+                .iter()
+                .map(|row| {
+                    row.get("path")
+                        .and_then(JsonValue::as_str)
+                        .expect("path")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(paths, vec!["notes/z/alpha.md", "notes/a/zeta.md"]);
+            for row in rows {
+                let object = row.as_object().expect("row object");
+                assert!(!object.contains_key("title"));
+            }
+        });
+    }
+
+    #[test]
     fn query_docs_where_and_sort_are_applied_deterministically() {
         with_temp_cwd(|| {
             let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -5990,6 +6146,96 @@ read_only = false
                     .and_then(JsonValue::as_str)
                     .unwrap_or_default(),
                 "alpha"
+            );
+        });
+    }
+
+    #[test]
+    fn query_docs_where_and_sort_use_internal_fields_when_select_omits_them() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+            fs::write(
+                vault_root.join("notes/projects/alpha.md"),
+                "# Alpha\nproject roadmap",
+            )
+            .expect("write alpha");
+            fs::write(
+                vault_root.join("notes/projects/beta.md"),
+                "# Beta\nproject roadmap",
+            )
+            .expect("write beta");
+            fs::write(
+                vault_root.join("notes/projects/gamma.md"),
+                "# Gamma\nproject roadmap",
+            )
+            .expect("write gamma");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let cli = Cli::parse_from([
+                "tao",
+                "query",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+                "--from",
+                "docs",
+                "--query",
+                "project",
+                "--where",
+                "title starts_with 'a' or title starts_with 'b'",
+                "--sort",
+                "title:desc,path:asc",
+                "--select",
+                "path",
+                "--limit",
+                "10",
+                "--offset",
+                "0",
+            ]);
+            let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+            let output = render_output(cli.json, &result).expect("render output");
+            let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+            let rows = envelope
+                .get("data")
+                .and_then(|args| args.get("rows"))
+                .and_then(JsonValue::as_array)
+                .expect("rows array");
+            assert_eq!(rows.len(), 2);
+            let paths = rows
+                .iter()
+                .map(|row| {
+                    let object = row.as_object().expect("row object");
+                    assert_eq!(object.len(), 1);
+                    object
+                        .get("path")
+                        .and_then(JsonValue::as_str)
+                        .expect("path")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                vec![
+                    "notes/projects/beta.md".to_string(),
+                    "notes/projects/alpha.md".to_string()
+                ]
             );
         });
     }

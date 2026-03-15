@@ -224,7 +224,7 @@ mod tests {
         fs::write(vault.join("notes/alpha.md"), "# Alpha\nhello world").expect("write alpha");
         fs::write(
             vault.join("notes/deep/project-note.md"),
-            "# Overview\nno keyword",
+            "# Overview\nproject keyword in body",
         )
         .expect("write project");
 
@@ -247,8 +247,14 @@ mod tests {
             .expect("query");
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].path, "notes/deep/project-note.md");
-        assert!(result.items[0].matched_in.contains(&"title".to_string()));
-        assert!(result.items[0].matched_in.contains(&"path".to_string()));
+        assert_eq!(
+            result.items[0].matched_in,
+            vec![
+                "title".to_string(),
+                "path".to_string(),
+                "content".to_string()
+            ]
+        );
 
         let content = SearchQueryService
             .query(
@@ -293,6 +299,46 @@ mod tests {
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].path, "notes/cafe.md");
         assert!(result.items[0].matched_in.contains(&"content".to_string()));
+    }
+
+    #[test]
+    fn query_reports_all_matching_surfaces_in_stable_order() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(vault.join("notes")).expect("create notes");
+        fs::write(
+            vault.join("notes/project-note.md"),
+            "# Project Note\nproject details in content",
+        )
+        .expect("write project note");
+
+        let mut connection = Connection::open(temp.path().join("index.sqlite")).expect("open db");
+        run_migrations(&mut connection).expect("migrate");
+        FullIndexService::default()
+            .rebuild(&vault, &mut connection, CasePolicy::Sensitive)
+            .expect("rebuild");
+
+        let result = SearchQueryService
+            .query(
+                &vault,
+                &connection,
+                SearchQueryRequest {
+                    query: "project".to_string(),
+                    limit: 50,
+                    offset: 0,
+                },
+            )
+            .expect("query");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].path, "notes/project-note.md");
+        assert_eq!(
+            result.items[0].matched_in,
+            vec![
+                "title".to_string(),
+                "path".to_string(),
+                "content".to_string()
+            ]
+        );
     }
 
     #[test]

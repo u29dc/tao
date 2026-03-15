@@ -120,7 +120,7 @@ OFFSET ?4
                 if path_match != 0 {
                     matched_in.push("path".to_string());
                 }
-                if matched_in.is_empty() && content_match != 0 {
+                if content_match != 0 {
                     matched_in.push("content".to_string());
                 }
                 Some(matched_in)

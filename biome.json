@@ -1,4 +1,21 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.4.7/schema.json",
-	"extends": ["/Users/han/.config/biome/biome.json"]
+	"files": {
+		"ignoreUnknown": true
+	},
+	"formatter": {
+		"indentStyle": "tab"
+	},
+	"javascript": {
+		"formatter": {
+			"quoteStyle": "single",
+			"semicolons": "always",
+			"trailingCommas": "es5"
+		}
+	},
+	"json": {
+		"formatter": {
+			"indentStyle": "tab"
+		}
+	}
 }

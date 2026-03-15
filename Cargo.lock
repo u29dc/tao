@@ -977,6 +977,7 @@ dependencies = [
  "serde_json",
  "tao-sdk-bases",
  "tao-sdk-markdown",
+ "tao-sdk-properties",
  "tao-sdk-service",
  "tao-sdk-storage",
  "tao-sdk-vault",

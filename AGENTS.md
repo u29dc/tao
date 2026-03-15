@@ -14,14 +14,14 @@
     - `https://www.rust-lang.org/learn`
     - `https://mozilla.github.io/uniffi-rs/latest/`
 - Internal source references:
-    - Phase guide and roadmap: `plan/README.md`
-    - Ticket ledger: `plan/tickets.csv`
-    - Run state: `plan/run-state.json`
-    - Progress log: `plan/progress.md`
-    - Execution checklist: `plan/checklists/execution.md`
-    - Review checklist: `plan/checklists/review.md`
-    - Crate README template: `plan/templates/crate-readme-template.md`
-    - Architecture map: `plan/architecture-map.md`
+    - Workspace manifest: `Cargo.toml`
+    - Script/runtime manifest: `package.json`
+    - CLI guide: `crates/tao-cli/README.md`
+    - SDK service guide: `crates/tao-sdk-service/README.md`
+    - macOS package manifest: `apps/tao-macos/Package.swift`
+    - Benchmark driver: `scripts/bench.sh`
+    - Fixture driver: `scripts/fixtures.sh`
+    - Safety scan: `scripts/safety.sh`
 
 ## 2. Repository Structure
 
@@ -34,8 +34,8 @@ crates/
   tao-bench/                    Release benchmark harness + budget reports
   tao-tui/                      Placeholder shell (intentionally minimal)
 vault/                          Root shipped fixture vault for QA and manual smoke
-plan/                           Execution control plane (plan, tickets, run-state, progress)
 scripts/                        Operational scripts (clean, ffi, fixtures, bench, release)
+.github/workflows/              Central quality-gate workflows
 ```
 
 ## 3. Stack
@@ -88,7 +88,7 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 ## 6. UI Behavior
 
 - Sidebar: single hierarchical file/folder tree built from indexed note summaries.
-- Detail pane: note title, parsed front matter properties, rendered markdown body.
+- Detail pane: note title, bridge-provided structured front matter properties, rendered markdown body.
 - Settings: vault path only; selecting/saving vault triggers data refresh.
 - Loading policy: note spinner is delayed to avoid visible flicker on fast reads.
 - Debug/diagnostic panes are intentionally removed from primary app surface.
@@ -105,6 +105,7 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
     - `graph unresolved` mean <= `10ms`
 - Comprehensive CLI matrix (`bench:cli`) benchmarks all read-only command families:
     - `vault` read paths, `doc` read/list, `base` list/view/schema, `graph` diagnostics/traversal, `meta`, `task list`, and `query` scopes.
+    - `docs` query coverage includes simple, `--where`, `--sort`, and combined projection/filter/sort variants.
 - `bench:cli` writes per-command `hyperfine` JSON reports and `.benchmarks/reports/cli-readonly/summary.json`.
 
 ## 8. Quality Gates
@@ -114,6 +115,12 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
     - zero clippy warnings (`-D warnings`)
     - passing release tests (`cargo test --workspace --release`, `swift test --configuration release`)
     - successful release build (`bun run build`)
+- Local enforcement:
+    - `bun run util:check` remains the full macOS-first developer gate.
+    - Husky + lint-staged run `bun run util:check` before local commits.
+- Central enforcement:
+    - `.github/workflows/quality.yml` runs safety, Biome, format, lint, Rust typecheck/tests, and audit on Ubuntu.
+    - `.github/workflows/apple.yml` runs FFI generation, release Swift tests, and release build on macOS.
 - Commit policy:
     - signed commits (`git commit -S`)
     - scoped Conventional Commit messages
@@ -121,14 +128,13 @@ scripts/                        Operational scripts (clean, ffi, fixtures, bench
 
 ## 9. Roadmap State
 
-- Control plane lives in `plan/`.
-- Current phase family:
-    - completed foundation: docs, architecture, sdk, db, indexing, link/property/base, cli baseline
-    - completed transition: rename to `tao`, config bootstrap, vault-root CLI auto-init
-    - active transition: native UniFFI bridge adoption, simplified production app shell, repository hygiene
-- Execution contract:
-    - update `plan/tickets.csv`, `plan/run-state.json`, and `plan/progress.md` with evidence on each completed ticket
-    - keep blockers explicit in `plan/blockers.md`
+- No tracked `plan/` control-plane directory exists in the repository.
+- Treat current git history, benchmark reports under `.benchmarks/reports/`, and crate/app test suites as the execution record.
+- Active improvement areas reflected in source and benchmarks:
+    - query correctness and projection parity
+    - bridge/app data-shape parity
+    - benchmark coverage for expensive query paths
+    - release and CI hygiene
 
 ## 10. CLI IA and Contract
 

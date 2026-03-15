@@ -26,8 +26,15 @@ public struct BridgeNoteView: Decodable {
     public let path: String
     public let title: String
     public let frontMatter: String?
+    public let properties: [BridgeNoteProperty]
     public let body: String
     public let headingsTotal: UInt64
+}
+
+public struct BridgeNoteProperty: Decodable, Equatable {
+    public let key: String
+    public let kind: String
+    public let displayValue: String
 }
 
 public struct BridgeNoteContext: Decodable {
