@@ -22,6 +22,13 @@ Provide the Tao command-line interface as a thin JSON-first adapter over SDK ser
 
 CLI args -> request mapping -> SDK service call -> envelope serialization -> stdout.
 
+## Runtime Semantics
+
+- Normal vault-facing commands may auto-connect to an existing background daemon and auto-start it when unavailable.
+- `vault daemon *` commands are inspection and troubleshooting primitives, not the only way daemon mode is entered.
+- `health`, `vault stats`, and `vault preflight` are fresh observational diagnostics; they do not reconcile or cache command results.
+- `watcher_status` in CLI health snapshots reflects change-monitor state, not daemon lifecycle state by itself.
+
 ## Dependencies
 
 - Internal: `tao-sdk-service`, `tao-sdk-search`, `tao-sdk-bases`, `tao-sdk-watch`, `tao-sdk-vault`, `tao-sdk-storage`, `tao-sdk-bridge`

@@ -1192,6 +1192,35 @@ enum RuntimeMode {
     Daemon(Box<RuntimeCache>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonExecutionPolicy {
+    ObservationalFresh,
+    CachedReadWithRefresh,
+    ExplicitWork,
+}
+
+impl DaemonExecutionPolicy {
+    fn refreshes_runtime(self) -> bool {
+        matches!(self, Self::CachedReadWithRefresh)
+    }
+
+    fn uses_result_cache(self) -> bool {
+        matches!(self, Self::CachedReadWithRefresh)
+    }
+
+    fn clears_runtime_cache_on_success(self) -> bool {
+        matches!(self, Self::ExplicitWork)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct CliRuntimeState {
+    backend: &'static str,
+    daemon_running: bool,
+    change_monitor_initialized: bool,
+    cached_connection: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct JsonEnvelope<T: Serialize> {
     ok: bool,
@@ -1862,6 +1891,31 @@ fn handle_tools(args: ToolsArgs) -> Result<CommandResult> {
     })
 }
 
+fn load_cli_health_snapshot(
+    resolved: &ResolvedVaultPathArgs,
+    runtime: &mut RuntimeMode,
+) -> Result<(tao_sdk_service::HealthSnapshot, CliRuntimeState)> {
+    let runtime_state = runtime_state_for_resolved(resolved, runtime);
+    let index_lag = with_connection(runtime, resolved, |connection| {
+        let refresh = query_index_refresh_status(
+            Path::new(&resolved.vault_root),
+            connection,
+            resolved.case_policy,
+        )?;
+        Ok(refresh.drift_paths)
+    })?;
+    let watcher_status = watcher_status_for_runtime_state(&runtime_state);
+    let snapshot = with_connection(runtime, resolved, |connection| {
+        Ok(HealthSnapshotService.snapshot(
+            Path::new(&resolved.vault_root),
+            connection,
+            index_lag,
+            watcher_status.clone(),
+        )?)
+    })?;
+    Ok((snapshot, runtime_state))
+}
+
 fn handle_health(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     let resolved = args.resolve().map_err(|source| {
         health_blocked_error(
@@ -1879,28 +1933,16 @@ fn handle_health(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<Comma
         )
     })?;
 
-    let snapshot = with_connection(runtime, &resolved, |connection| {
-        let refresh = query_index_refresh_status(
-            Path::new(&resolved.vault_root),
-            connection,
-            resolved.case_policy,
-        )?;
-        Ok(HealthSnapshotService.snapshot(
-            Path::new(&resolved.vault_root),
-            connection,
-            refresh.drift_paths,
-            WatcherStatus::Stopped,
-        )?)
-    })
-    .map_err(|source| {
-        health_blocked_error(
-            source.to_string(),
-            "run `tao vault open --vault-root <path>` and verify the database path is writable",
-            JsonValue::String(resolved.vault_root.clone()),
-            JsonValue::String(resolved.db_path.clone()),
-            "runtime",
-        )
-    })?;
+    let (snapshot, runtime_state) =
+        load_cli_health_snapshot(&resolved, runtime).map_err(|source| {
+            health_blocked_error(
+                source.to_string(),
+                "run `tao vault open --vault-root <path>` and verify the database path is writable",
+                JsonValue::String(resolved.vault_root.clone()),
+                JsonValue::String(resolved.db_path.clone()),
+                "runtime",
+            )
+        })?;
 
     let mut status = "ready";
     let mut checks = vec![serde_json::json!({
@@ -1961,6 +2003,7 @@ fn handle_health(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<Comma
                 "watcher_status": snapshot.watcher_status,
                 "last_index_updated_at": snapshot.last_index_updated_at,
             },
+            "runtime": runtime_state,
         }),
     })
 }
@@ -3481,20 +3524,8 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
         }
         VaultCommands::Stats(args) => {
             let resolved = args.resolve()?;
-            let snapshot = with_connection(runtime, &resolved, |connection| {
-                let refresh = query_index_refresh_status(
-                    Path::new(&resolved.vault_root),
-                    connection,
-                    resolved.case_policy,
-                )?;
-                Ok(HealthSnapshotService.snapshot(
-                    Path::new(&resolved.vault_root),
-                    connection,
-                    refresh.drift_paths,
-                    WatcherStatus::Stopped,
-                )?)
-            })
-            .map_err(|source| anyhow!("vault stats failed: {source}"))?;
+            let (snapshot, runtime_state) = load_cli_health_snapshot(&resolved, runtime)
+                .map_err(|source| anyhow!("vault stats failed: {source}"))?;
             Ok(CommandResult {
                 command: "vault.stats".to_string(),
                 summary: "vault stats completed".to_string(),
@@ -3507,6 +3538,7 @@ fn handle_vault(command: VaultCommands, runtime: &mut RuntimeMode) -> Result<Com
                     "index_lag": snapshot.index_lag,
                     "watcher_status": snapshot.watcher_status,
                     "last_index_updated_at": snapshot.last_index_updated_at,
+                    "runtime": runtime_state,
                 }),
             })
         }
@@ -3792,20 +3824,34 @@ fn daemon_cache_key(command: &Commands) -> Result<String> {
     serde_json::to_string(command).context("serialize command cache key")
 }
 
-fn command_is_cacheable(command: &Commands) -> bool {
+fn daemon_execution_policy(command: &Commands) -> DaemonExecutionPolicy {
     match command {
-        Commands::Tools(_) => true,
-        Commands::Health(_) => true,
-        Commands::Doc { command } => matches!(command, DocCommands::Read(_) | DocCommands::List(_)),
-        Commands::Base { .. } => true,
-        Commands::Graph { .. } => true,
-        Commands::Meta { .. } => true,
-        Commands::Task { command } => matches!(command, TaskCommands::List(_)),
-        Commands::Query(_) => true,
-        Commands::Vault { command } => matches!(
-            command,
-            VaultCommands::Stats(_) | VaultCommands::Preflight(_)
-        ),
+        Commands::Tools(_) => DaemonExecutionPolicy::ExplicitWork,
+        Commands::Health(_) => DaemonExecutionPolicy::ObservationalFresh,
+        Commands::Doc { command } => match command {
+            DocCommands::Read(_) | DocCommands::List(_) => {
+                DaemonExecutionPolicy::CachedReadWithRefresh
+            }
+            DocCommands::Write(_) => DaemonExecutionPolicy::ExplicitWork,
+        },
+        Commands::Base { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
+        Commands::Graph { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
+        Commands::Meta { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
+        Commands::Task { command } => match command {
+            TaskCommands::List(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
+            TaskCommands::SetState(_) => DaemonExecutionPolicy::ExplicitWork,
+        },
+        Commands::Query(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
+        Commands::Vault { command } => match command {
+            VaultCommands::Stats(_) | VaultCommands::Preflight(_) => {
+                DaemonExecutionPolicy::ObservationalFresh
+            }
+            VaultCommands::Open(_)
+            | VaultCommands::Reindex(_)
+            | VaultCommands::Reconcile(_)
+            | VaultCommands::Daemon { .. }
+            | VaultCommands::DaemonServe(_) => DaemonExecutionPolicy::ExplicitWork,
+        },
     }
 }
 
@@ -3813,7 +3859,7 @@ fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> 
     let RuntimeMode::Daemon(_) = runtime else {
         return Ok(false);
     };
-    if !command_is_cacheable(command) {
+    if !daemon_execution_policy(command).refreshes_runtime() {
         return Ok(false);
     }
 
@@ -3846,36 +3892,43 @@ fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> 
     };
 
     if first_observation {
-        let needs_initial_sync = with_connection(runtime, &resolved, |connection| {
-            let totals = query_index_totals(connection)?;
-            Ok(totals.indexed_files == 0)
-        })?;
-        if needs_initial_sync {
-            let reconcile = with_connection(runtime, &resolved, |connection| {
+        let refreshed = with_connection(runtime, &resolved, |connection| {
+            let refresh = query_index_refresh_status(
+                Path::new(&resolved.vault_root),
+                connection,
+                resolved.case_policy,
+            )?;
+            if let Some(reason) = refresh.rebuild_reason {
+                FullIndexService::default()
+                    .rebuild(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        resolved.case_policy,
+                    )
+                    .map_err(|source| anyhow!("daemon initial full rebuild failed: {source}"))?;
+                return Ok(Some(reason));
+            }
+            if refresh.drift_paths > 0 {
                 WatchReconcileService::default()
                     .reconcile_once(
                         Path::new(&resolved.vault_root),
                         connection,
                         resolved.case_policy,
                     )
-                    .map_err(|source| anyhow!("daemon reconcile failed: {source}"))
-            })?;
-            if let RuntimeMode::Daemon(cache) = runtime {
-                cache
-                    .last_reconciled_generation
-                    .insert(runtime_key.clone(), current_generation);
-                if reconcile.drift_paths > 0 {
-                    clear_cached_results_for_runtime(cache, &runtime_key);
-                }
+                    .map_err(|source| anyhow!("daemon initial reconcile failed: {source}"))?;
+                return Ok(Some("drift"));
             }
-            return Ok(reconcile.drift_paths > 0);
-        }
+            Ok(None)
+        })?;
         if let RuntimeMode::Daemon(cache) = runtime {
             cache
                 .last_reconciled_generation
-                .insert(runtime_key, current_generation);
+                .insert(runtime_key.clone(), current_generation);
+            if refreshed.is_some() {
+                clear_cached_results_for_runtime(cache, &runtime_key);
+            }
         }
-        return Ok(false);
+        return Ok(refreshed.is_some());
     }
 
     if let RuntimeMode::Daemon(cache) = runtime
@@ -3907,6 +3960,71 @@ fn maybe_refresh_daemon_state(command: &Commands, runtime: &mut RuntimeMode) -> 
     }
 
     Ok(reconcile.drift_paths > 0)
+}
+
+fn runtime_state_for_resolved(
+    resolved: &ResolvedVaultPathArgs,
+    runtime: &RuntimeMode,
+) -> CliRuntimeState {
+    match runtime {
+        RuntimeMode::OneShot => CliRuntimeState {
+            backend: "oneshot",
+            daemon_running: false,
+            change_monitor_initialized: false,
+            cached_connection: false,
+        },
+        RuntimeMode::Daemon(cache) => {
+            let runtime_key = runtime_cache_key(resolved);
+            CliRuntimeState {
+                backend: "daemon",
+                daemon_running: true,
+                change_monitor_initialized: cache.change_monitors.contains_key(&runtime_key),
+                cached_connection: cache.connections.contains_key(&runtime_key),
+            }
+        }
+    }
+}
+
+fn watcher_status_for_runtime_state(runtime_state: &CliRuntimeState) -> WatcherStatus {
+    if runtime_state.change_monitor_initialized {
+        WatcherStatus::Running
+    } else {
+        WatcherStatus::Stopped
+    }
+}
+
+fn update_daemon_command_cache(
+    runtime: &mut RuntimeMode,
+    policy: DaemonExecutionPolicy,
+    runtime_key: Option<&str>,
+    cache_key: Option<String>,
+    result: &CommandResult,
+) {
+    let RuntimeMode::Daemon(cache) = runtime else {
+        return;
+    };
+
+    if policy.uses_result_cache()
+        && let Some(key) = cache_key
+    {
+        let cache_runtime_key = runtime_key.unwrap_or("<global>").to_string();
+        cache.command_results.insert(
+            key,
+            CachedCommandResult {
+                runtime_key: cache_runtime_key,
+                result: result.clone(),
+            },
+        );
+        return;
+    }
+
+    if policy.clears_runtime_cache_on_success() {
+        if let Some(runtime_key) = runtime_key {
+            clear_cached_results_for_runtime(cache, runtime_key);
+        } else {
+            cache.command_results.clear();
+        }
+    }
 }
 
 fn clear_cached_results_for_runtime(cache: &mut RuntimeCache, runtime_key: &str) {
@@ -4290,11 +4408,13 @@ fn run_daemon_server(socket: &str) -> Result<()> {
             let response = match request {
                 DaemonRequest::Execute { payload } => {
                     let started_at = Instant::now();
-                    let cacheable = command_is_cacheable(&payload.command);
-                    maybe_refresh_daemon_state(&payload.command, &mut runtime)?;
+                    let policy = daemon_execution_policy(&payload.command);
+                    if policy.refreshes_runtime() {
+                        maybe_refresh_daemon_state(&payload.command, &mut runtime)?;
+                    }
                     let resolved = resolve_command_vault_paths(&payload.command)?;
                     let runtime_key = resolved.as_ref().map(runtime_cache_key);
-                    let cache_key = if cacheable {
+                    let cache_key = if policy.uses_result_cache() {
                         daemon_cache_key(&payload.command).ok()
                     } else {
                         None
@@ -4320,24 +4440,13 @@ fn run_daemon_server(socket: &str) -> Result<()> {
 
                     match result {
                         Ok(result) => {
-                            if let RuntimeMode::Daemon(cache) = &mut runtime {
-                                if let Some(key) = cache_key {
-                                    let cache_runtime_key = runtime_key
-                                        .clone()
-                                        .unwrap_or_else(|| "<global>".to_string());
-                                    cache.command_results.insert(
-                                        key,
-                                        CachedCommandResult {
-                                            runtime_key: cache_runtime_key,
-                                            result: result.clone(),
-                                        },
-                                    );
-                                } else if let Some(runtime_key) = runtime_key.as_deref() {
-                                    clear_cached_results_for_runtime(cache, runtime_key);
-                                } else {
-                                    cache.command_results.clear();
-                                }
-                            }
+                            update_daemon_command_cache(
+                                &mut runtime,
+                                policy,
+                                runtime_key.as_deref(),
+                                cache_key,
+                                &result,
+                            );
 
                             if payload.json {
                                 match maybe_render_streaming_output_for_command(
@@ -4898,14 +5007,15 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        CURRENT_LINK_RESOLUTION_VERSION, ClapOutput, Cli, Commands, DaemonCommands,
-        DaemonSocketArgs, DaemonStopAllArgs, DocCommands, ExitKind,
-        LINK_RESOLUTION_VERSION_STATE_KEY, NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode,
-        VaultPathArgs, classify_cli_error, command_is_cacheable, derive_daemon_socket_for_vault,
-        dispatch, dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon,
-        maybe_refresh_daemon_state, maybe_render_streaming_output, prepare_daemon_socket_path,
-        registry, render_error_output, render_output, resolve_command_vault_paths,
-        resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key,
+        CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CommandResult,
+        Commands, DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs, DaemonStopAllArgs,
+        DocCommands, ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, NotePutArgs, QueryArgs,
+        RuntimeCache, RuntimeMode, VaultCommands, VaultPathArgs, classify_cli_error,
+        daemon_execution_policy, derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime,
+        handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
+        maybe_render_streaming_output, prepare_daemon_socket_path, registry, render_error_output,
+        render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli, run_from_args,
+        runtime_cache_key, update_daemon_command_cache,
     };
     use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
     use rusqlite::Connection;
@@ -7894,6 +8004,22 @@ links fixture
                     .and_then(JsonValue::as_u64),
                 Some(1)
             );
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("runtime"))
+                    .and_then(|runtime| runtime.get("backend"))
+                    .and_then(JsonValue::as_str),
+                Some("oneshot")
+            );
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("runtime"))
+                    .and_then(|runtime| runtime.get("daemon_running"))
+                    .and_then(JsonValue::as_bool),
+                Some(false)
+            );
 
             let stats = Cli::parse_from([
                 "tao",
@@ -7916,6 +8042,14 @@ links fixture
                     .and_then(|data| data.get("index_lag"))
                     .and_then(JsonValue::as_u64),
                 Some(1)
+            );
+            assert_eq!(
+                stats_payload
+                    .get("data")
+                    .and_then(|data| data.get("runtime"))
+                    .and_then(|runtime| runtime.get("backend"))
+                    .and_then(JsonValue::as_str),
+                Some("oneshot")
             );
         });
     }
@@ -7996,6 +8130,14 @@ links fixture
                     .and_then(JsonValue::as_u64),
                 Some(1)
             );
+            assert_eq!(
+                health_payload
+                    .get("data")
+                    .and_then(|data| data.get("runtime"))
+                    .and_then(|runtime| runtime.get("backend"))
+                    .and_then(JsonValue::as_str),
+                Some("oneshot")
+            );
 
             let stats = Cli::parse_from([
                 "tao",
@@ -8018,6 +8160,14 @@ links fixture
                     .and_then(|data| data.get("index_lag"))
                     .and_then(JsonValue::as_u64),
                 Some(1)
+            );
+            assert_eq!(
+                stats_payload
+                    .get("data")
+                    .and_then(|data| data.get("runtime"))
+                    .and_then(|runtime| runtime.get("backend"))
+                    .and_then(JsonValue::as_str),
+                Some("oneshot")
             );
         });
     }
@@ -8445,7 +8595,38 @@ links fixture
     }
 
     #[test]
-    fn daemon_cacheability_matrix_blocks_mutating_commands() {
+    fn daemon_execution_policy_routes_diagnostics_reads_and_mutations() {
+        let health = Commands::Health(VaultPathArgs {
+            vault_root: Some("/tmp".to_string()),
+            db_path: None,
+        });
+        assert_eq!(
+            daemon_execution_policy(&health),
+            DaemonExecutionPolicy::ObservationalFresh
+        );
+
+        let stats = Commands::Vault {
+            command: VaultCommands::Stats(VaultPathArgs {
+                vault_root: Some("/tmp".to_string()),
+                db_path: None,
+            }),
+        };
+        assert_eq!(
+            daemon_execution_policy(&stats),
+            DaemonExecutionPolicy::ObservationalFresh
+        );
+
+        let preflight = Commands::Vault {
+            command: VaultCommands::Preflight(VaultPathArgs {
+                vault_root: Some("/tmp".to_string()),
+                db_path: None,
+            }),
+        };
+        assert_eq!(
+            daemon_execution_policy(&preflight),
+            DaemonExecutionPolicy::ObservationalFresh
+        );
+
         let cacheable_query = Commands::Query(QueryArgs {
             vault_root: Some("/tmp".to_string()),
             db_path: None,
@@ -8461,7 +8642,10 @@ links fixture
             limit: 10,
             offset: 0,
         });
-        assert!(command_is_cacheable(&cacheable_query));
+        assert_eq!(
+            daemon_execution_policy(&cacheable_query),
+            DaemonExecutionPolicy::CachedReadWithRefresh
+        );
 
         let doc_write = Commands::Doc {
             command: DocCommands::Write(NotePutArgs {
@@ -8471,7 +8655,48 @@ links fixture
                 content: "# x".to_string(),
             }),
         };
-        assert!(!command_is_cacheable(&doc_write));
+        assert_eq!(
+            daemon_execution_policy(&doc_write),
+            DaemonExecutionPolicy::ExplicitWork
+        );
+    }
+
+    #[test]
+    fn observational_policy_leaves_existing_daemon_result_cache_untouched() {
+        let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
+        let runtime_key = "vault-key".to_string();
+        let cached = CommandResult {
+            command: "query.run".to_string(),
+            summary: "cached".to_string(),
+            args: serde_json::json!({ "total": 1 }),
+        };
+        if let RuntimeMode::Daemon(cache) = &mut runtime {
+            cache.command_results.insert(
+                "cached-key".to_string(),
+                CachedCommandResult {
+                    runtime_key: runtime_key.clone(),
+                    result: cached,
+                },
+            );
+        }
+
+        let fresh = CommandResult {
+            command: "health".to_string(),
+            summary: "health completed".to_string(),
+            args: serde_json::json!({ "status": "ready" }),
+        };
+        update_daemon_command_cache(
+            &mut runtime,
+            DaemonExecutionPolicy::ObservationalFresh,
+            Some(&runtime_key),
+            None,
+            &fresh,
+        );
+
+        if let RuntimeMode::Daemon(cache) = &runtime {
+            assert_eq!(cache.command_results.len(), 1);
+            assert!(cache.command_results.contains_key("cached-key"));
+        }
     }
 
     #[test]
@@ -8615,6 +8840,204 @@ links fixture
                 second.args.get("total").and_then(JsonValue::as_u64),
                 Some(2)
             );
+        });
+    }
+
+    #[test]
+    fn daemon_first_observation_syncs_existing_stale_index_before_cached_reads() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            fs::write(vault_root.join("notes/b.md"), "# B").expect("write stale change");
+
+            let command = Commands::Doc {
+                command: DocCommands::List(VaultPathArgs {
+                    vault_root: Some(vault_root.to_string_lossy().to_string()),
+                    db_path: None,
+                }),
+            };
+
+            let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
+            let refreshed =
+                maybe_refresh_daemon_state(&command, &mut runtime).expect("initial daemon sync");
+            assert!(
+                refreshed,
+                "first daemon observation should sync stale indexed state"
+            );
+
+            let listed = dispatch_with_runtime(command, false, &mut runtime)
+                .expect("dispatch synced daemon list");
+            assert_eq!(
+                listed.args.get("total").and_then(JsonValue::as_u64),
+                Some(2)
+            );
+        });
+    }
+
+    #[test]
+    fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
+        with_temp_cwd(|| {
+            let tempdir = tempfile::tempdir().expect("create tempdir");
+            let vault_root = tempdir.path().join("vault");
+            fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+            fs::write(vault_root.join("notes/a.md"), "# A").expect("write a");
+
+            let open = Cli::parse_from([
+                "tao",
+                "vault",
+                "open",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(open.command, open.allow_writes).expect("open vault");
+
+            let reindex = Cli::parse_from([
+                "tao",
+                "vault",
+                "reindex",
+                "--vault-root",
+                vault_root.to_string_lossy().as_ref(),
+            ]);
+            dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+            let health_command = Commands::Health(VaultPathArgs {
+                vault_root: Some(vault_root.to_string_lossy().to_string()),
+                db_path: None,
+            });
+            let resolved = resolve_command_vault_paths(&health_command)
+                .expect("resolve health command")
+                .expect("resolved health command");
+            let runtime_key = runtime_cache_key(&resolved);
+
+            let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
+            if let RuntimeMode::Daemon(cache) = &mut runtime {
+                cache.command_results.insert(
+                    "cached-query".to_string(),
+                    CachedCommandResult {
+                        runtime_key: runtime_key.clone(),
+                        result: CommandResult {
+                            command: "query.run".to_string(),
+                            summary: "cached query".to_string(),
+                            args: serde_json::json!({ "total": 1 }),
+                        },
+                    },
+                );
+            }
+
+            let first = dispatch_with_runtime(health_command.clone(), false, &mut runtime)
+                .expect("dispatch daemon health");
+            let first_timestamp = first
+                .args
+                .get("stats")
+                .and_then(|stats| stats.get("last_index_updated_at"))
+                .and_then(JsonValue::as_str)
+                .expect("first timestamp")
+                .to_string();
+
+            assert_eq!(
+                first
+                    .args
+                    .get("runtime")
+                    .and_then(|runtime| runtime.get("backend"))
+                    .and_then(JsonValue::as_str),
+                Some("daemon")
+            );
+            assert_eq!(
+                first
+                    .args
+                    .get("runtime")
+                    .and_then(|runtime| runtime.get("daemon_running"))
+                    .and_then(JsonValue::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                first
+                    .args
+                    .get("runtime")
+                    .and_then(|runtime| runtime.get("change_monitor_initialized"))
+                    .and_then(JsonValue::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                first
+                    .args
+                    .get("runtime")
+                    .and_then(|runtime| runtime.get("cached_connection"))
+                    .and_then(JsonValue::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                first
+                    .args
+                    .get("stats")
+                    .and_then(|stats| stats.get("watcher_status"))
+                    .and_then(JsonValue::as_str),
+                Some("stopped")
+            );
+
+            fs::write(vault_root.join("notes/b.md"), "# B").expect("write b");
+
+            let second = dispatch_with_runtime(health_command, false, &mut runtime)
+                .expect("dispatch daemon health after drift");
+            assert_eq!(
+                second.args.get("status").and_then(JsonValue::as_str),
+                Some("degraded")
+            );
+            assert_eq!(
+                second
+                    .args
+                    .get("stats")
+                    .and_then(|stats| stats.get("index_lag"))
+                    .and_then(JsonValue::as_u64),
+                Some(1)
+            );
+            assert_eq!(
+                second
+                    .args
+                    .get("stats")
+                    .and_then(|stats| stats.get("last_index_updated_at"))
+                    .and_then(JsonValue::as_str),
+                Some(first_timestamp.as_str())
+            );
+            assert_eq!(
+                second
+                    .args
+                    .get("runtime")
+                    .and_then(|runtime| runtime.get("cached_connection"))
+                    .and_then(JsonValue::as_bool),
+                Some(true)
+            );
+
+            if let RuntimeMode::Daemon(cache) = &runtime {
+                assert!(
+                    cache.command_results.contains_key("cached-query"),
+                    "observational health should not clear cached query results"
+                );
+                assert!(
+                    !cache.change_monitors.contains_key(&runtime_key),
+                    "observational health should not initialize change monitors"
+                );
+            }
         });
     }
 
