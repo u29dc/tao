@@ -923,6 +923,109 @@ LIMIT ?{limit_index} OFFSET ?{offset_index}
         })
         .collect()
     }
+
+    /// Load links potentially affected by a set of vault changes.
+    ///
+    /// Returns links from sources NOT in `excluded_source_paths` that satisfy
+    /// at least one of:
+    /// - Currently unresolved (may now resolve due to added/modified files)
+    /// - Stale from FK SET NULL (resolved_file_id nulled by cascade but
+    ///   is_unresolved column not yet updated)
+    /// - Targeting a changed file path with a heading or block anchor
+    ///
+    /// This query is intentionally scoped to update/delete flows. Callers that
+    /// introduce new candidate files must fall back to a full-link scan because
+    /// basename/path tie-breakers can cause already-resolved links to prefer a
+    /// different target even when their current resolved_file_id is unchanged.
+    pub fn list_affected_by_changes_with_paths(
+        connection: &Connection,
+        excluded_source_paths: &[String],
+        changed_target_paths: &[String],
+        include_unresolved: bool,
+    ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
+        let mut or_conditions = Vec::new();
+        let mut all_params = Vec::<String>::new();
+        let mut param_idx = 1_usize;
+
+        // Source exclusion: links from changed files are already being reindexed.
+        let exclusion_clause = if excluded_source_paths.is_empty() {
+            String::new()
+        } else {
+            let placeholders = in_clause_placeholders(excluded_source_paths.len(), param_idx);
+            param_idx += excluded_source_paths.len();
+            all_params.extend(excluded_source_paths.iter().cloned());
+            format!("sf.normalized_path NOT IN ({placeholders})")
+        };
+
+        if include_unresolved {
+            // Includes both explicitly-unresolved links and links left stale by
+            // FK ON DELETE SET NULL (resolved_file_id is NULL but is_unresolved
+            // column still reads 0).
+            or_conditions.push("(l.is_unresolved = 1 OR l.resolved_file_id IS NULL)".to_string());
+        }
+
+        if !changed_target_paths.is_empty() {
+            let placeholders = in_clause_placeholders(changed_target_paths.len(), param_idx);
+            all_params.extend(changed_target_paths.iter().cloned());
+            or_conditions.push(format!(
+                "(tf.normalized_path IN ({placeholders}) AND (l.heading_slug IS NOT NULL OR l.block_id IS NOT NULL))"
+            ));
+        }
+
+        if or_conditions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let or_clause = or_conditions.join("\n    OR ");
+        let where_clause = if exclusion_clause.is_empty() {
+            format!("WHERE ({or_clause})")
+        } else {
+            format!("WHERE {exclusion_clause}\n  AND ({or_clause})")
+        };
+
+        let query = format!(
+            r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+{where_clause}
+ORDER BY l.link_id ASC
+"#
+        );
+
+        let mut statement =
+            connection
+                .prepare(&query)
+                .map_err(|source| LinksRepositoryError::Sql {
+                    operation: "prepare_list_affected_by_changes",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(params_from_iter(all_params.iter()), row_to_link_with_paths)
+            .map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_affected_by_changes",
+                source,
+            })?;
+        rows.map(|row| {
+            row.map_err(|source| LinksRepositoryError::Sql {
+                operation: "list_affected_by_changes_row",
+                source,
+            })
+        })
+        .collect()
+    }
 }
 
 fn row_to_link_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkRecord> {
