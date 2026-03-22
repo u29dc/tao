@@ -1,225 +1,108 @@
-> Tao is a local, Rust-native knowledge engine for markdown vaults, designed for deterministic automation and AI agents, with a thin SwiftUI desktop client
+> `tao` is a Rust-first knowledge engine for markdown vaults: a JSON-first CLI over SDK services, a UniFFI bridge for Swift, deterministic fixture and benchmark tooling, and a thin SwiftUI macOS client.
 
 ## 1. Documentation
 
-- Primary policy: this file is the canonical operational reference for repository architecture, commands, quality gates, and roadmap state.
-- Embedded spec decisions are maintained here (no standalone `docs/` spec directory):
-    - CLI IA and removed-legacy-command policy
-    - unified query contract and scope semantics
-    - parity scope (`now/next/later`)
-    - synthetic fixture and performance benchmark runbooks
-- External references for tool behavior and standards:
-    - `https://bun.sh/docs/llms.txt`
-    - `https://swift.org/documentation/`
-    - `https://www.rust-lang.org/learn`
-    - `https://mozilla.github.io/uniffi-rs/latest/`
-- Internal source references:
-    - Workspace manifest: `Cargo.toml`
-    - Script/runtime manifest: `package.json`
-    - CLI guide: `crates/tao-cli/README.md`
-    - SDK service guide: `crates/tao-sdk-service/README.md`
-    - macOS package manifest: `apps/tao-macos/Package.swift`
-    - Benchmark driver: `scripts/bench.sh`
-    - Fixture driver: `scripts/fixtures.sh`
-    - Safety scan: `scripts/safety.sh`
+- Primary references: [`Cargo.toml`](Cargo.toml), [`package.json`](package.json), [`config.toml`](config.toml), [`crates/tao-cli/README.md`](crates/tao-cli/README.md), [`crates/tao-sdk-service/README.md`](crates/tao-sdk-service/README.md), [`crates/tao-sdk-bridge/README.md`](crates/tao-sdk-bridge/README.md), [`apps/tao-macos/Package.swift`](apps/tao-macos/Package.swift)
+- Operational scripts are authoritative for release, safety, fixtures, and benchmarks: [`scripts/release.sh`](scripts/release.sh), [`scripts/ffi.sh`](scripts/ffi.sh), [`scripts/safety.sh`](scripts/safety.sh), [`scripts/fixtures.sh`](scripts/fixtures.sh), [`scripts/bench.sh`](scripts/bench.sh), [`scripts/budgets.sh`](scripts/budgets.sh)
+- Fixture semantics live in [`vault/README.md`](vault/README.md) and [`vault/fixtures/README.md`](vault/fixtures/README.md)
+- External docs used by this repo: [Rust](https://www.rust-lang.org/learn), [Swift](https://swift.org/documentation/), [UniFFI](https://mozilla.github.io/uniffi-rs/latest/), [Bun](https://bun.sh/docs/llms.txt)
+- There is no tracked `.github/workflows/` directory in the current repository; treat local scripts, hooks, and crate/app tests as the real enforcement surface
 
 ## 2. Repository Structure
 
 ```text
-apps/
-  tao-macos/                    Swift macOS app + generated UniFFI bindings
-crates/
-  tao-sdk-*/                    Rust SDK domain crates (core, storage, service, bridge, etc.)
-  tao-cli/                      Minimal JSON/terminal wrapper over SDK services
-  tao-bench/                    Release benchmark harness + budget reports
-  tao-tui/                      Placeholder shell (intentionally minimal)
-vault/                          Root shipped fixture vault for QA and manual smoke
-scripts/                        Operational scripts (clean, ffi, fixtures, bench, release)
-.github/workflows/              Central quality-gate workflows
+.
+├── apps/tao-macos/            Swift package: executable app + scaffold library + generated UniFFI Swift
+├── crates/
+│   ├── tao-cli/               JSON-first CLI surface, daemon client/server, contract tests
+│   ├── tao-sdk-*/             Core SDK crates: config, vault scan, storage, service, bridge, search
+│   ├── tao-bench/             Deterministic benchmark harness
+│   └── tao-tui/               Placeholder TUI shell
+├── scripts/                   Safety, FFI generation, fixtures, benchmarks, release, cleanup
+├── vault/                     Shipped QA/conformance fixture vault plus parity fixtures
+└── AGENTS.md                  Canonical repo-level agent instructions; `README.md` and `CLAUDE.md` symlink here
 ```
+
+- Start behavior changes in [`crates/tao-cli/src/cli_impl/commands/`](crates/tao-cli/src/cli_impl/commands/) for CLI routing, [`crates/tao-sdk-service/src/`](crates/tao-sdk-service/src/) for orchestration, and [`crates/tao-sdk-storage/src/`](crates/tao-sdk-storage/src/) for SQLite schema/repository work
+- Treat [`apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/`](apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/) as generated output from [`scripts/ffi.sh`](scripts/ffi.sh)
+- [`vault/fixtures/graph-parity/expected/`](vault/fixtures/graph-parity/expected/) holds golden JSON snapshots for CLI graph contracts
+- [`dist/`](dist/), [`.benchmarks/`](.benchmarks/), [`target/`](target/), and [`vault/generated/`](vault/generated/) are generated runtime/build outputs
 
 ## 3. Stack
 
 | Layer | Choice | Notes |
 | --- | --- | --- |
-| Core engine | Rust workspace | `unsafe_code = "forbid"` at workspace level |
-| Storage | SQLite via `rusqlite` | migrations and bootstrap driven by SDK service/config |
-| Native bridge | UniFFI surface in `tao-sdk-bridge` | generated Swift bindings consumed by macOS app |
-| CLI | `tao` binary (`clap`) | thin wrapper over SDK APIs with one-envelope JSON |
-| macOS UI | SwiftUI | file tree sidebar + note reader + settings window |
-| Bench harness | `tao-bench` | bridge/ffi/startup metrics with budget gate script |
+| Core engine | Rust 2024 workspace | `unsafe_code = "forbid"` at workspace level, strict clippy |
+| Storage | SQLite via `rusqlite` | schema and migrations owned by `tao-sdk-storage` |
+| Vault FS | `tao-sdk-vault` | canonical path safety, NFC normalization, case-policy matching |
+| CLI | `clap` + JSON envelopes | default JSON output, optional daemon forwarding, `--text` opt-out |
+| Native bridge | `tao-sdk-bridge` + UniFFI | shared by Swift app and CLI warm-runtime flows |
+| macOS client | SwiftUI package | thin shell over cached `TaoBridgeRuntime` instances |
+| Tooling | Bun + Husky + Biome | JS tooling only; core product/runtime is Rust + Swift |
+| Benchmarks | `tao-bench` + `hyperfine` | timestamped reports under [`.benchmarks/reports/`](.benchmarks/reports/) |
 
 ## 4. Commands
 
-- `bun run util:clean` -> remove build/runtime artifacts and local install outputs.
-- `bun run util:ffi` -> build bridge and regenerate Swift UniFFI bindings.
-- `bun run util:safety` -> enforce repository-local safety scan (forbidden personal-path markers).
-- `bun run build` -> full release build pipeline (`util:ffi` + `release:cli` + `release:mac`).
-- `bun run release:all` -> unified release pipeline for CLI + macOS app packaging.
-- `bun run release:cli` -> release Rust binaries install + CLI/TUI bundle output.
-- `bun run release:mac` -> release Swift app bundle + signed zip package output.
-- `bun run util:check` -> format, lint, release check/test, audit, and full release build.
-- `bun run bench` / `bun run bench:all` -> full benchmark suite (`sdk` + read-only CLI matrix).
-- `bun run bench:sdk` -> SDK/bridge/startup scenarios + baseline query/graph budgets.
-- `bun run bench:cli` -> comprehensive read-only CLI benchmark matrix.
-- `bun run bench:daemon` -> one-shot vs daemon query latency comparison with improvement gate.
-- `./scripts/bench.sh` -> unified benchmark driver (`--suite all|sdk|cli|daemon|bridge|ffi|startup|parse|resolve|search`).
-- `./scripts/fixtures.sh [output-root]` -> deterministic synthetic vault generation (default `vault/generated`).
-- `./scripts/fixtures.sh --skip-validate` -> opt out of built-in fixture validation.
-- `bun run dev -- vault open --vault-root <path>` -> CLI open/bootstrap using vault-root only.
-- `swift run --package-path apps/tao-macos TaoMacOSApp` -> launch macOS app.
+- `bun install` installs JS tooling and activates Husky hooks
+- `bun run util:ffi` rebuilds [`crates/tao-sdk-bridge`](crates/tao-sdk-bridge) and regenerates Swift bindings into [`apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/`](apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/)
+- `cargo run -p tao-cli -- --help` iterates on the CLI without requiring a prior release build
+- `bun run util:check` is the full completion gate: safety scan, Biome, `cargo fmt`, clippy, release `cargo check`, release tests, release Swift tests, `cargo audit`, and `bun run build`
+- `bun run build` packages release CLI and macOS artifacts via [`scripts/release.sh`](scripts/release.sh)
+- `bun run bench`, `bun run bench:sdk`, `bun run bench:cli`, and `bun run bench:budget` run the benchmark and read-budget suites against repository-local fixtures
+- `./scripts/fixtures.sh --profile parity` refreshes the compact parity fixtures; `./scripts/fixtures.sh --profile 10k` generates the larger benchmark vaults
+- `swift run --package-path apps/tao-macos TaoMacOSApp` launches the macOS app shell
 
 ## 5. Architecture
 
-- SDK-first layering:
-    - Domain and persistence live in Rust SDK crates.
-    - CLI is a minimal adapter over SDK service calls.
-    - macOS app is a native UI shell that consumes generated bindings.
-- Runtime bootstrap:
-    - Config precedence: defaults < global `~/.tools/tao/config.toml` < root `config.toml` < vault `config.toml` < env < explicit overrides.
-    - Root config is probe-only (loaded when present) and is not auto-created outside repository contexts.
-    - Vault-only startup path is supported; sqlite path auto-resolves and bootstraps.
-    - CLI `--vault-root` is optional; default vault can be set via `~/.tools/tao/config.toml` `[vault].root`.
-- Bridge strategy:
-    - `tao-sdk-bridge` exposes `TaoBridgeRuntime` with persistent in-process handle semantics.
-    - Swift client caches runtime handles per `(vault_root, db_path)` key to avoid per-call process startup.
-    - Core UI calls use batched/windowed methods (`startup_bundle_json`, `notes_window_json`, `note_context_json`) to reduce boundary overhead.
+- [`crates/tao-cli/src/cli_impl/commands/`](crates/tao-cli/src/cli_impl/commands/) is an adapter layer only; keep business rules in SDK crates and keep envelope/CLI formatting out of service code
+- [`crates/tao-sdk-service/src/`](crates/tao-sdk-service/src/) orchestrates indexing, reconcile, graph diagnostics, base execution, task/property operations, and health snapshots over storage and vault primitives
+- [`crates/tao-sdk-storage/src/`](crates/tao-sdk-storage/src/) owns SQLite migrations, repositories, and transaction helpers
+- [`crates/tao-sdk-vault/src/`](crates/tao-sdk-vault/src/) enforces vault boundaries and deterministic scan/fingerprint behavior; scans skip `.git`, `.obsidian`, and `.tao`
+- [`crates/tao-sdk-bridge/src/`](crates/tao-sdk-bridge/src/) exposes `BridgeKernel` and `TaoBridgeRuntime`; the macOS app and CLI daemon both depend on warm cached kernels/connections instead of reimplementing service logic
+- `vault reindex` is not a blind full rebuild: it prefers incremental reconcile and only escalates to full rebuild when link-resolution version state or indexed file-path consistency is stale
+- The app boundary is intentionally batched: `startup_bundle`, `notes_window`, and `note_context` are the main read surfaces, and Swift caches up to four runtimes keyed by `(vault_root, db_path)`
 
-## 6. UI Behavior
+## 6. Runtime and State
 
-- Sidebar: single hierarchical file/folder tree built from indexed note summaries.
-- Detail pane: note title, bridge-provided structured front matter properties, rendered markdown body.
-- Settings: vault path only; selecting/saving vault triggers data refresh.
-- Loading policy: note spinner is delayed to avoid visible flicker on fast reads.
-- Debug/diagnostic panes are intentionally removed from primary app surface.
+- Vault root resolution is separate from other settings: `--vault-root` -> `TAO_VAULT_ROOT` -> `[vault].root` from repo/root `config.toml` discovered from cwd -> `[vault].root` from global `~/.tools/tao/config.toml`; once the vault is known, runtime/storage/security values resolve as explicit overrides -> `TAO_*` env vars -> vault `config.toml` -> repo/root config -> global config -> built-in defaults
+- Relevant env vars: `TAO_VAULT_ROOT`, `TAO_CONFIG_PATH`, `TAO_DATA_DIR`, `TAO_DB_PATH`, `TAO_CASE_POLICY`, `TAO_TRACING_ENABLED`, `TAO_FEATURE_FLAGS`, `TAO_READ_ONLY`; `TAO_CONFIG_PATH` overrides the global config file location, and release/cleanup also honor `TAO_HOME`, `TOOLS_HOME`, and legacy `OBS_HOME`
+- Probe-only config behavior is intentional: root and vault `config.toml` files are read when present but are not auto-created during normal config resolution
+- Effective runtime defaults when config is absent are repo-local or vault-local: data dir `<vault>/.tao`, db path `<vault>/.tao/index.sqlite`, case-sensitive matching, tracing enabled, read-only enabled
+- Normal vault-facing CLI commands may auto-forward through a background daemon; `vault daemon *` is the explicit lifecycle/inspection surface, not the sole entrypoint to warm-runtime mode
+- Daemon sockets are Unix-only and default to `~/.tools/tao/daemons/vault-<hash>.sock`; when `HOME` is missing the fallback is `<cwd>/.tao/daemons/`
+- Daemon first observation may reconcile or fully rebuild before serving cached reads; later change-monitor generations invalidate cached results for the affected runtime
+- Generated and local state to expect: [`apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/`](apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/), [`dist/`](dist/), [`.benchmarks/reports/`](.benchmarks/reports/), [`vault/generated/`](vault/generated/), and local vault metadata directories like `vault/.tao/`
+- [`scripts/budgets.sh`](scripts/budgets.sh) optionally reads `plan/perf-budgets.json`, but that file is absent in the current repo; the script falls back to `profile=10k` and `10ms` default p50 budgets
 
-## 7. Performance and Benchmarks
+## 7. Conventions
 
-- Benchmark output root: `.benchmarks/reports/` (gitignored).
-- Core guardrails (`bench:sdk`):
-    - Bridge scenario: `note_get`, `notes_list`, `note_put`, `events_poll`.
-    - FFI scenario: `note_open`, `tree_window`, `startup_bundle`.
-    - Startup scenario: end-to-end open/list/context budget.
-- Baseline CLI latency budgets (enforced in `bench:sdk`):
-    - `query --from docs` mean <= `10ms`
-    - `graph unresolved` mean <= `10ms`
-- Comprehensive CLI matrix (`bench:cli`) benchmarks all read-only command families:
-    - `vault` read paths, `doc` read/list, `base` list/view/schema, `graph` diagnostics/traversal, `meta`, `task list`, and `query` scopes.
-    - `docs` query coverage includes simple, `--where`, `--sort`, and combined projection/filter/sort variants.
-- `bench:cli` writes per-command `hyperfine` JSON reports and `.benchmarks/reports/cli-readonly/summary.json`.
+- `README.md` and `CLAUDE.md` are symlink mirrors of [`AGENTS.md`](AGENTS.md); edit the root file only
+- Non-interactive CLI commands emit one JSON envelope to stdout by default; bare `tao` and help/version flows use native clap output, and `--text` is the explicit opt-out
+- `--json-stream` is a narrow fast path: it only applies to `query --from docs` without `--where` or `--sort`
+- `query --from graph` without `--path` maps to the unresolved-link window; with `--path` it returns outgoing and backlink panels
+- Mutations are gated in both CLI and bridge layers: CLI `doc write` and `task set-state` require `--allow-writes` unless `[security].read_only = false`, while bridge note writes require `allow_writes=true` unless the same config disables read-only mode
+- If you change command names, parameters, or examples, update [`crates/tao-cli/src/cli_impl/registry.rs`](crates/tao-cli/src/cli_impl/registry.rs) and the contract tests that assert the public surface
 
-## 8. Quality Gates
+## 8. Constraints
 
-- Required before completion:
-    - zero formatting drift (`cargo fmt --all`)
-    - zero clippy warnings (`-D warnings`)
-    - passing release tests (`cargo test --workspace --release`, `swift test --configuration release`)
-    - successful release build (`bun run build`)
-- Local enforcement:
-    - `bun run util:check` remains the full macOS-first developer gate.
-    - Husky + lint-staged run `bun run util:check` before local commits.
-- Central enforcement:
-    - `.github/workflows/quality.yml` runs safety, Biome, format, lint, Rust typecheck/tests, and audit on Ubuntu.
-    - `.github/workflows/apple.yml` runs FFI generation, release Swift tests, and release build on macOS.
-- Commit policy:
-    - signed commits (`git commit -S`)
-    - scoped Conventional Commit messages
-    - atomic commits aligned to ticket boundaries
+- Never run automated QA, fixture generation, or benchmarks against personal vaults or paths outside this repository; [`scripts/safety.sh`](scripts/safety.sh) enforces repository-local paths and blocks Dropbox roots
+- Prefer [`vault/`](vault/), [`vault/generated/`](vault/generated/), or repo-local temporary directories for all test and benchmark vaults
+- Never hand-edit generated Swift bindings, generated headers, or `module.modulemap` under [`apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/`](apps/tao-macos/Sources/TaoMacOSAppScaffold/Generated/); regenerate with `bun run util:ffi`
+- Treat [`crates/tao-sdk-storage/`](crates/tao-sdk-storage/), [`crates/tao-sdk-bridge/`](crates/tao-sdk-bridge/), [`crates/tao-cli/src/cli_impl/contract.rs`](crates/tao-cli/src/cli_impl/contract.rs), [`crates/tao-cli/src/cli_impl/registry.rs`](crates/tao-cli/src/cli_impl/registry.rs), and [`scripts/`](scripts/) as high-risk boundaries for migrations, contract stability, packaging, and safety
+- [`scripts/clean.sh`](scripts/clean.sh) removes `dist`, `TAO_HOME`, and the legacy `${OBS_HOME:-${TOOLS_HOME}/obs}` install directory; do not run it casually if those env vars point somewhere unexpected
+- CLI/daemon/budget benchmark flows assume repository-local generated fixtures; daemon and budget suites additionally require Unix sockets and `hyperfine`, while raw `tao-bench` scenarios (`bridge`, `ffi`, `startup`, `parse`, `resolve`, `search`) do not
 
-## 9. Roadmap State
+## 9. Validation
 
-- No tracked `plan/` control-plane directory exists in the repository.
-- Treat current git history, benchmark reports under `.benchmarks/reports/`, and crate/app test suites as the execution record.
-- Active improvement areas reflected in source and benchmarks:
-    - query correctness and projection parity
-    - bridge/app data-shape parity
-    - benchmark coverage for expensive query paths
-    - release and CI hygiene
+- Required gate: `bun run util:check`
+- CLI and JSON contract changes: `cargo test -p tao-cli --release`
+- Service, bridge, or indexing changes: `cargo test -p tao-sdk-service --release` and `cargo test -p tao-sdk-bridge --release`
+- macOS bridge/app boundary changes: `bun run util:ffi` then `swift test --configuration release --package-path apps/tao-macos`
+- Fixture or graph/base parity changes: use [`vault/fixtures/README.md`](vault/fixtures/README.md), rerun the parity refresh flow, and keep [`vault/fixtures/graph-parity/expected/`](vault/fixtures/graph-parity/expected/) in sync with CLI snapshot tests
+- Benchmark or performance changes: rerun the relevant suites from [`scripts/bench.sh`](scripts/bench.sh) and [`scripts/budgets.sh`](scripts/budgets.sh); reports land under [`.benchmarks/reports/`](.benchmarks/reports/) with a `latest` symlink
+- There is no tracked CI workflow directory at the repo root today, so local script/test output is the completion bar
 
-## 10. CLI IA and Contract
+## 10. Further Reading
 
-- Compact command surface:
-    - `tools`, `health`, `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
-- Legacy aliases are removed from the public CLI:
-    - `note`, `links`, `properties`, `bases`, `search` must return unknown-command errors
-- JSON envelope contract for all non-interactive commands by default:
-    - success: `{ ok: true, data: <payload>, meta: { tool, elapsed, count?, total?, hasMore? } }`
-    - failure: `{ ok: false, error: { code, message, hint, details? }, meta: { tool, elapsed } }`
-    - no `--json` flag exists; JSON is the default non-interactive contract
-    - `--text` is the explicit opt-out for plain-text summaries.
-    - bare `tao` and `tao --help` render clap help, not JSON.
-- Write gate policy:
-    - mutating operations require `--allow-writes`
-    - read-only operations must never require write gate.
-
-## 11. Unified Query Contract
-
-- Entrypoint:
-    - `tao query --vault-root <path> --from <scope> [options]`
-- Supported scopes:
-    - `docs`
-    - `graph` (unresolved by default; outgoing/backlinks when `--path` is supplied)
-    - `task`
-    - `meta:tags`
-    - `meta:aliases`
-    - `meta:properties`
-    - `base:<id-or-path>` (requires `--view-name`)
-- Core query options:
-    - `--query <text>`
-    - `--path <note-path>`
-    - `--view-name <name>`
-    - `--limit <n>`
-    - `--offset <n>`
-
-## 12. Parity Scope Map
-
-- Now:
-    - compact CLI IA
-    - frontmatter wikilinks + body wikilinks/markdown-links/embeds indexing parity
-    - scoped inbound attachment/file audits via `graph inbound-scope`
-    - graph diagnostics/traversal (`unresolved`, `deadends`, `orphans`, `floating`, `components`, `walk`)
-    - metadata aggregations (`properties`, `tags`, `aliases`, `tasks`)
-    - task extraction + state transitions with write gate
-    - deterministic synthetic fixture generation + validation
-- Next:
-    - planner-level projection/ranking/explain parity for all query adapters
-    - richer relation-aware base typing and schema introspection
-    - persistent daemon runtime (`taod`) and warm client mode
-    - incremental reindex + hot-query cache budget gates
-- Later:
-    - sync/recovery/versioned retention flows
-    - app-shell control parity surfaces
-    - advanced task workflows (priority, recurrence, assignees, rollups)
-
-## 13. Synthetic Fixture Policy
-
-- Fixture generator:
-    - `./scripts/fixtures.sh --profile all --seed 42 --output vault/generated`
-    - profiles: `1k`, `2k`, `5k`, `10k`, `25k`, `all`
-- Validation:
-    - built into `./scripts/fixtures.sh` by default
-- Validation invariants:
-    - no hub files
-    - required base files (`contacts`, `companies`, `projects`, `meetings`)
-    - markdown tasks/tags present
-    - body + frontmatter wikilinks present
-    - unresolved ratio within bounded range
-    - no personal vault/path leakage markers
-
-## 14. Hard Safety Rule (Non-Negotiable)
-
-- Never access real personal vaults or personal folders for development, benchmarking, or QA.
-- Forbidden paths include all Dropbox/personal roots, especially:
-    - `/Users/han/Library/CloudStorage/Dropbox/**`
-    - `/Users/han/Dropbox/**`
-    - any path outside this repository root for automated test/bench workflows
-- Allowed vault roots for all automated work:
-    - `vault/`
-    - `vault/generated/**`
-    - temporary directories created under this repository root only
-- Enforcement requirements:
-    - benchmark scripts must generate/use repository-local fixtures only
-    - fixtures validation must fail on leaked personal-path markers
-    - CI/quality checks must include forbidden-path scanning
-- Violation policy:
-    - treat any access attempt to forbidden paths as a hard failure and stop execution.
+- [`apps/tao-macos/README.md`](apps/tao-macos/README.md) for the current SwiftUI app-shell scope
+- [`scripts/tests/safety_test.sh`](scripts/tests/safety_test.sh) for the hard path-safety expectations the repo actively tests
