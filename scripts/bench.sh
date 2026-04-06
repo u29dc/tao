@@ -8,18 +8,17 @@ usage() {
   cat <<USAGE
 Usage: scripts/bench.sh [--suite SUITE] [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--skip-generate]
 
-Unified benchmark driver for Tao SDK/bridge/core/CLI workloads.
+Unified benchmark driver for Tao SDK/internal-bridge/core/CLI workloads.
 
 Suites:
   all      Run sdk + full read-only cli matrix (default)
-  sdk      Run parse/resolve/search/bridge/ffi/startup/graph-walk/unified-query + baseline query/graph budgets
+  sdk      Run parse/resolve/search/bridge/startup/graph-walk/unified-query + baseline query/graph budgets
   cli      Run full read-only CLI command matrix
   fixtures Run fixture generation throughput benchmark (1k, 5k, 10k)
   daemon   Run one-shot vs daemon warm-runtime comparison
   graph-walk Run tao-bench graph-walk scenario
   unified-query Run tao-bench unified-query scenario
   bridge   Run bridge scenario only
-  ffi      Run ffi scenario only
   startup  Run startup scenario only
   parse    Run parse scenario only
   resolve  Run resolve scenario only
@@ -112,10 +111,10 @@ case "$FIXTURE_PROFILE" in
     ;;
 esac
 case "$SUITE" in
-  all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core)
+  all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core)
     ;;
   *)
-    echo "--suite must be one of: all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|ffi|startup|parse|resolve|search|core" >&2
+    echo "--suite must be one of: all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core" >&2
     exit 1
     ;;
 esac
@@ -141,7 +140,6 @@ PARSE_REPORT="${REPORT_DIR}/parse-bench.json"
 RESOLVE_REPORT="${REPORT_DIR}/resolve-bench.json"
 SEARCH_REPORT="${REPORT_DIR}/search-bench.json"
 BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
-FFI_REPORT="${REPORT_DIR}/ffi-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 GRAPH_WALK_REPORT="${REPORT_DIR}/graph-walk-bench.json"
 GRAPH_WALK_FOLDERS_REPORT="${REPORT_DIR}/graph-walk-folders-bench.json"
@@ -547,7 +545,6 @@ run_sdk_suite() {
   run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 10000
   run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
   run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
-  run_tao_bench_scenario ffi 200 "${FFI_REPORT}" --enforce-budgets --max-p50-ms 20 --max-p95-ms 60
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
   run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200
   run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_FOLDERS_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200 --graph-include-folders
@@ -654,9 +651,6 @@ case "${SUITE}" in
     ;;
   bridge)
     run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
-    ;;
-  ffi)
-    run_tao_bench_scenario ffi 200 "${FFI_REPORT}" --enforce-budgets --max-p50-ms 20 --max-p95-ms 60
     ;;
   startup)
     run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000

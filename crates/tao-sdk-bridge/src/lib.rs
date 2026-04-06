@@ -1,6 +1,4 @@
-//! Swift bridge adapter shell over SDK services.
-
-mod runtime;
+//! Internal bridge adapter shell over SDK services.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,16 +26,10 @@ use tao_sdk_storage::{
 use tao_sdk_vault::{CasePolicy, validate_relative_vault_path};
 use thiserror::Error;
 
-pub use runtime::{BridgeStartupBundle, TaoBridgeRuntime, TaoBridgeRuntimeError};
-
-uniffi::setup_scaffolding!();
-
 /// Current bridge DTO schema version.
 pub const BRIDGE_SCHEMA_VERSION: &str = "v1.0";
 /// Supported bridge DTO major version for compatibility checks.
 pub const BRIDGE_SCHEMA_MAJOR: u16 = 1;
-/// Bridge error code when kernel initialization fails.
-pub const BRIDGE_ERROR_INIT_FAILED: &str = "bridge.init.failed";
 /// Bridge error code when vault stats lookup fails.
 pub const BRIDGE_ERROR_VAULT_STATS_FAILED: &str = "bridge.vault_stats.failed";
 /// Bridge error code when note-get path is invalid.
@@ -94,10 +86,6 @@ pub const BRIDGE_ERROR_NOTE_PUT_EVENT_LOG_FAILED: &str = "bridge.note_put.event_
 pub const BRIDGE_ERROR_EVENTS_POLL_INVALID_LIMIT: &str = "bridge.events_poll.invalid_limit";
 /// Bridge error code when events-poll database query fails.
 pub const BRIDGE_ERROR_EVENTS_POLL_FAILED: &str = "bridge.events_poll.failed";
-/// Bridge error code when startup bundle sync or query fails.
-pub const BRIDGE_ERROR_STARTUP_BUNDLE_FAILED: &str = "bridge.startup_bundle.failed";
-/// Bridge error code when serialization fails.
-pub const BRIDGE_ERROR_SERIALIZE_FAILED: &str = "bridge.serialize.failed";
 
 /// Parsed bridge schema version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

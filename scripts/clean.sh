@@ -8,9 +8,6 @@ TAO_DIR="${TAO_HOME:-${TOOLS_ROOT}/tao}"
 echo "Cleaning Rust build artifacts..."
 cargo clean
 
-echo "Cleaning Swift package artifacts..."
-swift package --package-path apps/tao-macos clean
-
 if [ -d dist ]; then
   echo "Cleaning dist artifacts..."
   find dist -mindepth 1 -depth -delete

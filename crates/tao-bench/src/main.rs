@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rusqlite::Connection;
 use serde_json::{Value as JsonValue, json};
-use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel, TaoBridgeRuntime};
+use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
 use tao_sdk_links::resolve_target;
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{BacklinkGraphService, GraphWalkRequest};
@@ -21,7 +21,6 @@ enum Scenario {
     GraphWalk,
     UnifiedQuery,
     Bridge,
-    Ffi,
     Startup,
 }
 
@@ -108,7 +107,6 @@ fn run() -> Result<()> {
     let args = Args::parse();
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
-        Scenario::Ffi => run_ffi_benchmark(&args),
         Scenario::GraphWalk => run_graph_walk_benchmark(&args),
         Scenario::Resolve => run_resolve_benchmark(&args),
         Scenario::Startup => run_startup_benchmark(&args),
@@ -588,138 +586,6 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn run_ffi_benchmark(args: &Args) -> Result<()> {
-    if args.iterations == 0 {
-        bail!("ffi benchmark iterations must be greater than zero");
-    }
-
-    let notes_total = args.bridge_notes.max(1);
-    let temp = tempdir().context("create ffi benchmark temp directory")?;
-    let vault_root = temp.path().join("vault");
-    fs::create_dir_all(vault_root.join("notes")).context("create ffi benchmark notes directory")?;
-
-    let runtime = TaoBridgeRuntime::new(vault_root.to_string_lossy().to_string(), None)
-        .map_err(|source| anyhow::anyhow!("create ffi runtime failed: {source}"))?;
-
-    for idx in 0..notes_total {
-        let path = format!("notes/note-{idx:05}.md");
-        let content = format!("# Note {idx}\nseed");
-        let _: JsonValue = consume_json_envelope(
-            runtime
-                .note_put_json(path, content, Some(true))
-                .map_err(|source| anyhow::anyhow!("ffi note_put_json failed: {source}"))?,
-            "ffi_note_put_seed",
-        )?;
-    }
-
-    let mut note_open_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
-    let mut tree_window_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
-    let mut startup_bundle_samples =
-        Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
-
-    for iteration in 0..args.iterations {
-        let idx = iteration % notes_total;
-        let path = format!("notes/note-{idx:05}.md");
-
-        let note_open_start = Instant::now();
-        let _note_context: JsonValue = consume_json_envelope(
-            runtime
-                .note_context_json(path)
-                .map_err(|source| anyhow::anyhow!("ffi note_context_json failed: {source}"))?,
-            "ffi_note_context",
-        )?;
-        note_open_samples.push(elapsed_ms(note_open_start));
-
-        let tree_window_start = Instant::now();
-        let _window: JsonValue = consume_json_envelope(
-            runtime
-                .notes_window_json(None, Some(512))
-                .map_err(|source| anyhow::anyhow!("ffi notes_window_json failed: {source}"))?,
-            "ffi_notes_window",
-        )?;
-        tree_window_samples.push(elapsed_ms(tree_window_start));
-
-        let startup_bundle_start = Instant::now();
-        let _: JsonValue = serde_json::from_str(
-            &runtime
-                .startup_bundle_json(Some(512))
-                .map_err(|source| anyhow::anyhow!("ffi startup_bundle_json failed: {source}"))?,
-        )
-        .context("decode ffi startup bundle json")?;
-        startup_bundle_samples.push(elapsed_ms(startup_bundle_start));
-    }
-
-    let note_open = LatencySummary::from_samples(note_open_samples)?;
-    let tree_window = LatencySummary::from_samples(tree_window_samples)?;
-    let startup_bundle = LatencySummary::from_samples(startup_bundle_samples)?;
-
-    println!(
-        "ffi metric=note_open p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        note_open.p50_ms, note_open.p95_ms, note_open.max_ms
-    );
-    println!(
-        "ffi metric=tree_window p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        tree_window.p50_ms, tree_window.p95_ms, tree_window.max_ms
-    );
-    println!(
-        "ffi metric=startup_bundle p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        startup_bundle.p50_ms, startup_bundle.p95_ms, startup_bundle.max_ms
-    );
-
-    let mut violations = Vec::new();
-    check_budget(
-        "note_open",
-        note_open,
-        args.max_p50_ms,
-        args.max_p95_ms,
-        &mut violations,
-    );
-    check_budget(
-        "tree_window",
-        tree_window,
-        args.max_p50_ms,
-        args.max_p95_ms,
-        &mut violations,
-    );
-    check_budget(
-        "startup_bundle",
-        startup_bundle,
-        args.max_p50_ms * 2.0,
-        args.max_p95_ms * 2.0,
-        &mut violations,
-    );
-
-    let report = json!({
-        "scenario": "ffi",
-        "iterations": args.iterations,
-        "notes_seeded": notes_total,
-        "generated_at_unix": now_unix(),
-        "budgets": {
-            "max_p50_ms": args.max_p50_ms,
-            "max_p95_ms": args.max_p95_ms,
-            "startup_multiplier": 2.0,
-        },
-        "metrics": {
-            "note_open": note_open.as_json(),
-            "tree_window": tree_window.as_json(),
-            "startup_bundle": startup_bundle.as_json(),
-        },
-        "violations": violations,
-        "status": if violations.is_empty() { "pass" } else { "fail" },
-    });
-
-    if let Some(path) = &args.json_out {
-        write_json_report(path, &report)?;
-        println!("ffi report written to {}", path.display());
-    }
-
-    if args.enforce_budgets && !violations.is_empty() {
-        bail!("ffi benchmark exceeded budgets: {}", violations.join("; "));
-    }
-
-    Ok(())
-}
-
 fn consume_envelope<T>(envelope: BridgeEnvelope<T>, operation: &str) -> Result<T> {
     if envelope.ok {
         return envelope
@@ -731,15 +597,6 @@ fn consume_envelope<T>(envelope: BridgeEnvelope<T>, operation: &str) -> Result<T
         .error
         .with_context(|| format!("{operation} returned failed envelope without error payload"))?;
     bail!("{operation} failed: {} ({})", error.message, error.code);
-}
-
-fn consume_json_envelope<T>(payload: String, operation: &str) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let envelope: BridgeEnvelope<T> = serde_json::from_str(&payload)
-        .with_context(|| format!("{operation} decode envelope json"))?;
-    consume_envelope(envelope, operation)
 }
 
 fn check_budget(
