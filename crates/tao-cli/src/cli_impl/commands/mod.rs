@@ -1,4 +1,5 @@
 pub(super) mod base;
+pub(super) mod config;
 pub(super) mod doc;
 pub(super) mod graph;
 pub(super) mod health;

@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use clap::{
     ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind as ClapErrorKind,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
@@ -34,8 +34,8 @@ use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
     BaseValidationService, CURRENT_LINK_RESOLUTION_VERSION, FullIndexService,
     GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
-    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, SdkConfigLoader,
-    SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
+    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, SdkConfigInspectionService,
+    SdkConfigLoader, SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,
@@ -81,9 +81,9 @@ pub fn run() -> i32 {
 
 fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
     let json_output = !raw_args.iter().any(|arg| arg == "--text");
-    let cli = match Cli::try_parse_from(raw_args) {
+    let cli = match Cli::try_parse_from(raw_args.clone()) {
         Ok(cli) => cli,
-        Err(error) => return handle_parse_error(error, json_output),
+        Err(error) => return handle_parse_error(error, json_output, &raw_args),
     };
 
     let started_at = Instant::now();
@@ -206,6 +206,7 @@ fn dispatch_with_runtime(
     match command {
         Commands::Tools(args) => commands::tools::dispatch(args),
         Commands::Health(args) => commands::health::dispatch(args, runtime),
+        Commands::Config { command } => commands::config::dispatch(command),
         Commands::Doc { command } => commands::doc::dispatch(command, allow_writes, runtime),
         Commands::Base { command } => commands::base::dispatch(command, runtime),
         Commands::Graph { command } => commands::graph::dispatch(command, runtime),

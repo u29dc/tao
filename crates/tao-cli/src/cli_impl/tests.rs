@@ -42,12 +42,47 @@ fn cli_help_contains_grouped_command_names() {
     assert!(rendered.contains("query"));
     assert!(rendered.contains("tools"));
     assert!(rendered.contains("health"));
+    assert!(rendered.contains("config"));
     assert!(!rendered.contains("note"));
     assert!(!rendered.contains("links"));
     assert!(!rendered.contains("properties"));
     assert!(!rendered.contains("bases"));
     assert!(!rendered.contains("search"));
     assert!(!rendered.contains("hubs"));
+}
+
+#[test]
+fn graph_and_vault_help_hide_compatibility_surfaces() {
+    let mut graph = Cli::command()
+        .find_subcommand_mut("graph")
+        .expect("graph command")
+        .clone();
+    let mut graph_output = Vec::new();
+    graph
+        .write_long_help(&mut graph_output)
+        .expect("render graph help");
+    let graph_help = String::from_utf8(graph_output).expect("utf8 graph help");
+    assert!(graph_help.contains("links"));
+    assert!(graph_help.contains("audit"));
+    assert!(!graph_help.contains("outgoing"));
+    assert!(!graph_help.contains("backlinks"));
+    assert!(!graph_help.contains("unresolved"));
+
+    let mut vault = Cli::command()
+        .find_subcommand_mut("vault")
+        .expect("vault command")
+        .clone();
+    let mut vault_output = Vec::new();
+    vault
+        .write_long_help(&mut vault_output)
+        .expect("render vault help");
+    let vault_help = String::from_utf8(vault_output).expect("utf8 vault help");
+    assert!(vault_help.contains("open"));
+    assert!(vault_help.contains("preflight"));
+    assert!(vault_help.contains("reindex"));
+    assert!(!vault_help.contains("\n  stats"));
+    assert!(!vault_help.contains("\n  reconcile"));
+    assert!(!vault_help.contains("\n  daemon"));
 }
 
 #[test]
@@ -58,6 +93,28 @@ fn bare_invocation_prints_help_instead_of_json() {
     assert!(result.stdout.is_none());
     assert!(result.stderr.is_none());
     assert!(matches!(result.clap_output, Some(ClapOutput::RootHelp)));
+}
+
+#[test]
+fn group_invocation_prints_group_help_instead_of_root_help() {
+    for group in ["graph", "vault"] {
+        let result = run_from_args(
+            ["tao", group]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        );
+
+        assert_eq!(result.exit_kind, ExitKind::Success);
+        assert!(result.stdout.is_none());
+        assert!(result.stderr.is_none());
+        match result.clap_output {
+            Some(ClapOutput::SubcommandHelp(path)) => {
+                assert_eq!(path, vec![group.to_string()]);
+            }
+            other => panic!("expected {group} help output, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -174,6 +231,10 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
                 ],
             ),
             (
+                "config.show",
+                vec!["tao", "config", "show", "--vault-root", &vault_root_string],
+            ),
+            (
                 "vault.reindex",
                 vec![
                     "tao",
@@ -236,6 +297,30 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
                     &vault_root_string,
                     "--path",
                     "notes/projects/project-a.md",
+                ],
+            ),
+            (
+                "graph.links",
+                vec![
+                    "tao",
+                    "graph",
+                    "links",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--path",
+                    "notes/alpha.md",
+                ],
+            ),
+            (
+                "graph.audit",
+                vec![
+                    "tao",
+                    "graph",
+                    "audit",
+                    "--vault-root",
+                    &vault_root_string,
+                    "--kind",
+                    "unresolved",
                 ],
             ),
             (
@@ -492,6 +577,63 @@ fn assert_json_contract(value: &JsonValue, expected_command: &str) {
             .and_then(JsonValue::as_u64)
             .is_some()
     );
+    assert_registry_output_fields_match_payload(expected_command, payload);
+}
+
+fn assert_registry_output_fields_match_payload(
+    expected_command: &str,
+    payload: &serde_json::Map<String, JsonValue>,
+) {
+    let Some(tool) = registry::tool_detail(expected_command) else {
+        return;
+    };
+    for key in payload.keys() {
+        assert!(
+            tool.output_fields.contains(&key.as_str()),
+            "registry for {expected_command} does not advertise runtime output field `{key}`"
+        );
+    }
+    for field in tool.output_fields {
+        if conditional_output_field(expected_command, field) {
+            continue;
+        }
+        assert!(
+            payload.contains_key(*field),
+            "registry for {expected_command} advertises missing output field `{field}`"
+        );
+    }
+}
+
+fn conditional_output_field(tool: &str, field: &str) -> bool {
+    matches!(
+        (tool, field),
+        ("doc.write", "file_id")
+            | ("doc.write", "index_synced")
+            | ("doc.write", "event_logged")
+            | ("doc.write", "warnings")
+            | ("doc.write", "dry_run")
+            | ("doc.write", "would_write")
+            | ("doc.write", "content_bytes")
+            | ("doc.write", "read_only")
+            | ("task.set-state", "dry_run")
+            | ("task.set-state", "would_update")
+            | ("task.set-state", "before")
+            | ("task.set-state", "after")
+            | ("task.set-state", "read_only")
+            | ("vault.reindex", "dry_run")
+            | ("vault.reindex", "would_write")
+            | ("graph.audit", "scope")
+            | ("graph.audit", "mode")
+            | ("graph.audit", "total_files")
+            | ("graph.audit", "linked_files")
+            | ("graph.audit", "unlinked_files")
+            | ("graph.audit", "include_members")
+            | ("graph.audit", "sample_size")
+            | ("query.run", "items")
+            | ("query.run", "rows")
+            | ("query.run", "columns")
+            | ("query.run", "plan")
+    )
 }
 
 #[test]
@@ -713,6 +855,25 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
                 .find(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("query.run"))
         })
         .expect("query.run tool");
+
+    let public_tools = envelope
+        .get("data")
+        .and_then(|data| data.get("tools"))
+        .and_then(JsonValue::as_array)
+        .expect("public tools catalog");
+    assert!(
+        public_tools
+            .iter()
+            .all(|tool| tool.get("deprecated").and_then(JsonValue::as_bool) == Some(false)),
+        "default tools catalog should only include canonical tools"
+    );
+    assert!(
+        public_tools
+            .iter()
+            .all(|tool| { tool.get("name").and_then(JsonValue::as_str) != Some("graph.outgoing") }),
+        "compatibility wrappers should be available by direct lookup, not default discovery"
+    );
+
     let parameters = query_tool
         .get("parameters")
         .and_then(JsonValue::as_array)
@@ -733,6 +894,48 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
         .expect("query.run view_name parameter");
     assert_eq!(
         view_name.get("required").and_then(JsonValue::as_bool),
+        Some(false)
+    );
+
+    let legacy_cli = Cli::parse_from(["tao", "tools", "graph.outgoing"]);
+    let legacy_result =
+        dispatch(legacy_cli.command, legacy_cli.allow_writes).expect("dispatch legacy tool detail");
+    let legacy_output = render_output(legacy_cli.json, &legacy_result).expect("render legacy tool");
+    let legacy_envelope: JsonValue =
+        serde_json::from_str(&legacy_output).expect("parse legacy tool output");
+    let graph_outgoing = legacy_envelope
+        .get("data")
+        .and_then(|data| data.get("tool"))
+        .expect("graph.outgoing tool");
+    assert_eq!(
+        graph_outgoing
+            .get("deprecated")
+            .and_then(JsonValue::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        graph_outgoing.get("aliasOf").and_then(JsonValue::as_str),
+        Some("graph.links")
+    );
+    assert!(
+        graph_outgoing
+            .get("outputSchema")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|schema| schema.ends_with("/graph.outgoing/output/v1"))
+    );
+
+    let graph_links = envelope
+        .get("data")
+        .and_then(|data| data.get("tools"))
+        .and_then(JsonValue::as_array)
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("graph.links"))
+        })
+        .expect("graph.links tool");
+    assert_eq!(
+        graph_links.get("deprecated").and_then(JsonValue::as_bool),
         Some(false)
     );
 }
@@ -903,6 +1106,64 @@ read_only = true
             fs::canonicalize(vault_root)
                 .expect("canonical vault")
                 .as_path()
+        );
+    });
+}
+
+#[test]
+fn dry_run_write_commands_validate_without_allow_writes_or_mutation() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let tasks_path = vault_root.join("notes/tasks.md");
+        fs::write(&tasks_path, "- [ ] blocked task\n").expect("write task fixture");
+
+        let doc_write = Cli::parse_from([
+            "tao",
+            "doc",
+            "write",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--path",
+            "notes/dry-run.md",
+            "--content",
+            "# dry run",
+            "--dry-run",
+        ]);
+        let result = dispatch(doc_write.command, doc_write.allow_writes)
+            .expect("doc.write dry-run should not require --allow-writes");
+        assert_eq!(result.command, "doc.write");
+        assert_eq!(
+            result.args.get("dry_run").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert!(!vault_root.join("notes/dry-run.md").exists());
+
+        let task_set_state = Cli::parse_from([
+            "tao",
+            "task",
+            "set-state",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--path",
+            "notes/tasks.md",
+            "--line",
+            "1",
+            "--state",
+            "done",
+            "--dry-run",
+        ]);
+        let result = dispatch(task_set_state.command, task_set_state.allow_writes)
+            .expect("task.set-state dry-run should not require --allow-writes");
+        assert_eq!(result.command, "task.set-state");
+        assert_eq!(
+            result.args.get("dry_run").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            fs::read_to_string(&tasks_path).expect("read task fixture"),
+            "- [ ] blocked task\n"
         );
     });
 }
@@ -3655,6 +3916,7 @@ fn daemon_execution_policy_routes_diagnostics_reads_and_mutations() {
             db_path: None,
             path: "notes/x.md".to_string(),
             content: "# x".to_string(),
+            dry_run: false,
         }),
     };
     assert_eq!(

@@ -2,6 +2,78 @@ use super::super::*;
 
 pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
+        GraphCommands::Links(args) => {
+            let result = handle(
+                GraphCommands::Neighbors(GraphNeighborsArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    path: args.path,
+                    direction: args.direction,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                runtime,
+            )?;
+            Ok(retag_graph_result(result, "graph.links", None))
+        }
+        GraphCommands::Audit(args) => {
+            let kind = args.kind.trim().to_ascii_lowercase();
+            let command = match kind.as_str() {
+                "unresolved" => GraphCommands::Unresolved(GraphWindowArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                "deadends" => GraphCommands::Deadends(GraphWindowArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                "orphans" => GraphCommands::Orphans(GraphWindowArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                "floating" => GraphCommands::Floating(GraphWindowArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                "components" => GraphCommands::Components(GraphComponentsArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    limit: args.limit,
+                    offset: args.offset,
+                    include_members: args.include_members,
+                    sample_size: args.sample_size,
+                    mode: args.mode,
+                }),
+                "inbound-scope" => GraphCommands::InboundScope(GraphInboundScopeArgs {
+                    vault_root: args.vault_root,
+                    db_path: args.db_path,
+                    scope: args.scope.ok_or_else(|| {
+                        anyhow!("graph audit --kind inbound-scope requires --scope")
+                    })?,
+                    include_markdown: args.include_markdown,
+                    include_non_md: args.include_non_md,
+                    exclude_prefix: args.exclude_prefix,
+                    limit: args.limit,
+                    offset: args.offset,
+                }),
+                _ => {
+                    return Err(anyhow!(
+                        "unsupported --kind '{}'; expected one of: unresolved|deadends|orphans|floating|components|inbound-scope",
+                        args.kind
+                    ));
+                }
+            };
+            let result = handle(command, runtime)?;
+            Ok(retag_graph_result(result, "graph.audit", Some(kind)))
+        }
         GraphCommands::Outgoing(args) => {
             let resolved = args.resolve()?;
             let path = normalize_relative_note_path_arg(&args.path, "--path")?;
@@ -542,6 +614,21 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
             })
         }
     }
+}
+
+fn retag_graph_result(
+    mut result: CommandResult,
+    command: &str,
+    kind: Option<String>,
+) -> CommandResult {
+    result.command = command.to_string();
+    result.summary = format!("{command} completed");
+    if let Some(kind) = kind
+        && let Some(object) = result.args.as_object_mut()
+    {
+        object.insert("kind".to_string(), JsonValue::String(kind));
+    }
+    result
 }
 
 pub(in crate::cli_impl) fn dispatch(

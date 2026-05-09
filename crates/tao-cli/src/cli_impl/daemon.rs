@@ -107,7 +107,7 @@ pub(crate) fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
 }
 
 pub(crate) fn command_supports_daemon_forwarding(command: &Commands) -> bool {
-    !matches!(command, Commands::Tools(_))
+    !matches!(command, Commands::Tools(_) | Commands::Config { .. })
 }
 
 pub(crate) fn resolve_daemon_socket_for_cli(cli: &Cli) -> Result<Option<String>> {
@@ -128,6 +128,7 @@ pub(crate) fn resolve_command_vault_paths(
 ) -> Result<Option<ResolvedVaultPathArgs>> {
     let resolved = match command {
         Commands::Tools(_) => return Ok(None),
+        Commands::Config { .. } => return Ok(None),
         Commands::Health(args) => args.resolve()?,
         Commands::Doc { command } => match command {
             DocCommands::Read(args) => args.resolve()?,
@@ -141,6 +142,8 @@ pub(crate) fn resolve_command_vault_paths(
             BaseCommands::Validate(args) => args.resolve()?,
         },
         Commands::Graph { command } => match command {
+            GraphCommands::Links(args) => args.resolve()?,
+            GraphCommands::Audit(args) => args.resolve()?,
             GraphCommands::Outgoing(args) => args.resolve()?,
             GraphCommands::Backlinks(args) => args.resolve()?,
             GraphCommands::InboundScope(args) => args.resolve()?,
@@ -193,6 +196,7 @@ pub(crate) fn daemon_cache_key(command: &Commands) -> Result<String> {
 pub(crate) fn daemon_execution_policy(command: &Commands) -> DaemonExecutionPolicy {
     match command {
         Commands::Tools(_) => DaemonExecutionPolicy::ExplicitWork,
+        Commands::Config { .. } => DaemonExecutionPolicy::ExplicitWork,
         Commands::Health(_) => DaemonExecutionPolicy::ObservationalFresh,
         Commands::Doc { command } => match command {
             DocCommands::Read(_) | DocCommands::List(_) => {

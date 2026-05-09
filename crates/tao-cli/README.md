@@ -9,8 +9,10 @@ Provide the Tao command-line interface as a thin JSON-first adapter over SDK ser
 ## Public API
 
 - Binary: `tao`
-- Command groups: `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
-- Graph audit primitive: `graph inbound-scope` for scoped inbound-link counts (attachment audits).
+- Command groups: `config`, `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
+- Canonical graph primitives: `graph links` for one-hop link windows, `graph audit` for unresolved links, structural isolates, components, and scoped inbound-link audits.
+- Compatibility graph wrappers such as `graph outgoing`, `graph backlinks`, and `graph unresolved` remain callable by direct name lookup but are hidden from help and omitted from the default `tao tools` catalog.
+- Mutating commands expose `--dry-run` where practical so agents can inspect intent before writes.
 - JSON envelope output for automation by default
 
 ## Internal Design
@@ -26,7 +28,8 @@ CLI args -> request mapping -> SDK service call -> envelope serialization -> std
 
 - Normal vault-facing commands may auto-connect to an existing background daemon and auto-start it when unavailable.
 - `vault daemon *` commands are inspection and troubleshooting primitives, not the only way daemon mode is entered.
-- `health`, `vault stats`, and `vault preflight` are fresh observational diagnostics; they do not reconcile or cache command results.
+- `config show` reports effective config values, per-field source labels, source inputs, and precedence without opening or migrating SQLite state.
+- `health` and `vault preflight` are fresh observational diagnostics; they do not reconcile or cache command results.
 - `watcher_status` in CLI health snapshots reflects change-monitor state, not daemon lifecycle state by itself.
 
 ## Dependencies

@@ -25,10 +25,25 @@ pub(crate) fn handle(
         }
         DocCommands::Write(args) => {
             let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
+            if args.dry_run {
+                return Ok(CommandResult {
+                    command: "doc.write".to_string(),
+                    summary: "doc write dry-run completed".to_string(),
+                    args: serde_json::json!({
+                        "path": path,
+                        "action": "dry_run",
+                        "dry_run": true,
+                        "would_write": true,
+                        "content_bytes": args.content.len(),
+                        "read_only": resolved.read_only,
+                    }),
+                });
+            }
             ensure_writes_enabled(allow_writes, resolved.read_only, "doc.write")?;
             let ack = with_kernel(runtime, &resolved, |kernel| {
                 expect_bridge_value(
-                    kernel.note_put_with_policy(&args.path, &args.content, true),
+                    kernel.note_put_with_policy(&path, &args.content, true),
                     "doc.write",
                 )
             })?;

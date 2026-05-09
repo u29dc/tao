@@ -58,7 +58,6 @@ pub(crate) fn handle(
         }
         TaskCommands::SetState(args) => {
             let resolved = args.resolve()?;
-            ensure_writes_enabled(allow_writes, resolved.read_only, "task.set-state")?;
             let absolute = resolve_existing_vault_note_path(&resolved, &args.path)
                 .map_err(|source| anyhow!("resolve task note path '{}': {source}", args.path))?;
             let markdown = fs::read_to_string(&absolute)
@@ -73,6 +72,23 @@ pub(crate) fn handle(
             }
             let index = args.line - 1;
             let updated = update_task_line_state(&lines[index], &args.state)?;
+            if args.dry_run {
+                return Ok(CommandResult {
+                    command: "task.set-state".to_string(),
+                    summary: "task set-state dry-run completed".to_string(),
+                    args: serde_json::json!({
+                        "path": args.path,
+                        "line": args.line,
+                        "state": args.state,
+                        "dry_run": true,
+                        "would_update": true,
+                        "before": lines[index],
+                        "after": updated,
+                        "read_only": resolved.read_only,
+                    }),
+                });
+            }
+            ensure_writes_enabled(allow_writes, resolved.read_only, "task.set-state")?;
             lines[index] = updated;
             let mut rebuilt = lines.join("\n");
             if markdown.ends_with('\n') {

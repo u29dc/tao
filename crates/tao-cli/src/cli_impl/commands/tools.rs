@@ -17,7 +17,7 @@ pub(crate) fn handle(args: ToolsArgs) -> Result<CommandResult> {
     } else {
         serde_json::json!({
             "version": version,
-            "tools": registry::tools_catalog(),
+            "tools": registry::public_tools_catalog(),
             "globalFlags": registry::global_flags(),
         })
     };

@@ -80,6 +80,7 @@ pub(crate) struct RunResult {
 #[derive(Debug)]
 pub(crate) enum ClapOutput {
     RootHelp,
+    SubcommandHelp(Vec<String>),
     Error(clap::Error),
 }
 
@@ -149,13 +150,26 @@ pub(crate) fn emit_clap_output(output: ClapOutput) {
             command.print_help().expect("print tao root help");
             println!();
         }
+        ClapOutput::SubcommandHelp(path) => {
+            let mut args = vec!["tao".to_string()];
+            args.extend(path);
+            args.push("--help".to_string());
+            let error = Cli::command()
+                .try_get_matches_from(args)
+                .expect_err("subcommand help should render clap display error");
+            error.print().expect("print tao subcommand help");
+        }
         ClapOutput::Error(error) => {
             error.print().expect("print tao clap output");
         }
     }
 }
 
-pub(crate) fn handle_parse_error(error: clap::Error, json_output: bool) -> RunResult {
+pub(crate) fn handle_parse_error(
+    error: clap::Error,
+    json_output: bool,
+    raw_args: &[OsString],
+) -> RunResult {
     match error.kind() {
         ClapErrorKind::DisplayHelp
         | ClapErrorKind::DisplayVersion
@@ -168,7 +182,7 @@ pub(crate) fn handle_parse_error(error: clap::Error, json_output: bool) -> RunRe
                 ClapErrorKind::DisplayHelp | ClapErrorKind::DisplayVersion => {
                     ClapOutput::Error(error)
                 }
-                _ => ClapOutput::RootHelp,
+                _ => help_output_for_missing_subcommand(raw_args).unwrap_or(ClapOutput::RootHelp),
             }),
         },
         _ if json_output => {
@@ -195,6 +209,25 @@ pub(crate) fn handle_parse_error(error: clap::Error, json_output: bool) -> RunRe
             stderr: Some(error.to_string()),
             clap_output: None,
         },
+    }
+}
+
+fn help_output_for_missing_subcommand(raw_args: &[OsString]) -> Option<ClapOutput> {
+    let mut command = Cli::command();
+    let mut path = Vec::<String>::new();
+    for raw in raw_args.iter().skip(1) {
+        let name = raw.to_str()?;
+        if name.starts_with('-') {
+            continue;
+        }
+        let next = command.find_subcommand(name).cloned()?;
+        path.push(name.to_string());
+        command = next;
+    }
+    if path.is_empty() {
+        None
+    } else {
+        Some(ClapOutput::SubcommandHelp(path))
     }
 }
 
@@ -335,6 +368,9 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
     match command {
         Commands::Tools(_) => "tools".to_string(),
         Commands::Health(_) => "health".to_string(),
+        Commands::Config { command } => match command {
+            ConfigCommands::Show(_) => "config.show".to_string(),
+        },
         Commands::Doc { command } => match command {
             DocCommands::Read(_) => "doc.read".to_string(),
             DocCommands::Write(_) => "doc.write".to_string(),
@@ -347,6 +383,8 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
             BaseCommands::Validate(_) => "base.validate".to_string(),
         },
         Commands::Graph { command } => match command {
+            GraphCommands::Links(_) => "graph.links".to_string(),
+            GraphCommands::Audit(_) => "graph.audit".to_string(),
             GraphCommands::Outgoing(_) => "graph.outgoing".to_string(),
             GraphCommands::Backlinks(_) => "graph.backlinks".to_string(),
             GraphCommands::InboundScope(_) => "graph.inbound-scope".to_string(),

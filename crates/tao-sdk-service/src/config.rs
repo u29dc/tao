@@ -55,6 +55,47 @@ pub struct SdkConfigOverrides {
     pub read_only: Option<bool>,
 }
 
+/// Diagnostic view of SDK config resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkConfigInspection {
+    /// Final resolved SDK configuration.
+    pub config: SdkConfig,
+    /// Candidate config files consulted by scope.
+    pub config_files: Vec<SdkConfigFileInspection>,
+    /// Per-field source labels for the resolved values.
+    pub sources: SdkConfigFieldSources,
+}
+
+/// Candidate config file metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkConfigFileInspection {
+    /// Config scope: root, global, or vault.
+    pub scope: &'static str,
+    /// Candidate path when one exists.
+    pub path: Option<PathBuf>,
+    /// True when the candidate path exists on disk.
+    pub exists: bool,
+}
+
+/// Per-field config source labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdkConfigFieldSources {
+    /// Source for vault root.
+    pub vault_root: &'static str,
+    /// Source for data dir.
+    pub data_dir: &'static str,
+    /// Source for database path.
+    pub db_path: &'static str,
+    /// Source for case policy.
+    pub case_policy: &'static str,
+    /// Source for tracing toggle.
+    pub tracing_enabled: &'static str,
+    /// Source for feature flags.
+    pub feature_flags: &'static str,
+    /// Source for read-only policy.
+    pub read_only: &'static str,
+}
+
 /// Loader for SDK configuration with deterministic precedence.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SdkConfigLoader;
@@ -210,6 +251,252 @@ impl SdkConfigLoader {
             feature_flags,
             read_only,
         })
+    }
+}
+
+/// Inspector for SDK configuration with per-field source diagnostics.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SdkConfigInspectionService;
+
+impl SdkConfigInspectionService {
+    /// Inspect SDK configuration from process environment and explicit overrides.
+    pub fn inspect(overrides: SdkConfigOverrides) -> Result<SdkConfigInspection, SdkConfigError> {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let cwd = std::env::current_dir()
+            .map_err(|source| SdkConfigError::CurrentDirectory { source })?;
+        Self::inspect_from_map(overrides, &env, &cwd)
+    }
+
+    /// Inspect SDK configuration from supplied environment map and cwd.
+    pub fn inspect_from_map(
+        overrides: SdkConfigOverrides,
+        env: &HashMap<String, String>,
+        cwd: &Path,
+    ) -> Result<SdkConfigInspection, SdkConfigError> {
+        let config = SdkConfigLoader::load_from_map(overrides.clone(), env, cwd)?;
+        let root_dir = resolve_root_config_dir(cwd);
+        let root_config_path = root_dir.as_ref().map(|root| root.join("config.toml"));
+        let root_config = load_root_config_or_defaults(root_dir.as_deref())?;
+        let global_config_path = resolve_global_config_path(env);
+        let global_config = load_global_config_or_defaults(global_config_path.as_deref())?;
+        let vault_config_path = config_path(&config.vault_root);
+        let vault_config = load_vault_config_or_defaults(&config.vault_root)?;
+
+        let sources = SdkConfigFieldSources {
+            vault_root: source_for_vault_root(&overrides, env, &root_config, &global_config),
+            data_dir: source_for_storage_data_dir(
+                overrides.data_dir.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+            db_path: source_for_storage_db_path(
+                overrides.db_path.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+            case_policy: source_for_runtime_case_policy(
+                overrides.case_policy.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+            tracing_enabled: source_for_runtime_tracing_enabled(
+                overrides.tracing_enabled.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+            feature_flags: source_for_runtime_feature_flags(
+                overrides.feature_flags.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+            read_only: source_for_security_read_only(
+                overrides.read_only.is_some(),
+                env,
+                &vault_config,
+                &root_config,
+                &global_config,
+            ),
+        };
+
+        Ok(SdkConfigInspection {
+            config,
+            sources,
+            config_files: vec![
+                config_file_inspection("root", root_config_path),
+                config_file_inspection("global", global_config_path),
+                config_file_inspection("vault", Some(vault_config_path)),
+            ],
+        })
+    }
+}
+
+fn config_file_inspection(scope: &'static str, path: Option<PathBuf>) -> SdkConfigFileInspection {
+    let exists = path.as_ref().is_some_and(|path| path.exists());
+    SdkConfigFileInspection {
+        scope,
+        path,
+        exists,
+    }
+}
+
+fn source_for_vault_root(
+    overrides: &SdkConfigOverrides,
+    env: &HashMap<String, String>,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if overrides.vault_root.is_some() {
+        "override"
+    } else if env.contains_key(ENV_VAULT_ROOT) {
+        "env:TAO_VAULT_ROOT"
+    } else if root_config.vault.root.is_some() {
+        "root_config"
+    } else if global_config.vault.root.is_some() {
+        "global_config"
+    } else {
+        "unconfigured"
+    }
+}
+
+fn source_for_storage_data_dir(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_DATA_DIR) {
+        "env:TAO_DATA_DIR"
+    } else if vault_config.storage.data_dir.is_some() {
+        "vault_config"
+    } else if root_config.storage.data_dir.is_some() {
+        "root_config"
+    } else if global_config.storage.data_dir.is_some() {
+        "global_config"
+    } else {
+        "default"
+    }
+}
+
+fn source_for_storage_db_path(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_DB_PATH) {
+        "env:TAO_DB_PATH"
+    } else if vault_config.storage.db_path.is_some() {
+        "vault_config"
+    } else if root_config.storage.db_path.is_some() {
+        "root_config"
+    } else if global_config.storage.db_path.is_some() {
+        "global_config"
+    } else {
+        "default"
+    }
+}
+
+fn source_for_runtime_case_policy(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_CASE_POLICY) {
+        "env:TAO_CASE_POLICY"
+    } else if vault_config.runtime.case_policy.is_some() {
+        "vault_config"
+    } else if root_config.runtime.case_policy.is_some() {
+        "root_config"
+    } else if global_config.runtime.case_policy.is_some() {
+        "global_config"
+    } else {
+        "default"
+    }
+}
+
+fn source_for_runtime_tracing_enabled(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_TRACING_ENABLED) {
+        "env:TAO_TRACING_ENABLED"
+    } else if vault_config.runtime.tracing_enabled.is_some() {
+        "vault_config"
+    } else if root_config.runtime.tracing_enabled.is_some() {
+        "root_config"
+    } else if global_config.runtime.tracing_enabled.is_some() {
+        "global_config"
+    } else {
+        "default"
+    }
+}
+
+fn source_for_runtime_feature_flags(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_FEATURE_FLAGS) {
+        "env:TAO_FEATURE_FLAGS"
+    } else if vault_config.runtime.feature_flags.is_some() {
+        "vault_config"
+    } else if root_config.runtime.feature_flags.is_some() {
+        "root_config"
+    } else if global_config.runtime.feature_flags.is_some() {
+        "global_config"
+    } else {
+        "default"
+    }
+}
+
+fn source_for_security_read_only(
+    has_override: bool,
+    env: &HashMap<String, String>,
+    vault_config: &TaoConfig,
+    root_config: &TaoConfig,
+    global_config: &TaoConfig,
+) -> &'static str {
+    if has_override {
+        "override"
+    } else if env.contains_key(ENV_READ_ONLY) {
+        "env:TAO_READ_ONLY"
+    } else if vault_config.security.read_only.is_some() {
+        "vault_config"
+    } else if root_config.security.read_only.is_some() {
+        "root_config"
+    } else if global_config.security.read_only.is_some() {
+        "global_config"
+    } else {
+        "default"
     }
 }
 
@@ -631,8 +918,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CasePolicy, SdkBootstrapService, SdkConfigError, SdkConfigLoader, SdkConfigOverrides,
-        ensure_runtime_paths,
+        CasePolicy, SdkBootstrapService, SdkConfigError, SdkConfigInspectionService,
+        SdkConfigLoader, SdkConfigOverrides, ensure_runtime_paths,
     };
 
     #[test]
@@ -914,6 +1201,59 @@ db_path = ".vault.sqlite"
         assert_eq!(loaded.feature_flags, vec!["vault-flag".to_string()]);
         assert_eq!(loaded.data_dir, canonical_vault.join(".vault-data"));
         assert_eq!(loaded.db_path, canonical_vault.join(".vault.sqlite"));
+    }
+
+    #[test]
+    fn inspection_reports_per_field_sources() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+        fs::write(
+            temp.path().join("config.toml"),
+            format!(
+                r#"[vault]
+root = "{}"
+
+[runtime]
+case_policy = "insensitive"
+
+[storage]
+data_dir = "root-data"
+"#,
+                vault.display()
+            ),
+        )
+        .expect("write root config");
+        fs::write(
+            vault.join("config.toml"),
+            r#"[security]
+read_only = false
+
+[storage]
+db_path = ".vault.sqlite"
+"#,
+        )
+        .expect("write vault config");
+
+        let env = HashMap::new();
+        let inspected = SdkConfigInspectionService::inspect_from_map(
+            SdkConfigOverrides::default(),
+            &env,
+            temp.path(),
+        )
+        .expect("inspect config");
+
+        assert_eq!(inspected.sources.vault_root, "root_config");
+        assert_eq!(inspected.sources.data_dir, "root_config");
+        assert_eq!(inspected.sources.db_path, "vault_config");
+        assert_eq!(inspected.sources.case_policy, "root_config");
+        assert_eq!(inspected.sources.read_only, "vault_config");
+        assert!(
+            inspected
+                .config_files
+                .iter()
+                .any(|file| file.scope == "vault" && file.exists)
+        );
     }
 
     #[test]

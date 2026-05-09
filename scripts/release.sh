@@ -60,15 +60,15 @@ release_cli() {
   local config_path="${OUT_DIR}/config.toml"
 
   echo "Building release binaries..."
-  cargo build --release -p tao-cli -p tao-tui
+  cargo build --release -p tao-cli
 
   echo "Installing binaries to ${OUT_DIR}..."
   mkdir -p "${OUT_DIR}"
   cp "${ROOT_DIR}/target/release/tao" "${OUT_DIR}/tao"
-  cp "${ROOT_DIR}/target/release/tao-tui" "${OUT_DIR}/tao-tui"
-  chmod +x "${OUT_DIR}/tao" "${OUT_DIR}/tao-tui"
+  rm -f "${OUT_DIR}/tao-tui"
+  chmod +x "${OUT_DIR}/tao"
   if command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "${OUT_DIR}/tao" "${OUT_DIR}/tao-tui" >/dev/null
+    codesign --force --sign - "${OUT_DIR}/tao" >/dev/null
   fi
 
   if [[ ! -f "${config_path}" ]]; then
@@ -83,7 +83,7 @@ EOF
 
   echo "Creating release bundle ${bundle_path}..."
   mkdir -p "${DIST_DIR}"
-  tar -C "${OUT_DIR}" -czf "${bundle_path}" tao tao-tui
+  tar -C "${OUT_DIR}" -czf "${bundle_path}" tao
 
   echo "Validating installed CLI binary..."
   if "${OUT_DIR}/tao" --help >/dev/null 2>&1; then

@@ -55,6 +55,7 @@
 - [`crates/tao-sdk-vault/src/`](crates/tao-sdk-vault/src/) enforces vault boundaries and deterministic scan/fingerprint behavior; scans skip `.git`, `.obsidian`, and `.tao`
 - [`crates/tao-sdk-bridge/src/`](crates/tao-sdk-bridge/src/) exposes `BridgeKernel` and envelope types used by CLI runtime caches and retained benchmark flows
 - `vault reindex` is not a blind full rebuild: it prefers incremental reconcile and only escalates to full rebuild when link-resolution version state or indexed file-path consistency is stale
+- Public graph help is centered on `graph links`, `graph audit`, `graph path`, and `graph walk`; older graph-specific subcommands remain callable as compatibility wrappers, are omitted from default `tao tools`, and can still be inspected with `tao tools <name>`
 
 ## 6. Runtime and State
 
@@ -62,7 +63,8 @@
 - Relevant env vars: `TAO_VAULT_ROOT`, `TAO_CONFIG_PATH`, `TAO_DATA_DIR`, `TAO_DB_PATH`, `TAO_CASE_POLICY`, `TAO_TRACING_ENABLED`, `TAO_FEATURE_FLAGS`, `TAO_READ_ONLY`; `TAO_CONFIG_PATH` overrides the global config file location, and release/cleanup also honor `TAO_HOME`, `TOOLS_HOME`, and legacy `OBS_HOME`
 - Probe-only config behavior is intentional: root and vault `config.toml` files are read when present but are not auto-created during normal config resolution
 - Effective runtime defaults when config is absent are repo-local or vault-local: data dir `<vault>/.tao`, db path `<vault>/.tao/index.sqlite`, case-sensitive matching, tracing enabled, read-only enabled
-- Normal vault-facing CLI commands may auto-forward through a background daemon; `vault daemon *` is the explicit lifecycle/inspection surface, not the sole entrypoint to warm-runtime mode
+- `config show` reports effective config values, per-field source labels, source inputs, and precedence without opening or migrating SQLite state
+- Normal vault-facing CLI commands may auto-forward through a background daemon; hidden `vault daemon *` commands remain lifecycle/inspection escape hatches, not the normal user workflow
 - Daemon sockets are Unix-only and default to `~/.tools/tao/daemons/vault-<hash>.sock`; when `HOME` is missing the fallback is `<cwd>/.tao/daemons/`
 - Daemon first observation may reconcile or fully rebuild before serving cached reads; later change-monitor generations invalidate cached results for the affected runtime
 - Generated and local state to expect: [`dist/`](dist/), [`.benchmarks/reports/`](.benchmarks/reports/), [`vault/generated/`](vault/generated/), and local vault metadata directories like `vault/.tao/`
@@ -74,7 +76,7 @@
 - Non-interactive CLI commands emit one JSON envelope to stdout by default; bare `tao` and help/version flows use native clap output, and `--text` is the explicit opt-out
 - `--json-stream` is a narrow fast path: it only applies to `query --from docs` without `--where` or `--sort`
 - `query --from graph` without `--path` maps to the unresolved-link window; with `--path` it returns outgoing and backlink panels
-- Mutations are gated in both CLI and bridge layers: CLI `doc write` and `task set-state` require `--allow-writes` unless `[security].read_only = false`, while bridge note writes still require explicit write enablement unless the same config disables read-only mode
+- Mutations are gated in both CLI and bridge layers: CLI `doc write` and `task set-state` require `--allow-writes` unless `[security].read_only = false`, while bridge note writes still require explicit write enablement unless the same config disables read-only mode; `doc write`, `task set-state`, and `vault reindex` support `--dry-run`
 - If you change command names, parameters, or examples, update [`crates/tao-cli/src/cli_impl/registry.rs`](crates/tao-cli/src/cli_impl/registry.rs) and the contract tests that assert the public surface
 
 ## 8. Constraints

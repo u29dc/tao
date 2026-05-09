@@ -76,6 +76,47 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
         }
         VaultCommands::Reindex(args) => {
             let resolved = args.resolve()?;
+            if args.dry_run {
+                let connection = Connection::open_with_flags(
+                    &resolved.db_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .with_context(|| {
+                    format!("open sqlite database '{}' read-only", resolved.db_path)
+                })?;
+                let refresh = query_index_refresh_status(
+                    Path::new(&resolved.vault_root),
+                    &connection,
+                    resolved.case_policy,
+                )?;
+                let totals = query_index_totals(&connection)
+                    .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+                let mode = if refresh.rebuild_reason.is_some() {
+                    "full_rebuild"
+                } else {
+                    "reconcile"
+                };
+                return Ok(CommandResult {
+                    command: "vault.reindex".to_string(),
+                    summary: "vault reindex dry-run completed".to_string(),
+                    args: serde_json::json!({
+                        "mode": mode,
+                        "reason": refresh.rebuild_reason.map(|reason| reason.to_string()),
+                        "dry_run": true,
+                        "would_write": true,
+                        "indexed_files": totals.indexed_files,
+                        "markdown_files": totals.markdown_files,
+                        "links_total": totals.links_total,
+                        "unresolved_links": totals.unresolved_links,
+                        "properties_total": totals.properties_total,
+                        "bases_total": totals.bases_total,
+                        "drift_paths": refresh.drift_paths,
+                        "batches_applied": 0_u64,
+                        "upserted_files": 0_u64,
+                        "removed_files": 0_u64,
+                    }),
+                });
+            }
             let (mode, reason, drift_paths, batches_applied, upserted_files, removed_files, totals) =
                 with_connection(runtime, &resolved, |connection| {
                     let refresh = query_index_refresh_status(

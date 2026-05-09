@@ -18,7 +18,8 @@ mod transactions;
 pub use base_executor::*;
 pub use config::{
     SdkBootstrapError, SdkBootstrapService, SdkBootstrapSnapshot, SdkConfig, SdkConfigError,
-    SdkConfigLoader, SdkConfigOverrides, ensure_runtime_paths,
+    SdkConfigFieldSources, SdkConfigFileInspection, SdkConfigInspection,
+    SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, ensure_runtime_paths,
 };
 pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use graph::*;
