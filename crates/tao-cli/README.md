@@ -29,6 +29,7 @@ CLI args -> request mapping -> SDK service call -> envelope serialization -> std
 - Normal vault-facing commands may auto-connect to an existing background daemon and auto-start it when unavailable.
 - `vault daemon *` commands are inspection and troubleshooting primitives, not the only way daemon mode is entered.
 - `config show` reports effective config values, per-field source labels, source inputs, and precedence without opening or migrating SQLite state.
+- `vault reindex` honors a vault-root `.taoignore` for Tao knowledge-indexing exclusions; `.gitignore` is not used because Git tracking and knowledge indexing are separate concerns.
 - `health` and `vault preflight` are fresh observational diagnostics; they do not reconcile or cache command results.
 - `watcher_status` in CLI health snapshots reflects change-monitor state, not daemon lifecycle state by itself.
 

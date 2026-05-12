@@ -172,7 +172,7 @@ pub(crate) enum VaultCommands {
     Stats(VaultPathArgs),
     /// Validate migration state/checksums before startup migration apply.
     Preflight(VaultPathArgs),
-    /// Run smart reindex (reconcile drift and refresh index totals).
+    /// Run smart reindex using vault scan rules and root .taoignore exclusions.
     Reindex(VaultReindexArgs),
     /// Apply incremental reconcile pass.
     #[command(hide = true)]

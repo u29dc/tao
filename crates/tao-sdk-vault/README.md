@@ -16,6 +16,8 @@ Provide vault filesystem primitives: canonical path safety, scanning, and file f
 
 - Deterministic scanner ordering.
 - Unicode normalization and case-policy aware matching.
+- Root `.taoignore` support uses gitignore-compatible matching for Tao knowledge-indexing exclusions.
+- `.gitignore`, `.ignore`, `.git/info/exclude`, and global gitignore files are not read by default.
 - Parallel metadata collection for scan throughput.
 
 ## Data Flow
@@ -24,7 +26,7 @@ Vault root -> scan/path normalization -> manifest/fingerprint -> service ingest/
 
 ## Dependencies
 
-- External: `walkdir`, `unicode-normalization`, `rayon`, `blake3`, `thiserror`
+- External: `walkdir`, `ignore`, `unicode-normalization`, `rayon`, `blake3`, `thiserror`
 
 ## Testing
 

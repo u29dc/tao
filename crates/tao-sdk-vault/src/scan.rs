@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
@@ -68,13 +69,21 @@ impl VaultScanService {
         let root = self.canonicalizer.root().to_path_buf();
         let root_for_filter = root.clone();
         let case_policy = self.canonicalizer.case_policy();
+        let taoignore = load_taoignore(&root, case_policy)?;
         let mut discovered_files = Vec::new();
 
         for entry in WalkDir::new(&root)
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
-            .filter_entry(|entry| should_descend(entry.path(), &root_for_filter))
+            .filter_entry(|entry| {
+                should_include_scan_entry(
+                    entry.path(),
+                    entry.file_type().is_dir(),
+                    &root_for_filter,
+                    &taoignore,
+                )
+            })
         {
             let entry = entry.map_err(|source| VaultScanError::Walk {
                 root: root.clone(),
@@ -172,7 +181,44 @@ fn normalize_relative_path(path: &Path) -> Result<String, VaultScanError> {
     Ok(segments.join("/"))
 }
 
-fn should_descend(path: &Path, root: &Path) -> bool {
+fn load_taoignore(root: &Path, case_policy: CasePolicy) -> Result<Gitignore, VaultScanError> {
+    let taoignore_path = root.join(".taoignore");
+    let mut builder = GitignoreBuilder::new(root);
+    builder
+        .case_insensitive(matches!(case_policy, CasePolicy::Insensitive))
+        .map_err(|source| VaultScanError::TaoIgnoreCasePolicy {
+            path: taoignore_path.clone(),
+            source,
+        })?;
+
+    if taoignore_path
+        .try_exists()
+        .map_err(|source| VaultScanError::TaoIgnoreProbe {
+            path: taoignore_path.clone(),
+            source,
+        })?
+        && let Some(source) = builder.add(&taoignore_path)
+    {
+        return Err(VaultScanError::TaoIgnoreParse {
+            path: taoignore_path,
+            source,
+        });
+    }
+
+    builder
+        .build()
+        .map_err(|source| VaultScanError::TaoIgnoreBuild {
+            path: taoignore_path,
+            source,
+        })
+}
+
+fn should_include_scan_entry(
+    path: &Path,
+    is_dir: bool,
+    root: &Path,
+    taoignore: &Gitignore,
+) -> bool {
     if path == root {
         return true;
     }
@@ -184,10 +230,20 @@ fn should_descend(path: &Path, root: &Path) -> bool {
         return true;
     };
 
-    !matches!(
+    if matches!(
         first_component.to_str(),
         Some(".git" | ".obsidian" | ".tao")
-    )
+    ) {
+        return false;
+    }
+
+    if relative.components().count() == 1 && first_component.to_str() == Some(".taoignore") {
+        return false;
+    }
+
+    !taoignore
+        .matched_path_or_any_parents(path, is_dir)
+        .is_ignore()
 }
 
 /// Errors returned by vault scan operations.
@@ -265,6 +321,42 @@ pub enum VaultScanError {
     InvalidPathComponent {
         /// Relative path that failed normalization.
         path: PathBuf,
+    },
+    /// Applying case policy to `.taoignore` failed.
+    #[error("failed to configure .taoignore matching for '{path}': {source}")]
+    TaoIgnoreCasePolicy {
+        /// Vault-local `.taoignore` path.
+        path: PathBuf,
+        /// Matcher configuration error.
+        #[source]
+        source: ignore::Error,
+    },
+    /// Checking for vault-local `.taoignore` failed.
+    #[error("failed to inspect .taoignore at '{path}': {source}")]
+    TaoIgnoreProbe {
+        /// Vault-local `.taoignore` path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Parsing vault-local `.taoignore` failed.
+    #[error("failed to parse .taoignore at '{path}': {source}")]
+    TaoIgnoreParse {
+        /// Vault-local `.taoignore` path.
+        path: PathBuf,
+        /// Matcher parse error.
+        #[source]
+        source: ignore::Error,
+    },
+    /// Building vault-local `.taoignore` matcher failed.
+    #[error("failed to build .taoignore matcher for '{path}': {source}")]
+    TaoIgnoreBuild {
+        /// Vault-local `.taoignore` path.
+        path: PathBuf,
+        /// Matcher build error.
+        #[source]
+        source: ignore::Error,
     },
 }
 
@@ -357,5 +449,243 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(normalized, vec!["notes/live.md"]);
+    }
+
+    #[test]
+    fn scan_without_taoignore_preserves_regular_files() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("_TMP")).expect("create tmp");
+        fs::write(temp.path().join("_TMP/scratch.md"), "# scratch").expect("write scratch");
+        fs::write(temp.path().join("note.md"), "# note").expect("write note");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(
+            normalized_paths(&manifest),
+            vec!["_TMP/scratch.md", "note.md"]
+        );
+    }
+
+    #[test]
+    fn scan_taoignore_allows_comments_blank_lines_and_excludes_control_file() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("_TMP")).expect("create tmp");
+        fs::write(temp.path().join(".taoignore"), "\n# scratch\n_TMP/\n").expect("write taoignore");
+        fs::write(temp.path().join("_TMP/scratch.md"), "# scratch").expect("write scratch");
+        fs::write(temp.path().join("note.md"), "# note").expect("write note");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["note.md"]);
+    }
+
+    #[test]
+    fn scan_taoignore_excludes_nested_files_in_ignored_directory() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("_TMP/ctvc/nested")).expect("create scratch");
+        fs::create_dir_all(temp.path().join("notes")).expect("create notes");
+        fs::write(temp.path().join(".taoignore"), "_TMP/\n").expect("write taoignore");
+        fs::write(
+            temp.path().join("_TMP/ctvc/nested/floating.md"),
+            "# scratch",
+        )
+        .expect("write floating");
+        fs::write(temp.path().join("notes/live.md"), "# live").expect("write live");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["notes/live.md"]);
+    }
+
+    #[test]
+    fn scan_taoignore_root_relative_directory_only_matches_root() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".tmp")).expect("create root tmp");
+        fs::create_dir_all(temp.path().join("nested/.tmp")).expect("create nested tmp");
+        fs::write(temp.path().join(".taoignore"), "/.tmp/\n").expect("write taoignore");
+        fs::write(temp.path().join(".tmp/root.md"), "# root").expect("write root tmp");
+        fs::write(temp.path().join("nested/.tmp/keep.md"), "# keep").expect("write nested tmp");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["nested/.tmp/keep.md"]);
+    }
+
+    #[test]
+    fn scan_taoignore_supports_directory_globs() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("work/scratch")).expect("create scratch");
+        fs::create_dir_all(temp.path().join("notes/scratch")).expect("create note scratch");
+        fs::write(temp.path().join(".taoignore"), "scratch/\n").expect("write taoignore");
+        fs::write(temp.path().join("work/scratch/a.md"), "# a").expect("write a");
+        fs::write(temp.path().join("notes/scratch/b.md"), "# b").expect("write b");
+        fs::write(temp.path().join("notes/live.md"), "# live").expect("write live");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["notes/live.md"]);
+    }
+
+    #[test]
+    fn scan_taoignore_supports_negation_for_walked_parents() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join(".taoignore"), "*.md\n!keep.md\n").expect("write taoignore");
+        fs::write(temp.path().join("drop.md"), "# drop").expect("write drop");
+        fs::write(temp.path().join("keep.md"), "# keep").expect("write keep");
+        fs::write(temp.path().join("asset.pdf"), "pdf").expect("write asset");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["asset.pdf", "keep.md"]);
+    }
+
+    #[test]
+    fn scan_taoignore_matching_respects_case_policy() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("_TMP")).expect("create tmp");
+        fs::write(temp.path().join(".taoignore"), "_tmp/\n").expect("write taoignore");
+        fs::write(temp.path().join("_TMP/scratch.md"), "# scratch").expect("write scratch");
+
+        let sensitive =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        assert_eq!(
+            normalized_paths(&sensitive.scan().expect("scan sensitive")),
+            vec!["_TMP/scratch.md"]
+        );
+
+        let insensitive =
+            VaultScanService::from_root(temp.path(), CasePolicy::Insensitive).expect("scanner");
+        assert!(normalized_paths(&insensitive.scan().expect("scan insensitive")).is_empty());
+    }
+
+    #[test]
+    fn scan_builtin_exclusions_are_not_overridden_by_taoignore_negation() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".git")).expect("create git");
+        fs::create_dir_all(temp.path().join(".obsidian")).expect("create obsidian");
+        fs::create_dir_all(temp.path().join(".tao")).expect("create tao");
+        fs::write(
+            temp.path().join(".taoignore"),
+            "!.git/HEAD\n!.obsidian/app.json\n!.tao/index.sqlite\n",
+        )
+        .expect("write taoignore");
+        fs::write(temp.path().join(".git/HEAD"), "ref").expect("write git");
+        fs::write(temp.path().join(".obsidian/app.json"), "{}").expect("write obsidian");
+        fs::write(temp.path().join(".tao/index.sqlite"), "sqlite").expect("write tao");
+        fs::write(temp.path().join("note.md"), "# note").expect("write note");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["note.md"]);
+    }
+
+    #[test]
+    fn scan_does_not_respect_gitignore_by_default() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("_TMP")).expect("create tmp");
+        fs::write(temp.path().join(".gitignore"), "_TMP/\n").expect("write gitignore");
+        fs::write(temp.path().join("_TMP/scratch.md"), "# scratch").expect("write scratch");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(
+            normalized_paths(&manifest),
+            vec![".gitignore", "_TMP/scratch.md"]
+        );
+    }
+
+    #[test]
+    fn scan_does_not_respect_git_info_exclude_by_default() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join(".git/info")).expect("create git info");
+        fs::create_dir_all(temp.path().join("_TMP")).expect("create tmp");
+        fs::write(temp.path().join(".git/info/exclude"), "_TMP/\n").expect("write exclude");
+        fs::write(temp.path().join("_TMP/scratch.md"), "# scratch").expect("write scratch");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["_TMP/scratch.md"]);
+    }
+
+    #[test]
+    fn scan_does_not_respect_global_gitignore_by_default() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        let home = temp.path().join("home");
+        let xdg = temp.path().join("xdg");
+        fs::create_dir_all(vault.join("_GLOBAL")).expect("create global dir");
+        fs::create_dir_all(xdg.join("git")).expect("create xdg git");
+        fs::create_dir_all(home.join(".config/git")).expect("create home git config");
+        fs::write(vault.join("_GLOBAL/scratch.md"), "# scratch").expect("write scratch");
+        fs::write(xdg.join("git/ignore"), "_GLOBAL/\n").expect("write xdg global ignore");
+        fs::write(home.join(".config/git/ignore"), "_GLOBAL/\n").expect("write home global ignore");
+
+        let status = std::process::Command::new(std::env::current_exe().expect("current exe"))
+            .arg("scan_global_gitignore_helper")
+            .arg("--nocapture")
+            .env("TAO_SCAN_GLOBAL_IGNORE_HELPER", "1")
+            .env("TAO_SCAN_GLOBAL_IGNORE_VAULT", &vault)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &xdg)
+            .status()
+            .expect("run helper test");
+
+        assert!(status.success(), "global gitignore helper failed");
+    }
+
+    #[test]
+    fn scan_global_gitignore_helper() {
+        if std::env::var_os("TAO_SCAN_GLOBAL_IGNORE_HELPER").is_none() {
+            return;
+        }
+        let vault = std::env::var_os("TAO_SCAN_GLOBAL_IGNORE_VAULT")
+            .map(PathBuf::from)
+            .expect("helper vault env");
+
+        let service = VaultScanService::from_root(vault, CasePolicy::Sensitive).expect("scanner");
+        let manifest = service.scan().expect("scan");
+
+        assert_eq!(normalized_paths(&manifest), vec!["_GLOBAL/scratch.md"]);
+    }
+
+    #[test]
+    fn scan_surfaces_malformed_taoignore_patterns() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join(".taoignore"), "{foo,bar\n").expect("write taoignore");
+
+        let service =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let error = service
+            .scan()
+            .expect_err("scan should reject malformed pattern");
+
+        assert!(error.to_string().contains("failed to parse .taoignore"));
+        assert!(error.to_string().contains("{foo,bar"));
+    }
+
+    fn normalized_paths(manifest: &crate::VaultManifest) -> Vec<&str> {
+        manifest
+            .entries
+            .iter()
+            .map(|entry| entry.normalized.as_str())
+            .collect::<Vec<_>>()
     }
 }

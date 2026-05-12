@@ -52,7 +52,7 @@
 - [`crates/tao-cli/src/cli_impl/commands/`](crates/tao-cli/src/cli_impl/commands/) is an adapter layer only; keep business rules in SDK crates and keep envelope/CLI formatting out of service code
 - [`crates/tao-sdk-service/src/`](crates/tao-sdk-service/src/) orchestrates indexing, reconcile, graph diagnostics, base execution, task/property operations, and health snapshots over storage and vault primitives
 - [`crates/tao-sdk-storage/src/`](crates/tao-sdk-storage/src/) owns SQLite migrations, repositories, and transaction helpers
-- [`crates/tao-sdk-vault/src/`](crates/tao-sdk-vault/src/) enforces vault boundaries and deterministic scan/fingerprint behavior; scans skip `.git`, `.obsidian`, and `.tao`
+- [`crates/tao-sdk-vault/src/`](crates/tao-sdk-vault/src/) enforces vault boundaries and deterministic scan/fingerprint behavior; scans skip `.git`, `.obsidian`, `.tao`, and root `.taoignore`, and honor root `.taoignore` patterns for Tao indexing exclusions without reading `.gitignore`
 - [`crates/tao-sdk-bridge/src/`](crates/tao-sdk-bridge/src/) exposes `BridgeKernel` and envelope types used by CLI runtime caches and retained benchmark flows
 - `vault reindex` is not a blind full rebuild: it prefers incremental reconcile and only escalates to full rebuild when link-resolution version state or indexed file-path consistency is stale
 - Public graph help is centered on `graph links`, `graph audit`, `graph path`, and `graph walk`; older graph-specific subcommands remain callable as compatibility wrappers, are omitted from default `tao tools`, and can still be inspected with `tao tools <name>`

@@ -23,6 +23,7 @@ Deterministic fixture vault used by QA integration tests.
 
 - Paths are lower-case and stable for deterministic snapshots.
 - Asset files are included so scanners/indexers exercise non-markdown handling.
+- Tao-specific indexing exclusions belong in root `.taoignore`; `.gitignore` is not used for scan/index filtering so durable attachments can still be indexed when Git ignores them.
 
 ## Synthetic Vaults
 

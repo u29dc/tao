@@ -2832,6 +2832,101 @@ fn graph_components_supports_weak_and_strong_modes() {
 }
 
 #[test]
+fn taoignore_removes_ignored_paths_from_graph_audits_after_reindex() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
+        fs::create_dir_all(vault_root.join("assets")).expect("create assets dir");
+        fs::create_dir_all(vault_root.join("_TMP/ctvc")).expect("create scratch dir");
+        fs::create_dir_all(vault_root.join(".tmp")).expect("create dot tmp dir");
+
+        fs::write(vault_root.join(".taoignore"), "_TMP/\n.tmp/\n").expect("write taoignore");
+        fs::write(vault_root.join("notes/root.md"), "# Root\n[[linked]]\n").expect("write root");
+        fs::write(vault_root.join("notes/linked.md"), "# Linked\n").expect("write linked");
+        fs::write(vault_root.join("assets/keep.pdf"), "pdf").expect("write durable asset");
+        fs::write(vault_root.join("_TMP/ctvc/floating.md"), "# Scratch\n")
+            .expect("write scratch note");
+        fs::write(vault_root.join(".tmp/transient.md"), "# Transient\n")
+            .expect("write transient note");
+
+        let reindex = Cli::parse_from([
+            "tao",
+            "vault",
+            "reindex",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+        ]);
+        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+
+        let floating = Cli::parse_from([
+            "tao",
+            "graph",
+            "audit",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--kind",
+            "floating",
+            "--limit",
+            "100",
+            "--offset",
+            "0",
+        ]);
+        let floating_output = render_output(
+            floating.json,
+            &dispatch(floating.command, floating.allow_writes).expect("dispatch floating audit"),
+        )
+        .expect("render floating audit");
+        let floating_json: JsonValue =
+            serde_json::from_str(&floating_output).expect("parse floating json");
+        let floating_paths = json_item_paths(&floating_json);
+        assert_eq!(floating_paths, vec!["assets/keep.pdf"]);
+        assert!(!floating_output.contains("_TMP/ctvc"));
+        assert!(!floating_output.contains(".tmp/transient"));
+
+        let components = Cli::parse_from([
+            "tao",
+            "graph",
+            "audit",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--kind",
+            "components",
+            "--include-members",
+            "--limit",
+            "100",
+            "--offset",
+            "0",
+        ]);
+        let components_output = render_output(
+            components.json,
+            &dispatch(components.command, components.allow_writes)
+                .expect("dispatch components audit"),
+        )
+        .expect("render components audit");
+        let components_json: JsonValue =
+            serde_json::from_str(&components_output).expect("parse components json");
+        let component_paths = components_json
+            .get("data")
+            .and_then(|data| data.get("items"))
+            .and_then(JsonValue::as_array)
+            .expect("component items")
+            .iter()
+            .flat_map(|item| {
+                item.get("paths")
+                    .and_then(JsonValue::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(JsonValue::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(component_paths, vec!["notes/linked.md", "notes/root.md"]);
+        assert!(!components_output.contains("_TMP/ctvc"));
+        assert!(!components_output.contains(".tmp/transient"));
+    });
+}
+
+#[test]
 fn graph_walk_can_include_folder_overlay_edges() {
     with_temp_cwd(|| {
         let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -4321,4 +4416,15 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+fn json_item_paths(payload: &JsonValue) -> Vec<&str> {
+    payload
+        .get("data")
+        .and_then(|data| data.get("items"))
+        .and_then(JsonValue::as_array)
+        .expect("items")
+        .iter()
+        .filter_map(|item| item.get("path").and_then(JsonValue::as_str))
+        .collect::<Vec<_>>()
 }
