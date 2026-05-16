@@ -3,20 +3,12 @@ use super::*;
 #[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 #[command(name = "tao", version, about = "tao cli")]
 pub(crate) struct Cli {
-    /// Emit plain-text summaries instead of JSON envelopes.
-    #[arg(
-        long = "text",
-        global = true,
-        default_value_t = true,
-        action = ArgAction::SetFalse
-    )]
+    /// JSON envelope output is the canonical public interface.
+    #[arg(skip = true)]
     pub(crate) json: bool,
     /// Stream JSON envelope serialization for supported large read commands.
     #[arg(long, global = true, default_value_t = false, hide = true)]
     pub(crate) json_stream: bool,
-    /// Allow vault content write operations (disabled by default).
-    #[arg(long, global = true, default_value_t = false)]
-    pub(crate) allow_writes: bool,
     /// Route command execution through a warm daemon socket.
     #[arg(long, global = true, hide = true)]
     pub(crate) daemon_socket: Option<String>,
@@ -55,11 +47,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: MetaCommands,
     },
-    /// Task extraction and state operations.
+    /// Task extraction and listing.
     Task {
         #[command(subcommand)]
         command: TaskCommands,
     },
+    /// Graph-aware indexed vault search.
+    Search(SearchArgs),
     /// Unified read query entrypoint.
     Query(QueryArgs),
     /// Vault lifecycle and indexing operations.
@@ -85,8 +79,6 @@ pub(crate) struct ToolsArgs {
 pub(crate) enum DocCommands {
     /// Return one note by normalized path.
     Read(NotePathArgs),
-    /// Create or update one note.
-    Write(NotePutArgs),
     /// List markdown note windows.
     List(VaultPathArgs),
 }
@@ -159,8 +151,6 @@ pub(crate) enum MetaCommands {
 pub(crate) enum TaskCommands {
     /// List extracted markdown tasks.
     List(TaskListArgs),
-    /// Update checkbox state on one task line.
-    SetState(TaskSetStateArgs),
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -221,25 +211,6 @@ pub(crate) struct NotePathArgs {
     /// Vault-relative normalized note path.
     #[arg(long)]
     pub(crate) path: String,
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct NotePutArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
-    #[arg(long)]
-    pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    pub(crate) db_path: Option<String>,
-    /// Vault-relative normalized note path.
-    #[arg(long)]
-    pub(crate) path: String,
-    /// Full markdown content payload.
-    #[arg(long)]
-    pub(crate) content: String,
-    /// Validate the write and return the intended action without modifying files or indexes.
-    #[arg(long, default_value_t = false)]
-    pub(crate) dry_run: bool,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -500,28 +471,6 @@ pub(crate) struct TaskListArgs {
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct TaskSetStateArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
-    #[arg(long)]
-    pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    pub(crate) db_path: Option<String>,
-    /// Vault-relative normalized note path.
-    #[arg(long)]
-    pub(crate) path: String,
-    /// One-based line number of task.
-    #[arg(long)]
-    pub(crate) line: usize,
-    /// Target state: open|done|cancelled.
-    #[arg(long)]
-    pub(crate) state: String,
-    /// Validate the task update without modifying the note or index.
-    #[arg(long, default_value_t = false)]
-    pub(crate) dry_run: bool,
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub(crate) struct VaultReindexArgs {
     /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
@@ -532,6 +481,48 @@ pub(crate) struct VaultReindexArgs {
     /// Inspect the planned reindex mode without writing SQLite state.
     #[arg(long, default_value_t = false)]
     pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub(crate) struct SearchArgs {
+    /// Free-text search query. Mutually exclusive with --path.
+    pub(crate) query: Option<String>,
+    /// Vault-relative root path for context expansion.
+    #[arg(long)]
+    pub(crate) path: Option<String>,
+    /// Search kind: auto|all|docs|files|bases|properties|tasks|graph.
+    #[arg(long, default_value = "auto")]
+    pub(crate) kind: String,
+    /// Optional vault-relative path prefix scope.
+    #[arg(long)]
+    pub(crate) scope: Option<String>,
+    /// Extension filter, repeatable or comma-separated.
+    #[arg(long)]
+    pub(crate) ext: Vec<String>,
+    /// Include bounded graph/context expansion.
+    #[arg(long, default_value_t = false)]
+    pub(crate) context: bool,
+    /// Graph context depth.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) depth: u32,
+    /// Maximum rows per primary result section.
+    #[arg(long, default_value_t = 20)]
+    pub(crate) limit: u32,
+    /// Include bounded note body excerpts.
+    #[arg(long, default_value_t = false)]
+    pub(crate) include_content: bool,
+    /// Include local frontmatter/property values.
+    #[arg(long, default_value_t = true)]
+    pub(crate) include_pii: bool,
+    /// Redact local frontmatter/property values.
+    #[arg(long = "no-pii", default_value_t = false)]
+    pub(crate) no_pii: bool,
+    /// Optional absolute vault root path. Falls back to config/env defaults.
+    #[arg(long)]
+    pub(crate) vault_root: Option<String>,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    pub(crate) db_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -628,12 +619,6 @@ impl NotePathArgs {
     }
 }
 
-impl NotePutArgs {
-    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
-    }
-}
-
 impl BaseViewArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
@@ -700,13 +685,13 @@ impl TaskListArgs {
     }
 }
 
-impl TaskSetStateArgs {
+impl VaultReindexArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }
 
-impl VaultReindexArgs {
+impl SearchArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }

@@ -4,12 +4,12 @@
 
 ## Purpose
 
-Implement Tao domain services for vault ingest/indexing, graph operations, base execution, metadata/task operations, and reconcile flows.
+Implement Tao domain services for vault ingest/indexing, graph-aware search, base execution, metadata/task reads, and reconcile flows.
 
 ## Public API
 
 - Indexing/reconcile services
-- Note CRUD/property update services
+- Graph-aware vault search orchestration
 - Graph diagnostics/traversal services
 - Base table execution and validation services
 - Health snapshot and bootstrap helpers

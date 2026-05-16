@@ -1,4 +1,5 @@
 //! Note create/update/delete service.
+#![allow(dead_code)]
 
 use std::fmt;
 use std::fs::{self, OpenOptions};

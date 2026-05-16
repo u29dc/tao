@@ -153,6 +153,30 @@ pub(crate) fn query_docs_row(item: SearchQueryProjectedItem) -> serde_json::Map<
     map
 }
 
+pub(crate) fn query_docs_row_from_search_index(
+    row: SearchIndexRecord,
+) -> serde_json::Map<String, JsonValue> {
+    let mut map = serde_json::Map::with_capacity(5);
+    map.insert(
+        QueryDocsColumn::FileId.key().to_string(),
+        JsonValue::String(row.file_id),
+    );
+    map.insert(
+        QueryDocsColumn::Path.key().to_string(),
+        JsonValue::String(row.normalized_path.clone()),
+    );
+    map.insert(
+        QueryDocsColumn::Title.key().to_string(),
+        JsonValue::String(tao_sdk_search::derive_title_from_path(&row.normalized_path)),
+    );
+    map.insert("indexed_at".to_string(), JsonValue::String(row.updated_at));
+    map.insert(
+        QueryDocsColumn::MatchedIn.key().to_string(),
+        JsonValue::Array(Vec::new()),
+    );
+    map
+}
+
 pub(crate) fn project_query_docs_row_map(
     row: &serde_json::Map<String, JsonValue>,
     columns: &[QueryDocsColumn],
@@ -311,6 +335,33 @@ pub(crate) fn flatten_base_query_row(
     flattened
 }
 
+pub(crate) fn row_matches_text_query(
+    row: &serde_json::Map<String, JsonValue>,
+    query: &str,
+) -> bool {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    row.values()
+        .any(|value| json_value_contains_text(value, &needle))
+}
+
+fn json_value_contains_text(value: &JsonValue, needle: &str) -> bool {
+    match value {
+        JsonValue::Null => false,
+        JsonValue::Bool(value) => value.to_string().contains(needle),
+        JsonValue::Number(value) => value.to_string().contains(needle),
+        JsonValue::String(value) => value.to_lowercase().contains(needle),
+        JsonValue::Array(values) => values
+            .iter()
+            .any(|entry| json_value_contains_text(entry, needle)),
+        JsonValue::Object(values) => values
+            .values()
+            .any(|entry| json_value_contains_text(entry, needle)),
+    }
+}
+
 pub(crate) fn collect_docs_rows_for_where_only(
     runtime: &mut RuntimeMode,
     resolved: &ResolvedVaultPathArgs,
@@ -321,6 +372,23 @@ pub(crate) fn collect_docs_rows_for_where_only(
     offset: u32,
 ) -> Result<(u64, Vec<JsonValue>)> {
     with_connection(runtime, resolved, |connection| {
+        if query.trim().is_empty() {
+            let batch_rows = SearchIndexRepository::list_all(connection)?
+                .into_iter()
+                .map(query_docs_row_from_search_index)
+                .collect::<Vec<_>>();
+            let filtered = apply_where_filter(batch_rows, Some(where_expr))
+                .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
+            let total = u64::try_from(filtered.len()).unwrap_or(u64::MAX);
+            let rows = filtered
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|row| JsonValue::Object(project_query_docs_row_map(&row, columns)))
+                .collect::<Vec<_>>();
+            return Ok((total, rows));
+        }
+
         let mut query_offset = 0_u64;
         let mut total = 0_u64;
         let mut rows = Vec::new();

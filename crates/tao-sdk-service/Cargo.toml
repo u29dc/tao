@@ -18,6 +18,7 @@ tao-sdk-core = { path = "../tao-sdk-core" }
 tao-sdk-links = { path = "../tao-sdk-links" }
 tao-sdk-markdown = { path = "../tao-sdk-markdown" }
 tao-sdk-properties = { path = "../tao-sdk-properties" }
+tao-sdk-search = { path = "../tao-sdk-search" }
 tao-sdk-storage = { path = "../tao-sdk-storage" }
 tao-sdk-vault = { path = "../tao-sdk-vault" }
 rusqlite.workspace = true

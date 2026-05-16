@@ -89,6 +89,16 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
                 let mut accumulator =
                     QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
                 with_connection(runtime, &resolved, |connection| {
+                    if query.trim().is_empty() {
+                        let batch_rows = SearchIndexRepository::list_all(connection)?
+                            .into_iter()
+                            .map(query_docs_row_from_search_index)
+                            .collect::<Vec<_>>();
+                        let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
+                        accumulator.push_batch(filtered);
+                        return Ok::<(), anyhow::Error>(());
+                    }
+
                     let mut query_offset = 0_u64;
 
                     loop {
@@ -234,125 +244,134 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
             });
         }
 
+        let query_filter = args
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
         let fast_page_size = args.offset.saturating_add(limit);
-        let (base_id, file_path, view_name, total, rows) = if where_expr.is_none()
-            && sort_keys.is_empty()
-        {
-            let result = handle_base(
-                BaseCommands::View(BaseViewArgs {
-                    vault_root: args.vault_root.clone(),
-                    db_path: args.db_path.clone(),
-                    path_or_id: base_id_or_path.to_string(),
-                    view_name: view_name.clone(),
-                    page: 1,
-                    page_size: fast_page_size.max(1),
-                }),
-                runtime,
-            )?;
-            let base_id = result
-                .args
-                .get("base_id")
-                .cloned()
-                .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string()));
-            let file_path = result
-                .args
-                .get("file_path")
-                .cloned()
-                .unwrap_or(JsonValue::Null);
-            let view_name = result
-                .args
-                .get("view_name")
-                .cloned()
-                .unwrap_or_else(|| JsonValue::String(view_name.clone()));
-            let total = result
-                .args
-                .get("total")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0);
-            let rows = result
-                .args
-                .get("rows")
-                .and_then(JsonValue::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .skip(args.offset as usize)
-                .take(limit as usize)
-                .collect::<Vec<_>>();
-            (base_id, file_path, view_name, total, rows)
-        } else {
-            const QUERY_BASE_PAGE_SIZE: u32 = 512;
-            let mut accumulator = QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
-            let mut page = 1_u32;
-
-            loop {
+        let (base_id, file_path, view_name, total, rows) =
+            if where_expr.is_none() && sort_keys.is_empty() && query_filter.is_none() {
                 let result = handle_base(
                     BaseCommands::View(BaseViewArgs {
                         vault_root: args.vault_root.clone(),
                         db_path: args.db_path.clone(),
                         path_or_id: base_id_or_path.to_string(),
                         view_name: view_name.clone(),
-                        page,
-                        page_size: QUERY_BASE_PAGE_SIZE,
+                        page: 1,
+                        page_size: fast_page_size.max(1),
                     }),
                     runtime,
                 )?;
-                let batch_rows = result
+                let base_id = result
+                    .args
+                    .get("base_id")
+                    .cloned()
+                    .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string()));
+                let file_path = result
+                    .args
+                    .get("file_path")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                let view_name = result
+                    .args
+                    .get("view_name")
+                    .cloned()
+                    .unwrap_or_else(|| JsonValue::String(view_name.clone()));
+                let total = result
+                    .args
+                    .get("total")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or(0);
+                let rows = result
                     .args
                     .get("rows")
                     .and_then(JsonValue::as_array)
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter_map(|row| row.as_object().cloned())
-                    .map(flatten_base_query_row)
+                    .skip(args.offset as usize)
+                    .take(limit as usize)
                     .collect::<Vec<_>>();
-                let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
-                accumulator.push_batch(filtered);
+                (base_id, file_path, view_name, total, rows)
+            } else {
+                const QUERY_BASE_PAGE_SIZE: u32 = 512;
+                let mut accumulator =
+                    QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
+                let mut page = 1_u32;
 
-                let has_more = result
-                    .args
-                    .get("has_more")
-                    .and_then(JsonValue::as_bool)
-                    .unwrap_or(false);
-                if !has_more {
-                    let (total, rows) = accumulator.finish();
-                    let rows = rows
+                loop {
+                    let result = handle_base(
+                        BaseCommands::View(BaseViewArgs {
+                            vault_root: args.vault_root.clone(),
+                            db_path: args.db_path.clone(),
+                            path_or_id: base_id_or_path.to_string(),
+                            view_name: view_name.clone(),
+                            page,
+                            page_size: QUERY_BASE_PAGE_SIZE,
+                        }),
+                        runtime,
+                    )?;
+                    let batch_rows = result
+                        .args
+                        .get("rows")
+                        .and_then(JsonValue::as_array)
+                        .cloned()
+                        .unwrap_or_default()
                         .into_iter()
                         .filter_map(|row| row.as_object().cloned())
-                        .map(|mut row| {
-                            let file_id = row.remove("file_id").unwrap_or(JsonValue::Null);
-                            let file_path = row.remove("path").unwrap_or(JsonValue::Null);
-                            serde_json::json!({
-                                "file_id": file_id,
-                                "file_path": file_path,
-                                "values": row,
-                            })
-                        })
+                        .map(flatten_base_query_row)
                         .collect::<Vec<_>>();
-                    break (
-                        result
-                            .args
-                            .get("base_id")
-                            .cloned()
-                            .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string())),
-                        result
-                            .args
-                            .get("file_path")
-                            .cloned()
-                            .unwrap_or(JsonValue::Null),
-                        result
-                            .args
-                            .get("view_name")
-                            .cloned()
-                            .unwrap_or_else(|| JsonValue::String(view_name.clone())),
-                        total,
-                        rows,
-                    );
+                    let mut filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
+                    if let Some(query_filter) = query_filter.as_deref() {
+                        filtered.retain(|row| row_matches_text_query(row, query_filter));
+                    }
+                    accumulator.push_batch(filtered);
+
+                    let has_more = result
+                        .args
+                        .get("has_more")
+                        .and_then(JsonValue::as_bool)
+                        .unwrap_or(false);
+                    if !has_more {
+                        let (total, rows) = accumulator.finish();
+                        let rows = rows
+                            .into_iter()
+                            .filter_map(|row| row.as_object().cloned())
+                            .map(|mut row| {
+                                let file_id = row.remove("file_id").unwrap_or(JsonValue::Null);
+                                let file_path = row.remove("path").unwrap_or(JsonValue::Null);
+                                serde_json::json!({
+                                    "file_id": file_id,
+                                    "file_path": file_path,
+                                    "values": row,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        break (
+                            result
+                                .args
+                                .get("base_id")
+                                .cloned()
+                                .unwrap_or_else(|| JsonValue::String(base_id_or_path.to_string())),
+                            result
+                                .args
+                                .get("file_path")
+                                .cloned()
+                                .unwrap_or(JsonValue::Null),
+                            result
+                                .args
+                                .get("view_name")
+                                .cloned()
+                                .unwrap_or_else(|| JsonValue::String(view_name.clone())),
+                            total,
+                            rows,
+                        );
+                    }
+                    page = page.saturating_add(1);
                 }
-                page = page.saturating_add(1);
-            }
-        };
+            };
 
         let mut args_payload = serde_json::json!({
             "from": from,
@@ -459,7 +478,6 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
                 limit: args.limit,
                 offset: args.offset,
             }),
-            false,
             runtime,
         )?;
         return Ok(retag_result(

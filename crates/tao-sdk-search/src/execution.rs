@@ -123,6 +123,9 @@ OFFSET ?4
                 if content_match != 0 {
                     matched_in.push("content".to_string());
                 }
+                if matched_in.is_empty() {
+                    matched_in.push("fts".to_string());
+                }
                 Some(matched_in)
             } else {
                 None

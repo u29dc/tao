@@ -24,7 +24,6 @@ impl DaemonExecutionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DaemonExecuteRequest {
     pub(crate) command: Commands,
-    pub(crate) allow_writes: bool,
     pub(crate) json: bool,
     pub(crate) json_stream: bool,
 }
@@ -73,7 +72,6 @@ pub(crate) fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
         let request = DaemonRequest::Execute {
             payload: Box::new(DaemonExecuteRequest {
                 command: cli.command.clone(),
-                allow_writes: cli.allow_writes,
                 json: cli.json,
                 json_stream: cli.json_stream,
             }),
@@ -132,7 +130,6 @@ pub(crate) fn resolve_command_vault_paths(
         Commands::Health(args) => args.resolve()?,
         Commands::Doc { command } => match command {
             DocCommands::Read(args) => args.resolve()?,
-            DocCommands::Write(args) => args.resolve()?,
             DocCommands::List(args) => args.resolve()?,
         },
         Commands::Base { command } => match command {
@@ -164,8 +161,8 @@ pub(crate) fn resolve_command_vault_paths(
         },
         Commands::Task { command } => match command {
             TaskCommands::List(args) => args.resolve()?,
-            TaskCommands::SetState(args) => args.resolve()?,
         },
+        Commands::Search(args) => args.resolve()?,
         Commands::Query(args) => args.resolve()?,
         Commands::Vault { command } => match command {
             VaultCommands::Open(args) => args.resolve()?,
@@ -202,15 +199,14 @@ pub(crate) fn daemon_execution_policy(command: &Commands) -> DaemonExecutionPoli
             DocCommands::Read(_) | DocCommands::List(_) => {
                 DaemonExecutionPolicy::CachedReadWithRefresh
             }
-            DocCommands::Write(_) => DaemonExecutionPolicy::ExplicitWork,
         },
         Commands::Base { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Graph { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Meta { .. } => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Task { command } => match command {
             TaskCommands::List(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
-            TaskCommands::SetState(_) => DaemonExecutionPolicy::ExplicitWork,
         },
+        Commands::Search(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Query(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Vault { command } => match command {
             VaultCommands::Stats(_) | VaultCommands::Preflight(_) => {
@@ -834,11 +830,7 @@ pub(crate) fn run_daemon_server(socket: &str) -> Result<()> {
 
                     let result = match cached {
                         Some(result) => Ok(result),
-                        None => dispatch_with_runtime(
-                            payload.command.clone(),
-                            payload.allow_writes,
-                            &mut runtime,
-                        ),
+                        None => dispatch_with_runtime(payload.command.clone(), &mut runtime),
                     };
 
                     match result {

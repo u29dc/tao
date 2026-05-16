@@ -282,8 +282,7 @@ pub(crate) fn classify_parse_error(error: &clap::Error) -> ClassifiedCliError {
             code: "invalid_argument".to_string(),
             message: error.to_string().trim().to_string(),
             hint: Some(
-                "rerun with --text --help or use `tao tools` to inspect the public surface"
-                    .to_string(),
+                "rerun with --help or use `tao tools` to inspect the public surface".to_string(),
             ),
             details: Some(serde_json::json!({
                 "kind": format!("{:?}", error.kind()),
@@ -306,17 +305,24 @@ pub(crate) fn classify_cli_error(error: &anyhow::Error) -> ClassifiedCliError {
     }
 
     let message = error.to_string();
-    let (exit_kind, code, hint) = if message.contains("--allow-writes") {
-        (
-            ExitKind::Blocked,
-            "write_disabled",
-            Some("pass --allow-writes to enable write operations".to_string()),
-        )
-    } else if message.contains("parse --where failed") || message.contains("parse --sort failed") {
+    let (exit_kind, code, hint) = if message.contains("parse --where failed")
+        || message.contains("parse --sort failed")
+    {
         (
             ExitKind::Failure,
             "query_parse_error",
             Some("fix query expression syntax and retry".to_string()),
+        )
+    } else if message.contains("type mismatch for ordered comparison")
+        || message.contains("type mismatch for string comparison")
+    {
+        (
+            ExitKind::Failure,
+            "query_type_mismatch",
+            Some(
+                "compare fields with same-type literals, or use `contains` for text casting"
+                    .to_string(),
+            ),
         )
     } else if message.contains("connect daemon socket") {
         (
@@ -373,7 +379,6 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
         },
         Commands::Doc { command } => match command {
             DocCommands::Read(_) => "doc.read".to_string(),
-            DocCommands::Write(_) => "doc.write".to_string(),
             DocCommands::List(_) => "doc.list".to_string(),
         },
         Commands::Base { command } => match command {
@@ -405,8 +410,8 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
         },
         Commands::Task { command } => match command {
             TaskCommands::List(_) => "task.list".to_string(),
-            TaskCommands::SetState(_) => "task.set-state".to_string(),
         },
+        Commands::Search(_) => "search.run".to_string(),
         Commands::Query(_) => "query.run".to_string(),
         Commands::Vault { command } => match command {
             VaultCommands::Open(_) => "vault.open".to_string(),
@@ -448,7 +453,7 @@ pub(crate) fn error_meta(tool: &str, elapsed: Duration) -> JsonMeta {
 }
 
 pub(crate) fn payload_count(data: &JsonValue) -> Option<u64> {
-    for key in ["items", "rows", "tools", "checks"] {
+    for key in ["candidates", "items", "rows", "tools", "checks"] {
         if let Some(items) = data.get(key).and_then(JsonValue::as_array) {
             return Some(u64::try_from(items.len()).unwrap_or(u64::MAX));
         }

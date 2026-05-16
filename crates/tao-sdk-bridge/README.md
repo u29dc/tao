@@ -4,11 +4,11 @@
 
 ## Purpose
 
-Expose Tao SDK capabilities through a stable internal bridge surface for CLI runtime and benchmark consumers.
+Expose Tao SDK read capabilities through a stable internal bridge surface for CLI runtime and benchmark consumers.
 
 ## Public API
 
-- `BridgeKernel` read/write methods (`vault_stats`, `note_get`, `notes_list`, `note_links`, `note_context`, `bases_*`, `note_put`, `events_poll`)
+- `BridgeKernel` read methods (`vault_stats`, `note_get`, `notes_list`, `note_links`, `note_context`, `bases_*`, `events_poll`)
 - Envelope types: `BridgeEnvelope`, `BridgeError`
 
 ## Internal Design
@@ -29,8 +29,9 @@ Bridge request -> kernel call -> SDK services -> typed envelope serialization.
 ## Testing
 
 - `cargo test -p tao-sdk-bridge --release`
-- Tests cover schema compatibility, note read/write, links, bases, and event polling.
+- Tests cover schema compatibility, note reads, links, bases, and event polling.
 
 ## Limits
 
 - Bridge should remain transport-focused and avoid duplicating service-layer policy logic.
+- Legacy bridge note-write helpers are retained only as disabled compatibility symbols; they always return a write-disabled envelope.

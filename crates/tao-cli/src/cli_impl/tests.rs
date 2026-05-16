@@ -9,13 +9,12 @@ use std::sync::{Mutex, OnceLock};
 use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CommandResult, Commands,
     DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs, DaemonStopAllArgs, DocCommands,
-    ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, NotePutArgs, QueryArgs, RuntimeCache, RuntimeMode,
-    VaultCommands, VaultPathArgs, classify_cli_error, daemon_execution_policy,
-    derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime, handle_daemon,
-    maybe_forward_to_daemon, maybe_refresh_daemon_state, maybe_render_streaming_output,
-    prepare_daemon_socket_path, read_bounded_bytes, registry, render_error_output, render_output,
-    resolve_command_vault_paths, resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key,
-    update_daemon_command_cache,
+    ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, QueryArgs, RuntimeCache, RuntimeMode, SearchArgs,
+    VaultCommands, VaultPathArgs, daemon_execution_policy, derive_daemon_socket_for_vault,
+    dispatch, dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon,
+    maybe_refresh_daemon_state, maybe_render_streaming_output, prepare_daemon_socket_path,
+    read_bounded_bytes, registry, render_error_output, render_output, resolve_command_vault_paths,
+    resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key, update_daemon_command_cache,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
 use rusqlite::Connection;
@@ -40,14 +39,16 @@ fn cli_help_contains_grouped_command_names() {
     assert!(rendered.contains("meta"));
     assert!(rendered.contains("task"));
     assert!(rendered.contains("query"));
+    assert!(rendered.contains("search"));
     assert!(rendered.contains("tools"));
     assert!(rendered.contains("health"));
     assert!(rendered.contains("config"));
+    assert!(!rendered.contains("--allow-writes"));
+    assert!(!rendered.contains("--text"));
     assert!(!rendered.contains("note"));
     assert!(!rendered.contains("links"));
     assert!(!rendered.contains("properties"));
     assert!(!rendered.contains("bases"));
-    assert!(!rendered.contains("search"));
     assert!(!rendered.contains("hubs"));
 }
 
@@ -83,6 +84,36 @@ fn graph_and_vault_help_hide_compatibility_surfaces() {
     assert!(!vault_help.contains("\n  stats"));
     assert!(!vault_help.contains("\n  reconcile"));
     assert!(!vault_help.contains("\n  daemon"));
+}
+
+#[test]
+fn doc_and_task_help_hide_removed_write_surfaces() {
+    let mut doc = Cli::command()
+        .find_subcommand_mut("doc")
+        .expect("doc command")
+        .clone();
+    let mut doc_output = Vec::new();
+    doc.write_long_help(&mut doc_output)
+        .expect("render doc help");
+    let doc_help = String::from_utf8(doc_output).expect("utf8 doc help");
+    assert!(doc_help.contains("read"));
+    assert!(doc_help.contains("list"));
+    assert!(!doc_help.contains("write"));
+    assert!(!doc_help.contains("--allow-writes"));
+    assert!(!doc_help.contains("--text"));
+
+    let mut task = Cli::command()
+        .find_subcommand_mut("task")
+        .expect("task command")
+        .clone();
+    let mut task_output = Vec::new();
+    task.write_long_help(&mut task_output)
+        .expect("render task help");
+    let task_help = String::from_utf8(task_output).expect("utf8 task help");
+    assert!(task_help.contains("list"));
+    assert!(!task_help.contains("set-state"));
+    assert!(!task_help.contains("--allow-writes"));
+    assert!(!task_help.contains("--text"));
 }
 
 #[test]
@@ -149,7 +180,7 @@ fn json_output_is_one_envelope_object() {
             "--vault-root".to_string(),
             vault_root.to_string_lossy().to_string(),
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
+        let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");
         let value: serde_json::Value = serde_json::from_str(&output).expect("parse output");
 
@@ -261,18 +292,16 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
                 vec!["tao", "doc", "list", "--vault-root", &vault_root_string],
             ),
             (
-                "doc.write",
+                "search.run",
                 vec![
                     "tao",
-                    "--allow-writes",
-                    "doc",
-                    "write",
+                    "search",
+                    "project",
                     "--vault-root",
                     &vault_root_string,
-                    "--path",
-                    "notes/new.md",
-                    "--content",
-                    "# New\nbody",
+                    "--context",
+                    "--depth",
+                    "2",
                 ],
             ),
             (
@@ -489,23 +518,6 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
                 vec!["tao", "task", "list", "--vault-root", &vault_root_string],
             ),
             (
-                "task.set-state",
-                vec![
-                    "tao",
-                    "--allow-writes",
-                    "task",
-                    "set-state",
-                    "--vault-root",
-                    &vault_root_string,
-                    "--path",
-                    "notes/tasks.md",
-                    "--line",
-                    "1",
-                    "--state",
-                    "done",
-                ],
-            ),
-            (
                 "query.run",
                 vec![
                     "tao",
@@ -536,8 +548,7 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
 
         for (expected_command, args) in scenarios {
             let cli = Cli::parse_from(args);
-            let result =
-                dispatch(cli.command, cli.allow_writes).expect("dispatch json contract scenario");
+            let result = dispatch(cli.command).expect("dispatch json contract scenario");
             let output = render_output(cli.json, &result).expect("render json output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse json output");
             assert_json_contract(&envelope, expected_command);
@@ -607,20 +618,7 @@ fn assert_registry_output_fields_match_payload(
 fn conditional_output_field(tool: &str, field: &str) -> bool {
     matches!(
         (tool, field),
-        ("doc.write", "file_id")
-            | ("doc.write", "index_synced")
-            | ("doc.write", "event_logged")
-            | ("doc.write", "warnings")
-            | ("doc.write", "dry_run")
-            | ("doc.write", "would_write")
-            | ("doc.write", "content_bytes")
-            | ("doc.write", "read_only")
-            | ("task.set-state", "dry_run")
-            | ("task.set-state", "would_update")
-            | ("task.set-state", "before")
-            | ("task.set-state", "after")
-            | ("task.set-state", "read_only")
-            | ("vault.reindex", "dry_run")
+        ("vault.reindex", "dry_run")
             | ("vault.reindex", "would_write")
             | ("graph.audit", "scope")
             | ("graph.audit", "mode")
@@ -637,42 +635,70 @@ fn conditional_output_field(tool: &str, field: &str) -> bool {
 }
 
 #[test]
-fn json_error_envelope_uses_stable_write_disabled_code() {
-    let cli = Cli::parse_from([
-        "tao",
-        "doc",
-        "write",
-        "--vault-root",
-        "/tmp",
-        "--path",
-        "notes/test.md",
-        "--content",
-        "# test",
-    ]);
-    let error = dispatch(cli.command, cli.allow_writes).expect_err("write must fail");
-    let output = render_error_output(&error).expect("render error output");
-    let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
-    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
-    assert!(
-        envelope
-            .as_object()
-            .is_some_and(|object| !object.contains_key("data"))
-    );
-    let error_payload = envelope
-        .get("error")
-        .and_then(JsonValue::as_object)
-        .expect("error object");
-    assert_eq!(
-        error_payload.get("code").and_then(JsonValue::as_str),
-        Some("write_disabled")
-    );
-    assert!(
-        error_payload
-            .get("message")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|message| !message.contains("panicked at")),
-        "error message should not include stack traces"
-    );
+fn removed_write_surface_parse_failures_use_json_error_envelopes() {
+    for args in [
+        vec![
+            "tao",
+            "--allow-writes",
+            "doc",
+            "read",
+            "--path",
+            "notes/test.md",
+        ],
+        vec![
+            "tao",
+            "doc",
+            "write",
+            "--vault-root",
+            "/tmp",
+            "--path",
+            "notes/test.md",
+            "--content",
+            "# test",
+        ],
+        vec![
+            "tao",
+            "task",
+            "set-state",
+            "--vault-root",
+            "/tmp",
+            "--path",
+            "notes/tasks.md",
+            "--line",
+            "1",
+            "--state",
+            "done",
+        ],
+        vec!["tao", "--text", "tools"],
+    ] {
+        let result = run_from_args(args.into_iter().map(std::ffi::OsString::from).collect());
+
+        assert_eq!(result.exit_kind, ExitKind::Failure);
+        assert!(result.stderr.is_none());
+        let stdout = result.stdout.expect("json stdout");
+        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse output");
+        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
+        assert!(
+            envelope
+                .as_object()
+                .is_some_and(|object| !object.contains_key("data"))
+        );
+        let error_payload = envelope
+            .get("error")
+            .and_then(JsonValue::as_object)
+            .expect("error object");
+        assert_eq!(
+            error_payload.get("code").and_then(JsonValue::as_str),
+            Some("invalid_argument")
+        );
+        assert!(
+            error_payload
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|message| !message.contains("panicked at")),
+            "error message should not include stack traces"
+        );
+    }
 }
 
 #[test]
@@ -689,7 +715,7 @@ fn json_error_envelope_uses_stable_query_parse_error_code() {
         "--where",
         "title = 'alpha'",
     ]);
-    let error = dispatch(cli.command, cli.allow_writes).expect_err("parse must fail");
+    let error = dispatch(cli.command).expect_err("parse must fail");
     let output = render_error_output(&error).expect("render error output");
     let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
     let error_payload = envelope
@@ -754,41 +780,6 @@ fn blocked_json_failures_return_exit_code_two() {
 }
 
 #[test]
-fn write_disabled_errors_classify_as_blocked_prerequisites() {
-    with_temp_cwd(|| {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        fs::create_dir_all(vault_root.join("notes")).expect("create notes dir");
-
-        let cli = Cli::parse_from([
-            "tao",
-            "doc",
-            "write",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "notes/test.md",
-            "--content",
-            "# test",
-        ]);
-        let error = dispatch(cli.command, cli.allow_writes).expect_err("write should fail");
-        let classified = classify_cli_error(&error);
-
-        assert_eq!(classified.exit_kind, ExitKind::Blocked);
-        let envelope: JsonValue =
-            serde_json::from_str(&render_error_output(&error).expect("render error"))
-                .expect("parse blocked failure");
-        assert_eq!(
-            envelope
-                .get("error")
-                .and_then(|error| error.get("code"))
-                .and_then(JsonValue::as_str),
-            Some("write_disabled")
-        );
-    });
-}
-
-#[test]
 fn health_blocked_prerequisites_use_error_envelope_and_exit_code_two() {
     let result = run_from_args(
         [
@@ -827,7 +818,7 @@ fn health_blocked_prerequisites_use_error_envelope_and_exit_code_two() {
 #[test]
 fn tools_catalog_includes_version_and_optional_query_parameters() {
     let cli = Cli::parse_from(["tao", "tools"]);
-    let result = dispatch(cli.command, cli.allow_writes).expect("dispatch tools");
+    let result = dispatch(cli.command).expect("dispatch tools");
     let output = render_output(cli.json, &result).expect("render tools");
     let envelope: JsonValue = serde_json::from_str(&output).expect("parse tools output");
 
@@ -898,8 +889,7 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
     );
 
     let legacy_cli = Cli::parse_from(["tao", "tools", "graph.outgoing"]);
-    let legacy_result =
-        dispatch(legacy_cli.command, legacy_cli.allow_writes).expect("dispatch legacy tool detail");
+    let legacy_result = dispatch(legacy_cli.command).expect("dispatch legacy tool detail");
     let legacy_output = render_output(legacy_cli.json, &legacy_result).expect("render legacy tool");
     let legacy_envelope: JsonValue =
         serde_json::from_str(&legacy_output).expect("parse legacy tool output");
@@ -970,106 +960,6 @@ fn parse_failures_default_to_json_error_envelope() {
 }
 
 #[test]
-fn write_commands_are_blocked_without_allow_writes_flag() {
-    with_temp_cwd(|| {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        let notes_dir = vault_root.join("notes");
-        fs::create_dir_all(&vault_root).expect("create vault dir");
-        fs::create_dir_all(&notes_dir).expect("create notes dir");
-        fs::write(notes_dir.join("tasks.md"), "- [ ] blocked task\n").expect("write task fixture");
-
-        let doc_write = Cli::parse_from([
-            "tao",
-            "doc",
-            "write",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "notes/blocked.md",
-            "--content",
-            "# blocked",
-        ]);
-        let doc_write_error = dispatch(doc_write.command, doc_write.allow_writes)
-            .expect_err("doc.write should require --allow-writes");
-        assert!(doc_write_error.to_string().contains("--allow-writes"));
-
-        let task_set_state = Cli::parse_from([
-            "tao",
-            "task",
-            "set-state",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "notes/tasks.md",
-            "--line",
-            "1",
-            "--state",
-            "done",
-        ]);
-        let task_error = dispatch(task_set_state.command, task_set_state.allow_writes)
-            .expect_err("task.set-state should require --allow-writes");
-        assert!(task_error.to_string().contains("--allow-writes"));
-    });
-}
-
-#[test]
-fn task_set_state_rejects_paths_outside_the_vault_boundary() {
-    with_temp_cwd(|| {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        let outside_path = tempdir.path().join("outside.md");
-        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        fs::write(vault_root.join("notes/tasks.md"), "- [ ] inside task\n").expect("write note");
-        fs::write(&outside_path, "- [ ] outside task\n").expect("write outside");
-
-        let absolute = Cli::parse_from([
-            "tao",
-            "--allow-writes",
-            "task",
-            "set-state",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            outside_path.to_string_lossy().as_ref(),
-            "--line",
-            "1",
-            "--state",
-            "done",
-        ]);
-        let absolute_error = dispatch(absolute.command, absolute.allow_writes)
-            .expect_err("absolute path should be rejected");
-        assert!(absolute_error.to_string().contains("vault-relative"));
-        assert_eq!(
-            fs::read_to_string(&outside_path).expect("read outside after absolute attempt"),
-            "- [ ] outside task\n"
-        );
-
-        let parent = Cli::parse_from([
-            "tao",
-            "--allow-writes",
-            "task",
-            "set-state",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "../outside.md",
-            "--line",
-            "1",
-            "--state",
-            "done",
-        ]);
-        let parent_error = dispatch(parent.command, parent.allow_writes)
-            .expect_err("parent traversal should be rejected");
-        assert!(parent_error.to_string().contains("traverse"));
-        assert_eq!(
-            fs::read_to_string(&outside_path).expect("read outside after traversal attempt"),
-            "- [ ] outside task\n"
-        );
-    });
-}
-
-#[test]
 fn vault_commands_use_configured_default_root_when_vault_root_arg_is_omitted() {
     with_temp_cwd(|| {
         let tempdir = tempfile::tempdir().expect("create tempdir");
@@ -1092,7 +982,7 @@ read_only = true
         .expect("write root config");
 
         let cli = Cli::parse_from(["tao", "vault", "stats"]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
+        let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let resolved_root = envelope
@@ -1111,65 +1001,7 @@ read_only = true
 }
 
 #[test]
-fn dry_run_write_commands_validate_without_allow_writes_or_mutation() {
-    with_temp_cwd(|| {
-        let tempdir = tempfile::tempdir().expect("create tempdir");
-        let vault_root = tempdir.path().join("vault");
-        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
-        let tasks_path = vault_root.join("notes/tasks.md");
-        fs::write(&tasks_path, "- [ ] blocked task\n").expect("write task fixture");
-
-        let doc_write = Cli::parse_from([
-            "tao",
-            "doc",
-            "write",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "notes/dry-run.md",
-            "--content",
-            "# dry run",
-            "--dry-run",
-        ]);
-        let result = dispatch(doc_write.command, doc_write.allow_writes)
-            .expect("doc.write dry-run should not require --allow-writes");
-        assert_eq!(result.command, "doc.write");
-        assert_eq!(
-            result.args.get("dry_run").and_then(JsonValue::as_bool),
-            Some(true)
-        );
-        assert!(!vault_root.join("notes/dry-run.md").exists());
-
-        let task_set_state = Cli::parse_from([
-            "tao",
-            "task",
-            "set-state",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-            "--path",
-            "notes/tasks.md",
-            "--line",
-            "1",
-            "--state",
-            "done",
-            "--dry-run",
-        ]);
-        let result = dispatch(task_set_state.command, task_set_state.allow_writes)
-            .expect("task.set-state dry-run should not require --allow-writes");
-        assert_eq!(result.command, "task.set-state");
-        assert_eq!(
-            result.args.get("dry_run").and_then(JsonValue::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            fs::read_to_string(&tasks_path).expect("read task fixture"),
-            "- [ ] blocked task\n"
-        );
-    });
-}
-
-#[test]
-fn write_commands_are_enabled_when_read_only_policy_is_disabled_in_config() {
+fn read_only_policy_does_not_reenable_removed_public_write_commands() {
     with_temp_cwd(|| {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().join("vault");
@@ -1190,22 +1022,220 @@ read_only = false
         )
         .expect("write root config");
 
+        let doc_result = run_from_args(
+            [
+                "tao",
+                "doc",
+                "write",
+                "--path",
+                "notes/policy-write.md",
+                "--content",
+                "# policy",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        );
+        assert_eq!(doc_result.exit_kind, ExitKind::Failure);
+        assert!(
+            !vault_root.join("notes/policy-write.md").exists(),
+            "removed public write command must not create vault content"
+        );
+
+        let task_result = run_from_args(
+            [
+                "tao",
+                "task",
+                "set-state",
+                "--path",
+                "notes/a.md",
+                "--line",
+                "1",
+                "--state",
+                "done",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+        );
+        assert_eq!(task_result.exit_kind, ExitKind::Failure);
+
+        let tools = Cli::parse_from(["tao", "tools"]);
+        let tools_output = render_output(
+            tools.json,
+            &dispatch(tools.command).expect("dispatch tools"),
+        )
+        .expect("render tools");
+        let envelope: JsonValue = serde_json::from_str(&tools_output).expect("parse tools");
+        let names = envelope
+            .get("data")
+            .and_then(|data| data.get("tools"))
+            .and_then(JsonValue::as_array)
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(JsonValue::as_str))
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"doc.write"));
+        assert!(!names.contains(&"task.set-state"));
+    });
+}
+
+#[test]
+fn search_context_ranks_canonical_entity_note_first() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
         let cli = Cli::parse_from([
             "tao",
-            "doc",
-            "write",
-            "--path",
-            "notes/policy-write.md",
-            "--content",
-            "# policy",
+            "search",
+            "jordan hart",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--context",
+            "--depth",
+            "2",
+            "--limit",
+            "10",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch doc write");
-        let output = render_output(cli.json, &result).expect("render output");
-        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
-        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(true));
+        let output = render_output(cli.json, &dispatch(cli.command).expect("dispatch search"))
+            .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let data = envelope.get("data").expect("data");
+        let first_candidate = data
+            .get("candidates")
+            .and_then(JsonValue::as_array)
+            .and_then(|items| items.first())
+            .expect("first candidate");
+        assert_eq!(
+            first_candidate.get("path").and_then(JsonValue::as_str),
+            Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+        );
+        assert_eq!(
+            data.get("context")
+                .and_then(|context| context.get("root"))
+                .and_then(|root| root.get("path"))
+                .and_then(JsonValue::as_str),
+            Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+        );
+    });
+}
+
+#[test]
+fn search_files_kind_finds_non_markdown_inventory_matches() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "invoice",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--kind",
+            "files",
+            "--scope",
+            "WORK/012-FINANCE",
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(
+            cli.json,
+            &dispatch(cli.command).expect("dispatch file search"),
+        )
+        .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let files = envelope
+            .get("data")
+            .and_then(|data| data.get("files"))
+            .and_then(JsonValue::as_array)
+            .expect("files");
+        let invoice = files
+            .iter()
+            .find(|file| {
+                file.get("path")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|path| path.ends_with("2026-02-15-invoice-jordan-hart.pdf"))
+            })
+            .expect("invoice pdf match");
+        assert_eq!(
+            invoice.get("extension").and_then(JsonValue::as_str),
+            Some("pdf")
+        );
+        assert_eq!(
+            invoice.get("is_markdown").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+    });
+}
+
+#[test]
+fn search_path_context_returns_links_walk_timeline_and_attachments() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--path",
+            "WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md",
+            "--context",
+            "--depth",
+            "2",
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(
+            cli.json,
+            &dispatch(cli.command).expect("dispatch path context"),
+        )
+        .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let context = envelope
+            .get("data")
+            .and_then(|data| data.get("context"))
+            .expect("context");
         assert!(
-            vault_root.join("notes/policy-write.md").exists(),
-            "write should succeed when read_only=false"
+            context
+                .get("links")
+                .and_then(|links| links.get("outgoing"))
+                .and_then(JsonValue::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+        );
+        assert!(
+            context
+                .get("links")
+                .and_then(|links| links.get("incoming"))
+                .and_then(JsonValue::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+        );
+        assert!(
+            context
+                .get("walk")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+        );
+        assert!(
+            context
+                .get("timeline")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+        );
+        assert!(
+            context
+                .get("attachments")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|rows| !rows.is_empty())
         );
     });
 }
@@ -1234,7 +1264,7 @@ fn query_docs_select_projects_requested_columns_only() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1242,7 +1272,7 @@ fn query_docs_select_projects_requested_columns_only() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1260,7 +1290,7 @@ fn query_docs_select_projects_requested_columns_only() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let columns = envelope
@@ -1313,7 +1343,7 @@ fn query_docs_where_uses_unselected_title_field() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1321,7 +1351,7 @@ fn query_docs_where_uses_unselected_title_field() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1341,7 +1371,7 @@ fn query_docs_where_uses_unselected_title_field() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let rows = envelope
@@ -1356,6 +1386,54 @@ fn query_docs_where_uses_unselected_title_field() {
             Some("notes/projects/alpha.md")
         );
         assert!(!row.contains_key("title"));
+    });
+}
+
+#[test]
+fn query_docs_where_only_does_not_require_text_query() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+        fs::write(
+            vault_root.join("notes/projects/alpha.md"),
+            "# Alpha\nroadmap",
+        )
+        .expect("write alpha");
+        fs::write(vault_root.join("notes/projects/beta.md"), "# Beta\nroadmap")
+            .expect("write beta");
+
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "query",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--from",
+            "docs",
+            "--where",
+            "title == 'alpha'",
+            "--select",
+            "path,title",
+            "--limit",
+            "10",
+            "--offset",
+            "0",
+        ]);
+        let result = dispatch(cli.command).expect("dispatch docs query");
+        let output = render_output(cli.json, &result).expect("render output");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+        let rows = envelope
+            .get("data")
+            .and_then(|args| args.get("rows"))
+            .and_then(JsonValue::as_array)
+            .expect("rows array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("path").and_then(JsonValue::as_str),
+            Some("notes/projects/alpha.md")
+        );
     });
 }
 
@@ -1376,7 +1454,7 @@ fn query_docs_sort_uses_unselected_title_field() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1384,7 +1462,7 @@ fn query_docs_sort_uses_unselected_title_field() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1404,7 +1482,7 @@ fn query_docs_sort_uses_unselected_title_field() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let rows = envelope
@@ -1458,7 +1536,7 @@ fn query_docs_where_and_sort_are_applied_deterministically() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1466,7 +1544,7 @@ fn query_docs_where_and_sort_are_applied_deterministically() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1488,7 +1566,7 @@ fn query_docs_where_and_sort_are_applied_deterministically() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let rows = envelope
@@ -1543,7 +1621,7 @@ fn query_docs_where_and_sort_use_internal_fields_when_select_omits_them() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1551,7 +1629,7 @@ fn query_docs_where_and_sort_use_internal_fields_when_select_omits_them() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1573,7 +1651,7 @@ fn query_docs_where_and_sort_use_internal_fields_when_select_omits_them() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let rows = envelope
@@ -1628,7 +1706,7 @@ fn query_docs_where_scans_full_match_set_before_post_filtering() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1636,7 +1714,7 @@ fn query_docs_where_scans_full_match_set_before_post_filtering() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1656,7 +1734,7 @@ fn query_docs_where_scans_full_match_set_before_post_filtering() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope
@@ -1700,7 +1778,7 @@ fn query_docs_sort_scans_full_match_set_before_pagination() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1708,7 +1786,7 @@ fn query_docs_sort_scans_full_match_set_before_pagination() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1728,7 +1806,7 @@ fn query_docs_sort_scans_full_match_set_before_pagination() {
             "--offset",
             "1000",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch docs query");
+        let result = dispatch(cli.command).expect("dispatch docs query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope
@@ -1777,7 +1855,7 @@ fn query_docs_explain_returns_plan_without_rows_when_not_executing() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1785,7 +1863,7 @@ fn query_docs_explain_returns_plan_without_rows_when_not_executing() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1802,7 +1880,7 @@ fn query_docs_explain_returns_plan_without_rows_when_not_executing() {
             "path:asc",
             "--explain",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch explain query");
+        let result = dispatch(cli.command).expect("dispatch explain query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope
@@ -1875,7 +1953,7 @@ priority: 2
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1883,7 +1961,7 @@ priority: 2
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1903,7 +1981,7 @@ priority: 2
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base query");
+        let result = dispatch(cli.command).expect("dispatch base query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope
@@ -1922,6 +2000,83 @@ priority: 2
                 .and_then(JsonValue::as_str)
                 == Some("active")
         }));
+    });
+}
+
+#[test]
+fn query_base_text_query_filters_base_row_values() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes/projects")).expect("create notes");
+        fs::create_dir_all(vault_root.join("views")).expect("create views");
+
+        fs::write(
+            vault_root.join("views/projects.base"),
+            r#"
+views:
+  - name: AllProjects
+    type: table
+    source: notes/projects
+    columns:
+      - title
+      - status
+      - client
+"#,
+        )
+        .expect("write base");
+        fs::write(
+            vault_root.join("notes/projects/a.md"),
+            r#"---
+status: active
+client: Northstar Transit Lab
+---
+# A
+"#,
+        )
+        .expect("write a");
+        fs::write(
+            vault_root.join("notes/projects/b.md"),
+            r#"---
+status: active
+client: Harbor Grid Studio
+---
+# B
+"#,
+        )
+        .expect("write b");
+
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "query",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--from",
+            "base:views/projects.base",
+            "--view-name",
+            "AllProjects",
+            "--query",
+            "northstar",
+            "--limit",
+            "10",
+            "--offset",
+            "0",
+        ]);
+        let result = dispatch(cli.command).expect("dispatch base query");
+        let output = render_output(cli.json, &result).expect("render output");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
+        let rows = envelope
+            .get("data")
+            .and_then(|args| args.get("rows"))
+            .and_then(JsonValue::as_array)
+            .expect("rows array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("file_path").and_then(JsonValue::as_str),
+            Some("notes/projects/a.md")
+        );
     });
 }
 
@@ -1962,7 +2117,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -1970,7 +2125,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -1988,7 +2143,7 @@ views:
             "--offset",
             "650",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base query");
+        let result = dispatch(cli.command).expect("dispatch base query");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope
@@ -2056,7 +2211,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2064,7 +2219,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -2077,7 +2232,7 @@ views:
             "--view-name",
             "Table",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base view");
+        let result = dispatch(cli.command).expect("dispatch base view");
         let output = render_output(cli.json, &result).expect("render base view");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope.get("data").expect("data");
@@ -2139,7 +2294,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2147,7 +2302,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -2156,7 +2311,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base list");
+        let result = dispatch(cli.command).expect("dispatch base list");
         let output = render_output(cli.json, &result).expect("render base list");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope.get("data").expect("data");
@@ -2236,7 +2391,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2244,7 +2399,7 @@ views:
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -2255,7 +2410,7 @@ views:
             "--path-or-id",
             "views/invalid.base",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch base validate");
+        let result = dispatch(cli.command).expect("dispatch base validate");
         let output = render_output(cli.json, &result).expect("render base validate");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope.get("data").expect("data");
@@ -2347,7 +2502,7 @@ links fixture
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2355,7 +2510,7 @@ links fixture
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cases = vec![
             (
@@ -2423,8 +2578,7 @@ links fixture
         ];
 
         for (scope, cli, expected_total) in cases {
-            let result =
-                dispatch(cli.command, cli.allow_writes).expect("dispatch matrix query case");
+            let result = dispatch(cli.command).expect("dispatch matrix query case");
             let output = render_output(cli.json, &result).expect("render matrix output");
             let envelope: JsonValue = serde_json::from_str(&output).expect("parse matrix output");
             let total = envelope
@@ -2458,7 +2612,7 @@ fn query_graph_path_returns_outgoing_and_backlinks_panels() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2466,7 +2620,7 @@ fn query_graph_path_returns_outgoing_and_backlinks_panels() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -2482,7 +2636,7 @@ fn query_graph_path_returns_outgoing_and_backlinks_panels() {
             "--offset",
             "0",
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch graph query");
+        let result = dispatch(cli.command).expect("dispatch graph query");
         let output = render_output(cli.json, &result).expect("render graph query");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope.get("data").expect("query args");
@@ -2529,7 +2683,7 @@ fn json_stream_docs_query_uses_streaming_envelope() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2537,7 +2691,7 @@ fn json_stream_docs_query_uses_streaming_envelope() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let cli = Cli::parse_from([
             "tao",
@@ -2600,7 +2754,7 @@ fn graph_neighbors_supports_direction_filtering() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2608,7 +2762,7 @@ fn graph_neighbors_supports_direction_filtering() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let neighbors = Cli::parse_from([
             "tao",
@@ -2623,7 +2777,7 @@ fn graph_neighbors_supports_direction_filtering() {
         ]);
         let output = render_output(
             neighbors.json,
-            &dispatch(neighbors.command, neighbors.allow_writes).expect("dispatch neighbors"),
+            &dispatch(neighbors.command).expect("dispatch neighbors"),
         )
         .expect("render neighbors");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse neighbors");
@@ -2662,7 +2816,7 @@ fn graph_path_reports_found_not_found_and_guardrail_errors() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2670,7 +2824,7 @@ fn graph_path_reports_found_not_found_and_guardrail_errors() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let found = Cli::parse_from([
             "tao",
@@ -2685,7 +2839,7 @@ fn graph_path_reports_found_not_found_and_guardrail_errors() {
         ]);
         let found_output = render_output(
             found.json,
-            &dispatch(found.command, found.allow_writes).expect("dispatch found path"),
+            &dispatch(found.command).expect("dispatch found path"),
         )
         .expect("render found path");
         let found_envelope: JsonValue =
@@ -2711,7 +2865,7 @@ fn graph_path_reports_found_not_found_and_guardrail_errors() {
         ]);
         let missing_output = render_output(
             missing.json,
-            &dispatch(missing.command, missing.allow_writes).expect("dispatch missing path"),
+            &dispatch(missing.command).expect("dispatch missing path"),
         )
         .expect("render missing path");
         let missing_envelope: JsonValue =
@@ -2737,8 +2891,7 @@ fn graph_path_reports_found_not_found_and_guardrail_errors() {
             "--max-nodes",
             "0",
         ]);
-        let error =
-            dispatch(guardrail.command, guardrail.allow_writes).expect_err("guardrail should fail");
+        let error = dispatch(guardrail.command).expect_err("guardrail should fail");
         assert!(
             error
                 .to_string()
@@ -2764,7 +2917,7 @@ fn graph_components_supports_weak_and_strong_modes() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2772,7 +2925,7 @@ fn graph_components_supports_weak_and_strong_modes() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let weak = Cli::parse_from([
             "tao",
@@ -2786,7 +2939,7 @@ fn graph_components_supports_weak_and_strong_modes() {
         ]);
         let weak_output = render_output(
             weak.json,
-            &dispatch(weak.command, weak.allow_writes).expect("dispatch weak components"),
+            &dispatch(weak.command).expect("dispatch weak components"),
         )
         .expect("render weak components");
         let weak_json: JsonValue = serde_json::from_str(&weak_output).expect("parse weak json");
@@ -2813,7 +2966,7 @@ fn graph_components_supports_weak_and_strong_modes() {
         ]);
         let strong_output = render_output(
             strong.json,
-            &dispatch(strong.command, strong.allow_writes).expect("dispatch strong components"),
+            &dispatch(strong.command).expect("dispatch strong components"),
         )
         .expect("render strong components");
         let strong_json: JsonValue =
@@ -2857,7 +3010,7 @@ fn taoignore_removes_ignored_paths_from_graph_audits_after_reindex() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let floating = Cli::parse_from([
             "tao",
@@ -2874,7 +3027,7 @@ fn taoignore_removes_ignored_paths_from_graph_audits_after_reindex() {
         ]);
         let floating_output = render_output(
             floating.json,
-            &dispatch(floating.command, floating.allow_writes).expect("dispatch floating audit"),
+            &dispatch(floating.command).expect("dispatch floating audit"),
         )
         .expect("render floating audit");
         let floating_json: JsonValue =
@@ -2900,8 +3053,7 @@ fn taoignore_removes_ignored_paths_from_graph_audits_after_reindex() {
         ]);
         let components_output = render_output(
             components.json,
-            &dispatch(components.command, components.allow_writes)
-                .expect("dispatch components audit"),
+            &dispatch(components.command).expect("dispatch components audit"),
         )
         .expect("render components audit");
         let components_json: JsonValue =
@@ -2944,7 +3096,7 @@ fn graph_walk_can_include_folder_overlay_edges() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -2952,7 +3104,7 @@ fn graph_walk_can_include_folder_overlay_edges() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let plain_walk = Cli::parse_from([
             "tao",
@@ -2967,7 +3119,7 @@ fn graph_walk_can_include_folder_overlay_edges() {
         ]);
         let plain_output = render_output(
             plain_walk.json,
-            &dispatch(plain_walk.command, plain_walk.allow_writes).expect("dispatch plain walk"),
+            &dispatch(plain_walk.command).expect("dispatch plain walk"),
         )
         .expect("render plain walk");
         let plain_json: JsonValue = serde_json::from_str(&plain_output).expect("parse plain walk");
@@ -2995,7 +3147,7 @@ fn graph_walk_can_include_folder_overlay_edges() {
         ]);
         let folder_output = render_output(
             folder_walk.json,
-            &dispatch(folder_walk.command, folder_walk.allow_writes).expect("dispatch folder walk"),
+            &dispatch(folder_walk.command).expect("dispatch folder walk"),
         )
         .expect("render folder walk");
         let folder_json: JsonValue =
@@ -3031,7 +3183,7 @@ fn graph_unresolved_includes_reason_and_source_fields() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -3039,7 +3191,7 @@ fn graph_unresolved_includes_reason_and_source_fields() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let unresolved = Cli::parse_from([
             "tao",
@@ -3054,7 +3206,7 @@ fn graph_unresolved_includes_reason_and_source_fields() {
         ]);
         let output = render_output(
             unresolved.json,
-            &dispatch(unresolved.command, unresolved.allow_writes).expect("dispatch unresolved"),
+            &dispatch(unresolved.command).expect("dispatch unresolved"),
         )
         .expect("render unresolved");
         let payload: JsonValue = serde_json::from_str(&output).expect("parse unresolved");
@@ -3103,7 +3255,7 @@ fn graph_snapshot_contracts_match_golden_outputs() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -3111,14 +3263,11 @@ fn graph_snapshot_contracts_match_golden_outputs() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let assert_snapshot = |expected_name: &str, cli: Cli| {
-            let rendered = render_output(
-                cli.json,
-                &dispatch(cli.command, cli.allow_writes).expect("dispatch"),
-            )
-            .expect("render output");
+            let rendered = render_output(cli.json, &dispatch(cli.command).expect("dispatch"))
+                .expect("render output");
             let actual: JsonValue = serde_json::from_str(&rendered).expect("parse json envelope");
             let actual_args = actual.get("data").expect("data");
             let expected_raw = fs::read_to_string(expected_root.join(expected_name))
@@ -3248,7 +3397,7 @@ fn graph_outgoing_normalizes_note_path_input_before_lookup() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -3256,7 +3405,7 @@ fn graph_outgoing_normalizes_note_path_input_before_lookup() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let outgoing = Cli::parse_from([
             "tao",
@@ -3269,7 +3418,7 @@ fn graph_outgoing_normalizes_note_path_input_before_lookup() {
         ]);
         let output = render_output(
             outgoing.json,
-            &dispatch(outgoing.command, outgoing.allow_writes).expect("dispatch outgoing"),
+            &dispatch(outgoing.command).expect("dispatch outgoing"),
         )
         .expect("render outgoing");
         let payload: JsonValue = serde_json::from_str(&output).expect("parse outgoing");
@@ -3306,7 +3455,7 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -3314,7 +3463,7 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         fs::write(vault_root.join("notes/b.md"), "# B").expect("write drifted file");
 
@@ -3326,7 +3475,7 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
         ]);
         let health_output = render_output(
             health.json,
-            &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            &dispatch(health.command).expect("dispatch health"),
         )
         .expect("render health");
         let health_payload: JsonValue = serde_json::from_str(&health_output).expect("parse health");
@@ -3372,7 +3521,7 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
         ]);
         let stats_output = render_output(
             stats.json,
-            &dispatch(stats.command, stats.allow_writes).expect("dispatch stats"),
+            &dispatch(stats.command).expect("dispatch stats"),
         )
         .expect("render stats");
         let stats_payload: JsonValue = serde_json::from_str(&stats_output).expect("parse stats");
@@ -3410,11 +3559,8 @@ fn health_and_vault_stats_report_stale_link_resolution_version() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        let open_output = render_output(
-            open.json,
-            &dispatch(open.command, open.allow_writes).expect("dispatch open"),
-        )
-        .expect("render open");
+        let open_output = render_output(open.json, &dispatch(open.command).expect("dispatch open"))
+            .expect("render open");
         let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
         let db_path = open_payload
             .get("data")
@@ -3430,7 +3576,7 @@ fn health_and_vault_stats_report_stale_link_resolution_version() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let connection = Connection::open(&db_path).expect("open db");
         IndexStateRepository::upsert(
@@ -3450,7 +3596,7 @@ fn health_and_vault_stats_report_stale_link_resolution_version() {
         ]);
         let health_output = render_output(
             health.json,
-            &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            &dispatch(health.command).expect("dispatch health"),
         )
         .expect("render health");
         let health_payload: JsonValue = serde_json::from_str(&health_output).expect("parse health");
@@ -3488,7 +3634,7 @@ fn health_and_vault_stats_report_stale_link_resolution_version() {
         ]);
         let stats_output = render_output(
             stats.json,
-            &dispatch(stats.command, stats.allow_writes).expect("dispatch stats"),
+            &dispatch(stats.command).expect("dispatch stats"),
         )
         .expect("render stats");
         let stats_payload: JsonValue = serde_json::from_str(&stats_output).expect("parse stats");
@@ -3532,11 +3678,8 @@ fn vault_reindex_performs_full_rebuild_when_link_resolution_version_is_stale() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        let open_output = render_output(
-            open.json,
-            &dispatch(open.command, open.allow_writes).expect("dispatch open"),
-        )
-        .expect("render open");
+        let open_output = render_output(open.json, &dispatch(open.command).expect("dispatch open"))
+            .expect("render open");
         let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
         let db_path = open_payload
             .get("data")
@@ -3552,7 +3695,7 @@ fn vault_reindex_performs_full_rebuild_when_link_resolution_version_is_stale() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command.clone(), reindex.allow_writes).expect("initial reindex");
+        dispatch(reindex.command.clone()).expect("initial reindex");
 
         let connection = Connection::open(&db_path).expect("open db");
         let source = FilesRepository::get_by_normalized_path(
@@ -3593,7 +3736,7 @@ fn vault_reindex_performs_full_rebuild_when_link_resolution_version_is_stale() {
 
         let reindex_output = render_output(
             reindex.json,
-            &dispatch(reindex.command, reindex.allow_writes).expect("dispatch reindex"),
+            &dispatch(reindex.command).expect("dispatch reindex"),
         )
         .expect("render reindex");
         let reindex_payload: JsonValue =
@@ -3642,7 +3785,7 @@ fn vault_reindex_performs_full_rebuild_when_link_resolution_version_is_stale() {
         ]);
         let outgoing_output = render_output(
             outgoing.json,
-            &dispatch(outgoing.command, outgoing.allow_writes).expect("dispatch outgoing"),
+            &dispatch(outgoing.command).expect("dispatch outgoing"),
         )
         .expect("render outgoing");
         let outgoing_payload: JsonValue =
@@ -3681,11 +3824,8 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        let open_output = render_output(
-            open.json,
-            &dispatch(open.command, open.allow_writes).expect("dispatch open"),
-        )
-        .expect("render open");
+        let open_output = render_output(open.json, &dispatch(open.command).expect("dispatch open"))
+            .expect("render open");
         let open_payload: JsonValue = serde_json::from_str(&open_output).expect("parse open");
         let db_path = open_payload
             .get("data")
@@ -3701,7 +3841,7 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command.clone(), reindex.allow_writes).expect("initial reindex");
+        dispatch(reindex.command.clone()).expect("initial reindex");
 
         let connection = Connection::open(&db_path).expect("open db");
         let bogus_absolute = vault_root
@@ -3752,7 +3892,7 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
         ]);
         let health_output = render_output(
             health.json,
-            &dispatch(health.command, health.allow_writes).expect("dispatch health"),
+            &dispatch(health.command).expect("dispatch health"),
         )
         .expect("render health");
         let health_payload: JsonValue = serde_json::from_str(&health_output).expect("parse health");
@@ -3767,7 +3907,7 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
 
         let reindex_output = render_output(
             reindex.json,
-            &dispatch(reindex.command, reindex.allow_writes).expect("dispatch reindex"),
+            &dispatch(reindex.command).expect("dispatch reindex"),
         )
         .expect("render reindex");
         let reindex_payload: JsonValue =
@@ -4005,18 +4145,24 @@ fn daemon_execution_policy_routes_diagnostics_reads_and_mutations() {
         DaemonExecutionPolicy::CachedReadWithRefresh
     );
 
-    let doc_write = Commands::Doc {
-        command: DocCommands::Write(NotePutArgs {
-            vault_root: Some("/tmp".to_string()),
-            db_path: None,
-            path: "notes/x.md".to_string(),
-            content: "# x".to_string(),
-            dry_run: false,
-        }),
-    };
+    let doc_write = Commands::Search(SearchArgs {
+        query: Some("project".to_string()),
+        path: None,
+        kind: "auto".to_string(),
+        scope: None,
+        ext: Vec::new(),
+        context: false,
+        depth: 1,
+        limit: 10,
+        include_content: false,
+        include_pii: true,
+        no_pii: false,
+        vault_root: Some("/tmp".to_string()),
+        db_path: None,
+    });
     assert_eq!(
         daemon_execution_policy(&doc_write),
-        DaemonExecutionPolicy::ExplicitWork
+        DaemonExecutionPolicy::CachedReadWithRefresh
     );
 }
 
@@ -4072,7 +4218,7 @@ fn vault_open_creates_default_db_when_db_path_is_omitted() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
+        let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
@@ -4106,7 +4252,7 @@ fn vault_open_respects_db_path_override() {
             "--db-path",
             custom_db.to_string_lossy().as_ref(),
         ]);
-        let result = dispatch(cli.command, cli.allow_writes).expect("dispatch");
+        let result = dispatch(cli.command).expect("dispatch");
         let output = render_output(cli.json, &result).expect("render output");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
 
@@ -4134,6 +4280,104 @@ fn with_temp_cwd<T>(operation: impl FnOnce() -> T) -> T {
     result
 }
 
+fn seed_search_fixture(vault_root: &Path) {
+    let contacts_dir = vault_root.join("WORK/013-RELATIONS/013-CON-contacts");
+    let companies_dir = vault_root.join("WORK/013-RELATIONS/013-COM-companies");
+    let meetings_dir = vault_root.join("WORK/013-RELATIONS/013-MTG-meetings");
+    let finance_dir = vault_root.join("WORK/012-FINANCE/invoices");
+    let views_dir = vault_root.join("views");
+    fs::create_dir_all(&contacts_dir).expect("create contacts");
+    fs::create_dir_all(&companies_dir).expect("create companies");
+    fs::create_dir_all(&meetings_dir).expect("create meetings");
+    fs::create_dir_all(&finance_dir).expect("create finance");
+    fs::create_dir_all(&views_dir).expect("create views");
+
+    fs::write(
+        contacts_dir.join("jordan_hart.md"),
+        r#"---
+entity: Jordan Hart
+kind: contact
+company: "[[WORK/013-RELATIONS/013-COM-companies/northstar_transit_lab.md]]"
+invoice_date: 2026-02-15
+---
+# Jordan Hart
+
+Fictional contact note for graph-aware search tests.
+
+Company: [[WORK/013-RELATIONS/013-COM-companies/northstar_transit_lab.md]]
+Meeting: [[WORK/013-RELATIONS/013-MTG-meetings/2026-02-14-jordan-hart-intro.md]]
+Invoice: [[WORK/012-FINANCE/invoices/2026-02-15-invoice-jordan-hart.pdf]]
+
+- [ ] Send invoice context packet
+"#,
+    )
+    .expect("write contact");
+    fs::write(
+        companies_dir.join("northstar_transit_lab.md"),
+        r#"---
+entity: Northstar Transit Lab
+kind: company
+---
+# Northstar Transit Lab
+
+Fictional company record linked from [[WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md]].
+"#,
+    )
+    .expect("write company");
+    fs::write(
+        meetings_dir.join("2026-02-14-jordan-hart-intro.md"),
+        r#"---
+date: 2026-02-14
+attendees:
+  - "[[WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md]]"
+---
+# Jordan Hart Intro
+
+Meeting note linking back to [[WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md]].
+"#,
+    )
+    .expect("write meeting");
+    fs::write(
+        finance_dir.join("2026-02-15-invoice-jordan-hart.pdf"),
+        "fictional invoice pdf fixture",
+    )
+    .expect("write invoice");
+    fs::write(
+        views_dir.join("contacts.base"),
+        r#"views:
+  - name: Contacts
+    type: table
+    source: WORK/013-RELATIONS/013-CON-contacts
+    columns:
+      - title
+      - entity
+      - kind
+      - company
+      - invoice_date
+"#,
+    )
+    .expect("write contacts base");
+}
+
+fn open_and_reindex_fixture(vault_root: &Path) {
+    let open = Cli::parse_from([
+        "tao",
+        "vault",
+        "open",
+        "--vault-root",
+        vault_root.to_string_lossy().as_ref(),
+    ]);
+    dispatch(open.command).expect("open vault");
+    let reindex = Cli::parse_from([
+        "tao",
+        "vault",
+        "reindex",
+        "--vault-root",
+        vault_root.to_string_lossy().as_ref(),
+    ]);
+    dispatch(reindex.command).expect("reindex vault");
+}
+
 #[test]
 fn daemon_refresh_uses_filesystem_monitor_to_pick_up_external_note_changes() {
     with_temp_cwd(|| {
@@ -4151,7 +4395,7 @@ fn daemon_refresh_uses_filesystem_monitor_to_pick_up_external_note_changes() {
 
         let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
         maybe_refresh_daemon_state(&command, &mut runtime).expect("prime daemon refresh");
-        let first = dispatch_with_runtime(command.clone(), false, &mut runtime)
+        let first = dispatch_with_runtime(command.clone(), &mut runtime)
             .expect("dispatch first daemon list");
         assert_eq!(first.args.get("total").and_then(JsonValue::as_u64), Some(1));
 
@@ -4192,8 +4436,8 @@ fn daemon_refresh_uses_filesystem_monitor_to_pick_up_external_note_changes() {
             );
         }
 
-        let second = dispatch_with_runtime(command, false, &mut runtime)
-            .expect("dispatch refreshed daemon list");
+        let second =
+            dispatch_with_runtime(command, &mut runtime).expect("dispatch refreshed daemon list");
         assert_eq!(
             second.args.get("total").and_then(JsonValue::as_u64),
             Some(2)
@@ -4216,7 +4460,7 @@ fn daemon_first_observation_syncs_existing_stale_index_before_cached_reads() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
         let reindex = Cli::parse_from([
             "tao",
             "vault",
@@ -4224,7 +4468,7 @@ fn daemon_first_observation_syncs_existing_stale_index_before_cached_reads() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         fs::write(vault_root.join("notes/b.md"), "# B").expect("write stale change");
 
@@ -4243,8 +4487,8 @@ fn daemon_first_observation_syncs_existing_stale_index_before_cached_reads() {
             "first daemon observation should sync stale indexed state"
         );
 
-        let listed = dispatch_with_runtime(command, false, &mut runtime)
-            .expect("dispatch synced daemon list");
+        let listed =
+            dispatch_with_runtime(command, &mut runtime).expect("dispatch synced daemon list");
         assert_eq!(
             listed.args.get("total").and_then(JsonValue::as_u64),
             Some(2)
@@ -4267,7 +4511,7 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(open.command, open.allow_writes).expect("open vault");
+        dispatch(open.command).expect("open vault");
 
         let reindex = Cli::parse_from([
             "tao",
@@ -4276,7 +4520,7 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
         ]);
-        dispatch(reindex.command, reindex.allow_writes).expect("reindex vault");
+        dispatch(reindex.command).expect("reindex vault");
 
         let health_command = Commands::Health(VaultPathArgs {
             vault_root: Some(vault_root.to_string_lossy().to_string()),
@@ -4302,7 +4546,7 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
             );
         }
 
-        let first = dispatch_with_runtime(health_command.clone(), false, &mut runtime)
+        let first = dispatch_with_runtime(health_command.clone(), &mut runtime)
             .expect("dispatch daemon health");
         let first_timestamp = first
             .args
@@ -4355,7 +4599,7 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
 
         fs::write(vault_root.join("notes/b.md"), "# B").expect("write b");
 
-        let second = dispatch_with_runtime(health_command, false, &mut runtime)
+        let second = dispatch_with_runtime(health_command, &mut runtime)
             .expect("dispatch daemon health after drift");
         assert_eq!(
             second.args.get("status").and_then(JsonValue::as_str),

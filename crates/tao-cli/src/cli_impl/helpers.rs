@@ -1,18 +1,5 @@
 use super::*;
 
-pub(crate) fn ensure_writes_enabled(
-    allow_writes: bool,
-    read_only: bool,
-    command: &str,
-) -> Result<()> {
-    if allow_writes || !read_only {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "{command} is disabled by default; pass --allow-writes or set [security].read_only=false to enable vault content mutations"
-    ))
-}
-
 pub(crate) fn paginate_json_items(
     items: Vec<JsonValue>,
     limit: u32,
@@ -131,48 +118,9 @@ pub(crate) fn collect_json_string_tokens(value: &JsonValue, out: &mut Vec<String
     }
 }
 
-pub(crate) fn update_task_line_state(line: &str, state: &str) -> Result<String> {
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-    let indent = &line[..indent_len];
-    let content = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-        rest
-    } else if let Some(rest) = trimmed
-        .strip_prefix("- [x] ")
-        .or_else(|| trimmed.strip_prefix("- [X] "))
-    {
-        rest
-    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
-        rest
-    } else {
-        return Err(anyhow!("line does not contain a markdown checkbox task"));
-    };
-    let marker = match state.to_ascii_lowercase().as_str() {
-        "open" => "[ ]",
-        "done" => "[x]",
-        "cancelled" => "[-]",
-        _ => return Err(anyhow!("unsupported task state '{}'", state)),
-    };
-    Ok(format!("{indent}- {marker} {content}"))
-}
-
 pub(crate) fn normalize_relative_note_path_arg(path: &str, flag: &str) -> Result<String> {
     let normalized = path.trim().trim_matches('/').replace('\\', "/");
     validate_relative_vault_path(&normalized)
         .map_err(|source| anyhow!("invalid {flag} '{}': {source}", path))?;
     Ok(normalized)
-}
-
-pub(crate) fn resolve_existing_vault_note_path(
-    resolved: &ResolvedVaultPathArgs,
-    path: &str,
-) -> Result<PathBuf> {
-    validate_relative_vault_path(path).map_err(|source| anyhow!(source.to_string()))?;
-    let canonicalizer =
-        PathCanonicalizationService::new(&resolved.vault_root, resolved.case_policy)
-            .map_err(|source| anyhow!("create vault canonicalizer failed: {source}"))?;
-    canonicalizer
-        .canonicalize(Path::new(path))
-        .map(|canonical| canonical.absolute)
-        .map_err(|source| anyhow!("canonicalize vault note path failed: {source}"))
 }

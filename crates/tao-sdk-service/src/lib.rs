@@ -8,10 +8,13 @@ mod health;
 mod import_export;
 mod indexing;
 mod ingest;
+#[cfg(test)]
 mod note_crud;
 mod property_query;
+#[cfg(test)]
 mod property_update;
 mod reconcile;
+mod search;
 mod tracing_hooks;
 mod transactions;
 
@@ -40,10 +43,13 @@ pub use indexing::{
     StaleCleanupError, StaleCleanupResult, StaleCleanupService,
 };
 pub use ingest::{IngestedMarkdownNote, MarkdownIngestError, MarkdownIngestPipeline};
-pub use note_crud::*;
+#[cfg(test)]
+pub(crate) use note_crud::*;
 pub use property_query::*;
-pub use property_update::*;
+#[cfg(test)]
+pub(crate) use property_update::*;
 pub use reconcile::*;
+pub use search::*;
 pub use tracing_hooks::ServiceTraceContext;
 pub use transactions::{
     SdkTransactionCoordinator, SdkTransactionError, StorageWriteError, StorageWriteService,

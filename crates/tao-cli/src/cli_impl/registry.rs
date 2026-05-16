@@ -157,12 +157,6 @@ const PARAM_QUERY_PATH: ToolParameter = ToolParameter {
     required: false,
     description: "Optional vault-relative note path for graph query scopes.",
 };
-const PARAM_CONTENT: ToolParameter = ToolParameter {
-    name: "content",
-    type_name: "string",
-    required: true,
-    description: "Full markdown payload for one note write.",
-};
 const PARAM_DRY_RUN: ToolParameter = ToolParameter {
     name: "dry_run",
     type_name: "boolean",
@@ -325,11 +319,41 @@ const PARAM_QUERY: ToolParameter = ToolParameter {
     required: false,
     description: "Free-text filter or search query.",
 };
-const PARAM_LINE: ToolParameter = ToolParameter {
-    name: "line",
-    type_name: "integer",
-    required: true,
-    description: "One-based line number for the target markdown task.",
+const PARAM_SEARCH_KIND: ToolParameter = ToolParameter {
+    name: "kind",
+    type_name: "string",
+    required: false,
+    description: "Search kind: auto|all|docs|files|bases|properties|tasks|graph.",
+};
+const PARAM_EXT: ToolParameter = ToolParameter {
+    name: "ext",
+    type_name: "string[]",
+    required: false,
+    description: "Extension filter, repeatable or comma-separated.",
+};
+const PARAM_CONTEXT: ToolParameter = ToolParameter {
+    name: "context",
+    type_name: "boolean",
+    required: false,
+    description: "Include bounded graph/context expansion.",
+};
+const PARAM_INCLUDE_CONTENT: ToolParameter = ToolParameter {
+    name: "include_content",
+    type_name: "boolean",
+    required: false,
+    description: "Include bounded note body excerpts.",
+};
+const PARAM_INCLUDE_PII: ToolParameter = ToolParameter {
+    name: "include_pii",
+    type_name: "boolean",
+    required: false,
+    description: "Include local frontmatter and property values.",
+};
+const PARAM_NO_PII: ToolParameter = ToolParameter {
+    name: "no_pii",
+    type_name: "boolean",
+    required: false,
+    description: "Redact local frontmatter and property values.",
 };
 const PARAM_SELECT: ToolParameter = ToolParameter {
     name: "select",
@@ -386,16 +410,7 @@ const PARAM_SOCKET_DIR: ToolParameter = ToolParameter {
     description: "Directory used to discover managed daemon sockets.",
 };
 
-const GLOBAL_FLAGS: &[GlobalFlag] = &[
-    GlobalFlag {
-        name: "--text",
-        description: "Emit plain-text summaries instead of JSON envelopes.",
-    },
-    GlobalFlag {
-        name: "--allow-writes",
-        description: "Enable vault content mutations for write commands.",
-    },
-];
+const GLOBAL_FLAGS: &[GlobalFlag] = &[];
 
 const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
@@ -520,36 +535,6 @@ const TOOLS: &[ToolDefinition] = &[
         idempotent: true,
         rate_limit: None,
         example: "tao doc read --vault-root /abs/vault --path notes/today.md",
-    },
-    ToolDefinition {
-        name: "doc.write",
-        command: "tao --allow-writes doc write --path <value> --content <value>",
-        category: "doc",
-        description: "Create or update one note.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_PATH,
-            PARAM_CONTENT,
-            PARAM_DRY_RUN,
-        ],
-        output_fields: &[
-            "path",
-            "file_id",
-            "action",
-            "index_synced",
-            "event_logged",
-            "warnings",
-            "dry_run",
-            "would_write",
-            "content_bytes",
-            "read_only",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: false,
-        rate_limit: None,
-        example: "tao --allow-writes doc write --vault-root /abs/vault --path notes/new.md --content '# New'",
     },
     ToolDefinition {
         name: "graph.links",
@@ -936,6 +921,45 @@ const TOOLS: &[ToolDefinition] = &[
         example: "tao query --vault-root /abs/vault --from docs --query project --limit 20",
     },
     ToolDefinition {
+        name: "search.run",
+        command: "tao search <query>",
+        category: "search",
+        description: "Run graph-aware indexed vault search across docs, files, bases, properties, tasks, and links.",
+        parameters: &[
+            PARAM_VAULT_ROOT,
+            PARAM_DB_PATH,
+            PARAM_QUERY,
+            PARAM_QUERY_PATH,
+            PARAM_SEARCH_KIND,
+            PARAM_OPTIONAL_SCOPE,
+            PARAM_EXT,
+            PARAM_CONTEXT,
+            PARAM_DEPTH,
+            PARAM_LIMIT,
+            PARAM_INCLUDE_CONTENT,
+            PARAM_INCLUDE_PII,
+            PARAM_NO_PII,
+        ],
+        output_fields: &[
+            "query",
+            "mode",
+            "candidates",
+            "files",
+            "docs",
+            "properties",
+            "tasks",
+            "graph",
+            "context",
+            "total",
+            "limit",
+        ],
+        output_schema: None,
+        input_schema: None,
+        idempotent: true,
+        rate_limit: None,
+        example: "tao search invoice --vault-root /abs/vault --kind files --scope WORK/012-FINANCE --limit 10",
+    },
+    ToolDefinition {
         name: "task.list",
         command: "tao task list",
         category: "task",
@@ -954,35 +978,6 @@ const TOOLS: &[ToolDefinition] = &[
         idempotent: true,
         rate_limit: None,
         example: "tao task list --vault-root /abs/vault --state open",
-    },
-    ToolDefinition {
-        name: "task.set-state",
-        command: "tao --allow-writes task set-state --path <value> --line <n> --state <value>",
-        category: "task",
-        description: "Update checkbox state on one markdown task line.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_PATH,
-            PARAM_LINE,
-            PARAM_STATE,
-            PARAM_DRY_RUN,
-        ],
-        output_fields: &[
-            "path",
-            "line",
-            "state",
-            "dry_run",
-            "would_update",
-            "before",
-            "after",
-            "read_only",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: false,
-        rate_limit: None,
-        example: "tao --allow-writes task set-state --vault-root /abs/vault --path notes/tasks.md --line 4 --state done",
     },
     ToolDefinition {
         name: "tools",

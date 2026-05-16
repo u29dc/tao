@@ -12,9 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{
-    ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind as ClapErrorKind,
-};
+use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind as ClapErrorKind};
 use rusqlite::{Connection, OpenFlags};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
@@ -35,11 +33,13 @@ use tao_sdk_service::{
     BaseValidationService, CURRENT_LINK_RESOLUTION_VERSION, FullIndexService,
     GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
     LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, SdkConfigInspectionService,
-    SdkConfigLoader, SdkConfigOverrides, WatcherStatus, ensure_runtime_paths,
+    SdkConfigLoader, SdkConfigOverrides, SearchKind, VaultSearchRequest, VaultSearchService,
+    WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,
-    TasksRepository, preflight_migrations, run_migrations,
+    SearchIndexRecord, SearchIndexRepository, TasksRepository, preflight_migrations,
+    run_migrations,
 };
 use tao_sdk_vault::{CasePolicy, PathCanonicalizationService, validate_relative_vault_path};
 use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
@@ -80,7 +80,7 @@ pub fn run() -> i32 {
 }
 
 fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
-    let json_output = !raw_args.iter().any(|arg| arg == "--text");
+    let json_output = true;
     let cli = match Cli::try_parse_from(raw_args.clone()) {
         Ok(cli) => cli,
         Err(error) => return handle_parse_error(error, json_output, &raw_args),
@@ -89,9 +89,6 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
     let started_at = Instant::now();
     let tool = tool_name_for_command(&cli.command);
     let run = || -> Result<String> {
-        if cli.json_stream && !cli.json {
-            return Err(anyhow!("--json-stream cannot be used with --text"));
-        }
         if let Some(output) = maybe_forward_to_daemon(&cli)? {
             return Ok(output);
         }
@@ -101,7 +98,7 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
             return Ok(output);
         }
 
-        let result = dispatch(cli.command.clone(), cli.allow_writes)?;
+        let result = dispatch(cli.command.clone())?;
         render_output_with_elapsed(cli.json, &result, started_at.elapsed())
     };
 
@@ -193,25 +190,22 @@ fn maybe_render_streaming_output_for_command(
     Ok(Some(rendered))
 }
 
-fn dispatch(command: Commands, allow_writes: bool) -> Result<CommandResult> {
+fn dispatch(command: Commands) -> Result<CommandResult> {
     let mut runtime = RuntimeMode::OneShot;
-    dispatch_with_runtime(command, allow_writes, &mut runtime)
+    dispatch_with_runtime(command, &mut runtime)
 }
 
-fn dispatch_with_runtime(
-    command: Commands,
-    allow_writes: bool,
-    runtime: &mut RuntimeMode,
-) -> Result<CommandResult> {
+fn dispatch_with_runtime(command: Commands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
         Commands::Tools(args) => commands::tools::dispatch(args),
         Commands::Health(args) => commands::health::dispatch(args, runtime),
         Commands::Config { command } => commands::config::dispatch(command),
-        Commands::Doc { command } => commands::doc::dispatch(command, allow_writes, runtime),
+        Commands::Doc { command } => commands::doc::dispatch(command, runtime),
         Commands::Base { command } => commands::base::dispatch(command, runtime),
         Commands::Graph { command } => commands::graph::dispatch(command, runtime),
         Commands::Meta { command } => commands::meta::dispatch(command, runtime),
-        Commands::Task { command } => commands::task::dispatch(command, allow_writes, runtime),
+        Commands::Task { command } => commands::task::dispatch(command, runtime),
+        Commands::Search(args) => commands::search::dispatch(args, runtime),
         Commands::Query(args) => commands::query::dispatch(args, runtime),
         Commands::Vault { command } => commands::vault::dispatch(command, runtime),
     }
@@ -229,12 +223,8 @@ fn handle_meta(command: MetaCommands, runtime: &mut RuntimeMode) -> Result<Comma
     commands::meta::handle(command, runtime)
 }
 
-fn handle_task(
-    command: TaskCommands,
-    allow_writes: bool,
-    runtime: &mut RuntimeMode,
-) -> Result<CommandResult> {
-    commands::task::handle(command, allow_writes, runtime)
+fn handle_task(command: TaskCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
+    commands::task::handle(command, runtime)
 }
 
 #[cfg(test)]

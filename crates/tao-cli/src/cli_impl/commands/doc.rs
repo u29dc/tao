@@ -1,10 +1,6 @@
 use super::super::*;
 
-pub(crate) fn handle(
-    command: DocCommands,
-    allow_writes: bool,
-    runtime: &mut RuntimeMode,
-) -> Result<CommandResult> {
+pub(crate) fn handle(command: DocCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
         DocCommands::Read(args) => {
             let resolved = args.resolve()?;
@@ -20,43 +16,6 @@ pub(crate) fn handle(
                     "front_matter": note.front_matter,
                     "body": note.body,
                     "headings_total": note.headings_total,
-                }),
-            })
-        }
-        DocCommands::Write(args) => {
-            let resolved = args.resolve()?;
-            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
-            if args.dry_run {
-                return Ok(CommandResult {
-                    command: "doc.write".to_string(),
-                    summary: "doc write dry-run completed".to_string(),
-                    args: serde_json::json!({
-                        "path": path,
-                        "action": "dry_run",
-                        "dry_run": true,
-                        "would_write": true,
-                        "content_bytes": args.content.len(),
-                        "read_only": resolved.read_only,
-                    }),
-                });
-            }
-            ensure_writes_enabled(allow_writes, resolved.read_only, "doc.write")?;
-            let ack = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(
-                    kernel.note_put_with_policy(&path, &args.content, true),
-                    "doc.write",
-                )
-            })?;
-            Ok(CommandResult {
-                command: "doc.write".to_string(),
-                summary: "doc write completed".to_string(),
-                args: serde_json::json!({
-                    "path": ack.path,
-                    "file_id": ack.file_id,
-                    "action": ack.action,
-                    "index_synced": ack.index_synced,
-                    "event_logged": ack.event_logged,
-                    "warnings": ack.warnings,
                 }),
             })
         }
@@ -95,8 +54,7 @@ pub(crate) fn handle(
 
 pub(in crate::cli_impl) fn dispatch(
     command: DocCommands,
-    allow_writes: bool,
     runtime: &mut RuntimeMode,
 ) -> Result<CommandResult> {
-    handle(command, allow_writes, runtime)
+    handle(command, runtime)
 }

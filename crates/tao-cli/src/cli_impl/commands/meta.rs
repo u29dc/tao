@@ -42,7 +42,7 @@ pub(crate) fn handle(command: MetaCommands, runtime: &mut RuntimeMode) -> Result
             handle_meta_token_aggregate(args, "aliases", "meta.aliases", runtime)
         }
         MetaCommands::Tasks(args) => {
-            let result = handle_task(TaskCommands::List(args), false, runtime)?;
+            let result = handle_task(TaskCommands::List(args), runtime)?;
             Ok(retag_result(result, "meta.tasks", "meta tasks completed"))
         }
     }

@@ -9,10 +9,11 @@ Provide the Tao command-line interface as a thin JSON-first adapter over SDK ser
 ## Public API
 
 - Binary: `tao`
-- Command groups: `config`, `vault`, `doc`, `base`, `graph`, `meta`, `task`, `query`
+- Command groups: `config`, `vault`, `doc`, `base`, `graph`, `meta`, `task`, `search`, `query`
+- Public vault-content operations are read-only. Tao writes internal index/cache state for `vault open`, `vault reindex`, daemon/watch/cache maintenance, and health synchronization only.
+- `search` is the primary graph-aware exploration entrypoint across indexed docs, files, bases/frontmatter, tasks, and links. Use `rg` for raw grep; use `tao search` when index metadata and relationships matter.
 - Canonical graph primitives: `graph links` for one-hop link windows, `graph audit` for unresolved links, structural isolates, components, and scoped inbound-link audits.
 - Compatibility graph wrappers such as `graph outgoing`, `graph backlinks`, and `graph unresolved` remain callable by direct name lookup but are hidden from help and omitted from the default `tao tools` catalog.
-- Mutating commands expose `--dry-run` where practical so agents can inspect intent before writes.
 - JSON envelope output for automation by default
 
 ## Internal Design
