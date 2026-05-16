@@ -5,17 +5,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params_from_iter, types::Value};
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tao_sdk_bases::{BaseCoercionMode, BaseTableQueryPlanner, BaseViewRegistry};
 use tao_sdk_core::note_title_from_path;
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
-use tao_sdk_storage::{
-    BasesRepository, FilesRepository, LinkWithPaths, LinksRepository, PropertiesRepository,
-    SearchIndexRepository,
-};
+use tao_sdk_storage::{BasesRepository, FilesRepository, LinkWithPaths, PropertiesRepository};
 use thiserror::Error;
 
 use crate::{
@@ -428,21 +425,10 @@ impl VaultSearchService {
         let scope = request.scope.as_deref().map(normalize_scope).transpose()?;
         let extensions = normalize_extensions(&request.extensions);
 
-        let files = FilesRepository::list_all(connection)
-            .map_err(|source| VaultSearchError::Files { source })?;
-        let file_by_id = files
-            .iter()
-            .map(|file| (file.file_id.clone(), file.clone()))
-            .collect::<HashMap<_, _>>();
-        let file_by_path = files
-            .iter()
-            .map(|file| (file.normalized_path.clone(), file.clone()))
-            .collect::<HashMap<_, _>>();
-        let link_counts = link_counts(connection)?;
-
-        let mut candidates = CandidateSet::new(&file_by_path, &link_counts);
+        let mut candidates = CandidateSet::new();
         if let Some(path) = &root_path
-            && let Some(file) = file_by_path.get(path)
+            && let Some(file) = FilesRepository::get_by_normalized_path(connection, path)
+                .map_err(|source| VaultSearchError::Files { source })?
         {
             candidates.add(
                 &file.normalized_path,
@@ -475,14 +461,13 @@ impl VaultSearchService {
 
             if request.kind.includes(SearchKind::Files) {
                 file_matches = search_files(
-                    &files,
+                    connection,
                     needle,
                     scope.as_deref(),
                     &extensions,
-                    &link_counts,
                     limit,
                     &mut candidates,
-                );
+                )?;
             }
 
             if request.kind.includes(SearchKind::Properties) {
@@ -514,7 +499,6 @@ impl VaultSearchService {
                     needle,
                     scope.as_deref(),
                     &extensions,
-                    &file_by_id,
                     limit,
                     &mut candidates,
                 )?;
@@ -532,7 +516,10 @@ impl VaultSearchService {
             }
         }
 
-        let mut candidate_rows = candidates.finish();
+        let candidate_paths = candidates.paths();
+        let candidate_files = files_by_paths(connection, &candidate_paths)?;
+        let link_counts = link_counts_for_paths(connection, &candidate_paths)?;
+        let mut candidate_rows = candidates.finish(&candidate_files, &link_counts);
         sort_candidates(&mut candidate_rows);
         let total = candidate_rows.len() as u64;
         candidate_rows.truncate(limit as usize);
@@ -543,8 +530,6 @@ impl VaultSearchService {
                 &request,
                 root_path.as_deref(),
                 &candidate_rows,
-                &file_by_path,
-                &file_by_id,
                 &link_counts,
                 &base_rows,
                 depth,
@@ -598,20 +583,11 @@ impl SearchNeedle {
 #[derive(Debug, Clone, Default)]
 struct CandidateSet {
     rows: HashMap<String, CandidateAccumulator>,
-    files: HashMap<String, tao_sdk_storage::FileRecord>,
-    link_counts: HashMap<String, LinkCount>,
 }
 
 impl CandidateSet {
-    fn new(
-        files: &HashMap<String, tao_sdk_storage::FileRecord>,
-        link_counts: &HashMap<String, LinkCount>,
-    ) -> Self {
-        Self {
-            rows: HashMap::new(),
-            files: files.clone(),
-            link_counts: link_counts.clone(),
-        }
+    fn new() -> Self {
+        Self::default()
     }
 
     fn add(&mut self, path: &str, kind: SearchKind, score: i64, reason: String) {
@@ -629,12 +605,22 @@ impl CandidateSet {
         entry.reasons.insert(reason);
     }
 
-    fn finish(self) -> Vec<SearchCandidate> {
+    fn paths(&self) -> Vec<String> {
+        let mut paths = self.rows.keys().cloned().collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    fn finish(
+        self,
+        files: &HashMap<String, tao_sdk_storage::FileRecord>,
+        link_counts: &HashMap<String, LinkCount>,
+    ) -> Vec<SearchCandidate> {
         self.rows
             .into_values()
             .map(|row| {
-                let file = self.files.get(&row.path);
-                let counts = self.link_counts.get(&row.path).copied().unwrap_or_default();
+                let file = files.get(&row.path);
+                let counts = link_counts.get(&row.path).copied().unwrap_or_default();
                 let mut kinds = row.kinds.into_iter().collect::<Vec<_>>();
                 let mut reasons = row.reasons.into_iter().collect::<Vec<_>>();
                 kinds.sort();
@@ -746,9 +732,7 @@ fn search_docs(
         }
     }
 
-    for row in SearchIndexRepository::list_all(connection)
-        .map_err(|source| VaultSearchError::SearchIndex { source })?
-    {
+    for row in query_search_index_candidates(connection, needle, scope, limit)? {
         if !path_allowed(&row.normalized_path, scope, extensions) {
             continue;
         }
@@ -805,16 +789,15 @@ fn search_docs(
 }
 
 fn search_files(
-    files: &[tao_sdk_storage::FileRecord],
+    connection: &Connection,
     needle: &SearchNeedle,
     scope: Option<&str>,
     extensions: &HashSet<String>,
-    link_counts: &HashMap<String, LinkCount>,
     limit: u32,
     candidates: &mut CandidateSet,
-) -> Vec<SearchFileMatch> {
-    let mut rows = Vec::<SearchFileMatch>::new();
-    for file in files {
+) -> Result<Vec<SearchFileMatch>, VaultSearchError> {
+    let mut pending = Vec::<(tao_sdk_storage::FileRecord, Vec<String>, i64)>::new();
+    for file in query_file_candidates(connection, needle, scope, limit)? {
         if !path_allowed(&file.normalized_path, scope, extensions) {
             continue;
         }
@@ -839,28 +822,22 @@ fn search_files(
             score,
             format!("files:{}", matched_in.join(",")),
         );
-        let counts = link_counts
-            .get(&file.normalized_path)
-            .copied()
-            .unwrap_or_default();
-        rows.push(SearchFileMatch {
-            file_id: file.file_id.clone(),
-            path: file.normalized_path.clone(),
-            extension: extension_for_path(&file.normalized_path),
-            size: file.size_bytes,
-            modified_unix_ms: file.modified_unix_ms,
-            indexed_at: file.indexed_at.clone(),
-            is_markdown: file.is_markdown,
-            inbound_links: counts.inbound,
-            outgoing_links: counts.outgoing,
-            linked: counts.inbound > 0,
-            matched_in,
-            score,
-        });
+        pending.push((file, matched_in, score));
     }
+    let paths = pending
+        .iter()
+        .map(|(file, _, _)| file.normalized_path.clone())
+        .collect::<Vec<_>>();
+    let link_counts = link_counts_for_paths(connection, &paths)?;
+    let mut rows = pending
+        .into_iter()
+        .map(|(file, matched_in, score)| {
+            file_match_from_record(&file, &link_counts, matched_in, score)
+        })
+        .collect::<Vec<_>>();
     rows.sort_by(compare_score_path);
     rows.truncate(limit as usize);
-    rows
+    Ok(rows)
 }
 
 fn search_properties(
@@ -872,49 +849,9 @@ fn search_properties(
     limit: u32,
     candidates: &mut CandidateSet,
 ) -> Result<Vec<SearchPropertyMatch>, VaultSearchError> {
-    let mut statement = connection
-        .prepare(
-            r#"
-SELECT
-  p.property_id,
-  p.file_id,
-  f.normalized_path AS file_path,
-  p.key,
-  p.value_type,
-  p.value_json,
-  p.updated_at
-FROM properties p
-JOIN files f ON f.file_id = p.file_id
-ORDER BY f.normalized_path ASC, p.key ASC
-"#,
-        )
-        .map_err(|source| VaultSearchError::Sql {
-            operation: "prepare_search_properties",
-            source,
-        })?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>("property_id")?,
-                row.get::<_, String>("file_id")?,
-                row.get::<_, String>("file_path")?,
-                row.get::<_, String>("key")?,
-                row.get::<_, String>("value_type")?,
-                row.get::<_, String>("value_json")?,
-                row.get::<_, String>("updated_at")?,
-            ))
-        })
-        .map_err(|source| VaultSearchError::Sql {
-            operation: "query_search_properties",
-            source,
-        })?;
     let mut matches = Vec::new();
-    for row in rows {
-        let (property_id, file_id, path, key, value_type, value_json, updated_at) =
-            row.map_err(|source| VaultSearchError::Sql {
-                operation: "map_search_properties",
-                source,
-            })?;
+    for row in query_property_candidates(connection, needle, scope, limit)? {
+        let (property_id, file_id, path, key, value_type, value_json, updated_at) = row;
         if !path_allowed(&path, scope, extensions) {
             continue;
         }
@@ -954,41 +891,9 @@ fn search_tasks(
     limit: u32,
     candidates: &mut CandidateSet,
 ) -> Result<Vec<SearchTaskMatch>, VaultSearchError> {
-    let mut statement = connection
-        .prepare(
-            r#"
-SELECT task_id, file_id, file_path, line_number, state, text, updated_at
-FROM tasks
-ORDER BY file_path ASC, line_number ASC
-"#,
-        )
-        .map_err(|source| VaultSearchError::Sql {
-            operation: "prepare_search_tasks",
-            source,
-        })?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>("task_id")?,
-                row.get::<_, String>("file_id")?,
-                row.get::<_, String>("file_path")?,
-                row.get::<_, i64>("line_number")?,
-                row.get::<_, String>("state")?,
-                row.get::<_, String>("text")?,
-                row.get::<_, String>("updated_at")?,
-            ))
-        })
-        .map_err(|source| VaultSearchError::Sql {
-            operation: "query_search_tasks",
-            source,
-        })?;
     let mut matches = Vec::new();
-    for row in rows {
-        let (task_id, file_id, path, line, state, text, updated_at) =
-            row.map_err(|source| VaultSearchError::Sql {
-                operation: "map_search_tasks",
-                source,
-            })?;
+    for row in query_task_candidates(connection, needle, scope, limit)? {
+        let (task_id, file_id, path, line, state, text, updated_at) = row;
         if !path_allowed(&path, scope, extensions) {
             continue;
         }
@@ -1020,12 +925,10 @@ fn search_graph(
     needle: &SearchNeedle,
     scope: Option<&str>,
     extensions: &HashSet<String>,
-    files: &HashMap<String, tao_sdk_storage::FileRecord>,
     limit: u32,
     candidates: &mut CandidateSet,
 ) -> Result<Vec<SearchGraphMatch>, VaultSearchError> {
-    let links = LinksRepository::list_all_with_paths(connection)
-        .map_err(|source| VaultSearchError::Links { source })?;
+    let links = query_graph_candidates(connection, needle, scope, limit)?;
     let mut matches = Vec::new();
     for link in links {
         let candidate_path = link
@@ -1052,14 +955,12 @@ fn search_graph(
             score,
             "graph-link".to_string(),
         );
-        if let Some(file) = files.get(&link.source_file_id) {
-            candidates.add(
-                &file.normalized_path,
-                SearchKind::Graph,
-                10,
-                "graph-source".to_string(),
-            );
-        }
+        candidates.add(
+            &link.source_path,
+            SearchKind::Graph,
+            10,
+            "graph-source".to_string(),
+        );
         matches.push(graph_match(link, score));
     }
     matches.sort_by(compare_score_source);
@@ -1096,60 +997,134 @@ fn search_bases(
             Err(_) => continue,
         };
         for view in document.views {
-            let plan = match BaseTableQueryPlanner.compile(
+            const BASE_SEARCH_PAGE_SIZE: u32 = 512;
+            let mut page_number = 1_u32;
+            while let Ok(plan) = BaseTableQueryPlanner.compile(
                 &registry,
                 &tao_sdk_bases::TableQueryPlanRequest {
                     view_name: view.name.clone(),
-                    page: 1,
-                    page_size: limit.clamp(50, 200),
+                    page: page_number,
+                    page_size: BASE_SEARCH_PAGE_SIZE,
                 },
             ) {
-                Ok(plan) => plan,
-                Err(_) => continue,
-            };
-            let page = BaseTableExecutorService
-                .execute_with_options(
-                    connection,
-                    &plan,
-                    BaseTableExecutionOptions {
-                        include_summaries: false,
-                        coercion_mode: BaseCoercionMode::Permissive,
-                    },
-                )
-                .map_err(|source| VaultSearchError::BaseExecute {
-                    source: Box::new(source),
-                })?;
-            for row in page.rows {
-                if !path_allowed(&row.file_path, scope, extensions) {
-                    continue;
+                let page = BaseTableExecutorService
+                    .execute_with_options(
+                        connection,
+                        &plan,
+                        BaseTableExecutionOptions {
+                            include_summaries: false,
+                            coercion_mode: BaseCoercionMode::Permissive,
+                        },
+                    )
+                    .map_err(|source| VaultSearchError::BaseExecute {
+                        source: Box::new(source),
+                    })?;
+                let total = page.total;
+                for row in page.rows {
+                    if !path_allowed(&row.file_path, scope, extensions) {
+                        continue;
+                    }
+                    let values_text = serde_json::to_string(&row.values).unwrap_or_default();
+                    let score = text_match_score(&row.file_path, needle).unwrap_or(0)
+                        + text_match_score(&values_text, needle).unwrap_or(0);
+                    if score == 0 {
+                        continue;
+                    }
+                    let score = 35 + score + canonical_path_boost(&row.file_path);
+                    candidates.add(
+                        &row.file_path,
+                        SearchKind::Bases,
+                        score,
+                        "base-row".to_string(),
+                    );
+                    matches.push(SearchBaseRowMatch {
+                        base_id: base.base_id.clone(),
+                        base_path: base.file_path.clone(),
+                        view_name: view.name.clone(),
+                        file_id: row.file_id,
+                        path: row.file_path,
+                        values: row.values,
+                        score,
+                    });
                 }
-                let values_text = serde_json::to_string(&row.values).unwrap_or_default();
-                let score = text_match_score(&row.file_path, needle).unwrap_or(0)
-                    + text_match_score(&values_text, needle).unwrap_or(0);
-                if score == 0 {
-                    continue;
+
+                if u64::from(page_number) * u64::from(BASE_SEARCH_PAGE_SIZE) >= total {
+                    break;
                 }
-                let score = 35 + score + canonical_path_boost(&row.file_path);
-                candidates.add(
-                    &row.file_path,
-                    SearchKind::Bases,
-                    score,
-                    "base-row".to_string(),
-                );
-                matches.push(SearchBaseRowMatch {
-                    base_id: base.base_id.clone(),
-                    base_path: base.file_path.clone(),
-                    view_name: view.name.clone(),
-                    file_id: row.file_id,
-                    path: row.file_path,
-                    values: row.values,
-                    score,
-                });
+                page_number = page_number.saturating_add(1);
             }
         }
     }
     matches.sort_by(compare_score_path);
     matches.truncate(limit as usize);
+    Ok(matches)
+}
+
+fn base_rows_for_path(
+    connection: &Connection,
+    selected_path: &str,
+    limit: u32,
+) -> Result<Vec<SearchBaseRowMatch>, VaultSearchError> {
+    let bases = BasesRepository::list_with_paths(connection)
+        .map_err(|source| VaultSearchError::Bases { source })?;
+    let mut matches = Vec::new();
+    for base in bases {
+        let document = match tao_sdk_bases::decode_base_config_json(&base.config_json) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+        let registry = match BaseViewRegistry::from_document(&document) {
+            Ok(registry) => registry,
+            Err(_) => continue,
+        };
+        for view in document.views {
+            const BASE_CONTEXT_PAGE_SIZE: u32 = 512;
+            let mut page_number = 1_u32;
+            while let Ok(plan) = BaseTableQueryPlanner.compile(
+                &registry,
+                &tao_sdk_bases::TableQueryPlanRequest {
+                    view_name: view.name.clone(),
+                    page: page_number,
+                    page_size: BASE_CONTEXT_PAGE_SIZE,
+                },
+            ) {
+                let page = BaseTableExecutorService
+                    .execute_with_options(
+                        connection,
+                        &plan,
+                        BaseTableExecutionOptions {
+                            include_summaries: false,
+                            coercion_mode: BaseCoercionMode::Permissive,
+                        },
+                    )
+                    .map_err(|source| VaultSearchError::BaseExecute {
+                        source: Box::new(source),
+                    })?;
+                let total = page.total;
+                for row in page.rows {
+                    if row.file_path != selected_path {
+                        continue;
+                    }
+                    matches.push(SearchBaseRowMatch {
+                        base_id: base.base_id.clone(),
+                        base_path: base.file_path.clone(),
+                        view_name: view.name.clone(),
+                        file_id: row.file_id,
+                        path: row.file_path,
+                        values: row.values,
+                        score: 0,
+                    });
+                    if matches.len() >= limit as usize {
+                        return Ok(matches);
+                    }
+                }
+                if u64::from(page_number) * u64::from(BASE_CONTEXT_PAGE_SIZE) >= total {
+                    break;
+                }
+                page_number = page_number.saturating_add(1);
+            }
+        }
+    }
     Ok(matches)
 }
 
@@ -1159,8 +1134,6 @@ fn build_context(
     request: &VaultSearchRequest,
     root_path: Option<&str>,
     candidates: &[SearchCandidate],
-    file_by_path: &HashMap<String, tao_sdk_storage::FileRecord>,
-    file_by_id: &HashMap<String, tao_sdk_storage::FileRecord>,
     link_counts: &HashMap<String, LinkCount>,
     base_rows: &[SearchBaseRowMatch],
     depth: u32,
@@ -1172,7 +1145,9 @@ fn build_context(
     let Some(selected_path) = selected_path else {
         return Ok(SearchContext::default());
     };
-    let Some(file) = file_by_path.get(&selected_path) else {
+    let Some(file) = FilesRepository::get_by_normalized_path(connection, &selected_path)
+        .map_err(|source| VaultSearchError::Files { source })?
+    else {
         return Ok(SearchContext {
             ambiguity: candidates.iter().take(3).cloned().collect(),
             ..SearchContext::default()
@@ -1181,7 +1156,7 @@ fn build_context(
 
     let root = root_for_file(
         &request.vault_root,
-        file,
+        &file,
         request.include_content,
         request.include_pii,
     );
@@ -1248,12 +1223,15 @@ fn build_context(
     related_paths.sort();
     related_paths.dedup();
 
+    let related_files = files_by_paths(connection, &related_paths)?;
+    let mut context_link_counts = link_counts.clone();
+    context_link_counts.extend(link_counts_for_paths(connection, &related_paths)?);
     let attachments = related_paths
         .iter()
-        .filter_map(|path| file_by_path.get(path))
+        .filter_map(|path| related_files.get(path))
         .filter(|file| !file.is_markdown)
         .take(limit as usize)
-        .map(|file| file_match_from_record(file, link_counts, Vec::new(), 0))
+        .map(|file| file_match_from_record(file, &context_link_counts, Vec::new(), 0))
         .collect::<Vec<_>>();
     let grouped = grouped_paths(&related_paths);
     let related_counts = grouped
@@ -1268,23 +1246,25 @@ fn build_context(
         })
         .collect::<JsonMap<_, _>>();
     let timeline = timeline_entries(&selected_path, &related_paths, &properties, limit);
-    let base_rows = base_rows
+    let mut context_base_rows = base_rows
         .iter()
         .filter(|row| row.path == selected_path)
         .take(limit as usize)
         .cloned()
         .collect::<Vec<_>>();
+    if context_base_rows.is_empty() {
+        context_base_rows = base_rows_for_path(connection, &selected_path, limit)?;
+    }
     let ambiguity = if root_path.is_none() {
         ambiguous_candidates(candidates)
     } else {
         Vec::new()
     };
 
-    let _ = file_by_id;
     Ok(SearchContext {
         root: Some(root),
         properties,
-        base_rows,
+        base_rows: context_base_rows,
         links: SearchContextLinks {
             outgoing,
             incoming,
@@ -1358,19 +1338,538 @@ fn root_properties(
         .collect())
 }
 
-fn link_counts(connection: &Connection) -> Result<HashMap<String, LinkCount>, VaultSearchError> {
-    let links = LinksRepository::list_all_with_paths(connection)
-        .map_err(|source| VaultSearchError::Links { source })?;
+fn files_by_paths(
+    connection: &Connection,
+    paths: &[String],
+) -> Result<HashMap<String, tao_sdk_storage::FileRecord>, VaultSearchError> {
+    let mut unique_paths = paths.to_vec();
+    unique_paths.sort();
+    unique_paths.dedup();
+    if unique_paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = vec!["?"; unique_paths.len()].join(", ");
+    let sql = format!(
+        r#"
+SELECT
+  file_id,
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown,
+  indexed_at
+FROM files
+WHERE normalized_path IN ({placeholders})
+ORDER BY normalized_path ASC
+"#
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_files_by_paths",
+            source,
+        })?;
+    let params = unique_paths
+        .iter()
+        .map(|path| Value::Text(path.clone()))
+        .collect::<Vec<_>>();
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), row_to_file_record)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_files_by_paths",
+            source,
+        })?;
+    let mut files = HashMap::new();
+    for row in rows {
+        let file = row.map_err(|source| VaultSearchError::Sql {
+            operation: "map_files_by_paths",
+            source,
+        })?;
+        files.insert(file.normalized_path.clone(), file);
+    }
+    Ok(files)
+}
+
+fn query_search_index_candidates(
+    connection: &Connection,
+    needle: &SearchNeedle,
+    scope: Option<&str>,
+    limit: u32,
+) -> Result<Vec<tao_sdk_storage::SearchIndexRecord>, VaultSearchError> {
+    let mut clauses = search_text_clauses(
+        needle,
+        &["si.normalized_path_lc", "si.title_lc", "si.content_lc"],
+    );
+    let mut params = search_text_params(
+        needle,
+        &["si.normalized_path_lc", "si.title_lc", "si.content_lc"],
+    );
+    append_scope_clause(&mut clauses, &mut params, "si.normalized_path", scope);
+    let where_sql = where_sql(&clauses);
+    let sql = format!(
+        r#"
+SELECT
+  si.file_id,
+  si.normalized_path,
+  si.normalized_path_lc,
+  si.title_lc,
+  si.content_lc,
+  si.updated_at
+FROM search_index si
+{where_sql}
+ORDER BY si.normalized_path ASC
+LIMIT ?
+"#
+    );
+    params.push(Value::Integer(search_candidate_window(limit)));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_search_index_candidates",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), |row| {
+            Ok(tao_sdk_storage::SearchIndexRecord {
+                file_id: row.get("file_id")?,
+                normalized_path: row.get("normalized_path")?,
+                normalized_path_lc: row.get("normalized_path_lc")?,
+                title_lc: row.get("title_lc")?,
+                content_lc: row.get("content_lc")?,
+                updated_at: row.get("updated_at")?,
+            })
+        })
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_search_index_candidates",
+            source,
+        })?;
+    collect_sql_rows(rows, "map_search_index_candidates")
+}
+
+fn query_file_candidates(
+    connection: &Connection,
+    needle: &SearchNeedle,
+    scope: Option<&str>,
+    limit: u32,
+) -> Result<Vec<tao_sdk_storage::FileRecord>, VaultSearchError> {
+    let mut clauses = search_text_clauses(needle, &["f.normalized_path"]);
+    let mut params = search_text_params(needle, &["f.normalized_path"]);
+    append_scope_clause(&mut clauses, &mut params, "f.normalized_path", scope);
+    let where_sql = where_sql(&clauses);
+    let sql = format!(
+        r#"
+SELECT
+  f.file_id,
+  f.normalized_path,
+  f.match_key,
+  f.absolute_path,
+  f.size_bytes,
+  f.modified_unix_ms,
+  f.hash_blake3,
+  f.is_markdown,
+  f.indexed_at
+FROM files f
+{where_sql}
+ORDER BY f.normalized_path ASC
+LIMIT ?
+"#
+    );
+    params.push(Value::Integer(search_candidate_window(limit)));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_file_candidates",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), row_to_file_record)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_file_candidates",
+            source,
+        })?;
+    collect_sql_rows(rows, "map_file_candidates")
+}
+
+type PropertyCandidate = (String, String, String, String, String, String, String);
+type TaskCandidate = (String, String, String, i64, String, String, String);
+
+fn query_property_candidates(
+    connection: &Connection,
+    needle: &SearchNeedle,
+    scope: Option<&str>,
+    limit: u32,
+) -> Result<Vec<PropertyCandidate>, VaultSearchError> {
+    let mut clauses = search_text_clauses(needle, &["p.key", "p.value_json", "f.normalized_path"]);
+    let mut params = search_text_params(needle, &["p.key", "p.value_json", "f.normalized_path"]);
+    append_scope_clause(&mut clauses, &mut params, "f.normalized_path", scope);
+    let where_sql = where_sql(&clauses);
+    let sql = format!(
+        r#"
+SELECT
+  p.property_id,
+  p.file_id,
+  f.normalized_path AS file_path,
+  p.key,
+  p.value_type,
+  p.value_json,
+  p.updated_at
+FROM properties p
+JOIN files f ON f.file_id = p.file_id
+{where_sql}
+ORDER BY f.normalized_path ASC, p.key ASC
+LIMIT ?
+"#
+    );
+    params.push(Value::Integer(search_candidate_window(limit)));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_property_candidates",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), |row| {
+            Ok((
+                row.get::<_, String>("property_id")?,
+                row.get::<_, String>("file_id")?,
+                row.get::<_, String>("file_path")?,
+                row.get::<_, String>("key")?,
+                row.get::<_, String>("value_type")?,
+                row.get::<_, String>("value_json")?,
+                row.get::<_, String>("updated_at")?,
+            ))
+        })
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_property_candidates",
+            source,
+        })?;
+    collect_sql_rows(rows, "map_property_candidates")
+}
+
+fn query_task_candidates(
+    connection: &Connection,
+    needle: &SearchNeedle,
+    scope: Option<&str>,
+    limit: u32,
+) -> Result<Vec<TaskCandidate>, VaultSearchError> {
+    let mut clauses = search_text_clauses(needle, &["t.text_lc", "t.file_path_lc"]);
+    let mut params = search_text_params(needle, &["t.text_lc", "t.file_path_lc"]);
+    append_scope_clause(&mut clauses, &mut params, "t.file_path", scope);
+    let where_sql = where_sql(&clauses);
+    let sql = format!(
+        r#"
+SELECT
+  t.task_id,
+  t.file_id,
+  t.file_path,
+  t.line_number,
+  t.state,
+  t.text,
+  t.updated_at
+FROM tasks t
+{where_sql}
+ORDER BY t.file_path ASC, t.line_number ASC
+LIMIT ?
+"#
+    );
+    params.push(Value::Integer(search_candidate_window(limit)));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_task_candidates",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), |row| {
+            Ok((
+                row.get::<_, String>("task_id")?,
+                row.get::<_, String>("file_id")?,
+                row.get::<_, String>("file_path")?,
+                row.get::<_, i64>("line_number")?,
+                row.get::<_, String>("state")?,
+                row.get::<_, String>("text")?,
+                row.get::<_, String>("updated_at")?,
+            ))
+        })
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_task_candidates",
+            source,
+        })?;
+    collect_sql_rows(rows, "map_task_candidates")
+}
+
+fn query_graph_candidates(
+    connection: &Connection,
+    needle: &SearchNeedle,
+    scope: Option<&str>,
+    limit: u32,
+) -> Result<Vec<LinkWithPaths>, VaultSearchError> {
+    let candidate_path = "COALESCE(tf.normalized_path, sf.normalized_path)";
+    let mut clauses = search_text_clauses(
+        needle,
+        &["l.raw_target", "sf.normalized_path", "tf.normalized_path"],
+    );
+    let mut params = search_text_params(
+        needle,
+        &["l.raw_target", "sf.normalized_path", "tf.normalized_path"],
+    );
+    append_scope_clause(&mut clauses, &mut params, candidate_path, scope);
+    let where_sql = where_sql(&clauses);
+    let sql = format!(
+        r#"
+SELECT
+  l.link_id,
+  l.source_file_id,
+  sf.normalized_path AS source_path,
+  l.raw_target,
+  l.resolved_file_id,
+  tf.normalized_path AS resolved_path,
+  l.heading_slug,
+  l.block_id,
+  l.is_unresolved,
+  l.unresolved_reason,
+  l.source_field
+FROM links l
+JOIN files sf ON sf.file_id = l.source_file_id
+LEFT JOIN files tf ON tf.file_id = l.resolved_file_id
+{where_sql}
+ORDER BY l.link_id ASC
+LIMIT ?
+"#
+    );
+    params.push(Value::Integer(search_candidate_window(limit)));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_graph_candidates",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), row_to_link_with_paths)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_graph_candidates",
+            source,
+        })?;
+    collect_sql_rows(rows, "map_graph_candidates")
+}
+
+fn link_counts_for_paths(
+    connection: &Connection,
+    paths: &[String],
+) -> Result<HashMap<String, LinkCount>, VaultSearchError> {
+    let mut unique_paths = paths.to_vec();
+    unique_paths.sort();
+    unique_paths.dedup();
+    if unique_paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = vec!["?"; unique_paths.len()].join(", ");
+    let sql = format!(
+        r#"
+WITH selected AS (
+  SELECT file_id, normalized_path
+  FROM files
+  WHERE normalized_path IN ({placeholders})
+),
+outgoing AS (
+  SELECT source_file_id AS file_id, COUNT(*) AS outgoing
+  FROM links
+  WHERE is_unresolved = 0
+    AND source_file_id IN (SELECT file_id FROM selected)
+  GROUP BY source_file_id
+),
+incoming AS (
+  SELECT resolved_file_id AS file_id, COUNT(*) AS incoming
+  FROM links
+  WHERE is_unresolved = 0
+    AND resolved_file_id IN (SELECT file_id FROM selected)
+  GROUP BY resolved_file_id
+)
+SELECT
+  selected.normalized_path,
+  COALESCE(incoming.incoming, 0) AS incoming,
+  COALESCE(outgoing.outgoing, 0) AS outgoing
+FROM selected
+LEFT JOIN incoming ON incoming.file_id = selected.file_id
+LEFT JOIN outgoing ON outgoing.file_id = selected.file_id
+ORDER BY selected.normalized_path ASC
+"#
+    );
+    let params = unique_paths
+        .iter()
+        .map(|path| Value::Text(path.clone()))
+        .collect::<Vec<_>>();
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "prepare_link_counts_for_paths",
+            source,
+        })?;
+    let rows = statement
+        .query_map(params_from_iter(params.iter()), |row| {
+            Ok((
+                row.get::<_, String>("normalized_path")?,
+                LinkCount {
+                    inbound: row.get("incoming")?,
+                    outgoing: row.get("outgoing")?,
+                },
+            ))
+        })
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "query_link_counts_for_paths",
+            source,
+        })?;
     let mut counts = HashMap::<String, LinkCount>::new();
-    for link in links {
-        if !link.is_unresolved {
-            counts.entry(link.source_path.clone()).or_default().outgoing += 1;
-            if let Some(path) = link.resolved_path {
-                counts.entry(path).or_default().inbound += 1;
-            }
-        }
+    for row in rows {
+        let (path, count) = row.map_err(|source| VaultSearchError::Sql {
+            operation: "map_link_counts_for_paths",
+            source,
+        })?;
+        counts.insert(path, count);
     }
     Ok(counts)
+}
+
+fn search_text_clauses(needle: &SearchNeedle, fields: &[&str]) -> Vec<String> {
+    let mut alternatives = Vec::<String>::new();
+    if !needle.compact.is_empty() {
+        let compact = fields
+            .iter()
+            .map(|field| format!("{} LIKE ? ESCAPE '\\'", compact_sql_expr(field)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        alternatives.push(format!("({compact})"));
+    }
+    if !needle.tokens.is_empty() {
+        let tokens = needle
+            .tokens
+            .iter()
+            .map(|_| {
+                let fields = fields
+                    .iter()
+                    .map(|field| format!("lower(COALESCE({field}, '')) LIKE ? ESCAPE '\\'"))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                format!("({fields})")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        alternatives.push(format!("({tokens})"));
+    }
+    if alternatives.is_empty() {
+        return vec!["1 = 0".to_string()];
+    }
+    vec![format!("({})", alternatives.join(" OR "))]
+}
+
+fn search_text_params(needle: &SearchNeedle, fields: &[&str]) -> Vec<Value> {
+    let mut params = Vec::<Value>::new();
+    if !needle.compact.is_empty() {
+        let pattern = like_pattern(&needle.compact);
+        for _ in fields {
+            params.push(Value::Text(pattern.clone()));
+        }
+    }
+    for token in &needle.tokens {
+        let pattern = like_pattern(token);
+        for _ in fields {
+            params.push(Value::Text(pattern.clone()));
+        }
+    }
+    params
+}
+
+fn compact_sql_expr(field: &str) -> String {
+    format!("replace(replace(replace(lower(COALESCE({field}, '')), '_', ''), '-', ''), ' ', '')")
+}
+
+fn append_scope_clause(
+    clauses: &mut Vec<String>,
+    params: &mut Vec<Value>,
+    path_expr: &str,
+    scope: Option<&str>,
+) {
+    let Some(scope) = scope.filter(|scope| !scope.is_empty()) else {
+        return;
+    };
+    clauses.push(format!(
+        "({path_expr} = ? OR {path_expr} LIKE ? ESCAPE '\\')"
+    ));
+    params.push(Value::Text(scope.to_string()));
+    params.push(Value::Text(like_prefix(scope)));
+}
+
+fn where_sql(clauses: &[String]) -> String {
+    if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    }
+}
+
+fn like_pattern(value: &str) -> String {
+    format!("%{}%", escape_like(value))
+}
+
+fn like_prefix(value: &str) -> String {
+    format!("{}/%", escape_like(value.trim_end_matches('/')))
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn search_candidate_window(limit: u32) -> i64 {
+    i64::from(limit.saturating_mul(20).clamp(200, 5_000))
+}
+
+fn row_to_file_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<tao_sdk_storage::FileRecord> {
+    Ok(tao_sdk_storage::FileRecord {
+        file_id: row.get("file_id")?,
+        normalized_path: row.get("normalized_path")?,
+        match_key: row.get("match_key")?,
+        absolute_path: row.get("absolute_path")?,
+        size_bytes: row.get("size_bytes")?,
+        modified_unix_ms: row.get("modified_unix_ms")?,
+        hash_blake3: row.get("hash_blake3")?,
+        is_markdown: row.get::<_, i64>("is_markdown")? != 0,
+        indexed_at: row.get("indexed_at")?,
+    })
+}
+
+fn row_to_link_with_paths(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkWithPaths> {
+    Ok(LinkWithPaths {
+        link_id: row.get("link_id")?,
+        source_file_id: row.get("source_file_id")?,
+        source_path: row.get("source_path")?,
+        raw_target: row.get("raw_target")?,
+        resolved_file_id: row.get("resolved_file_id")?,
+        resolved_path: row.get("resolved_path")?,
+        heading_slug: row.get("heading_slug")?,
+        block_id: row.get("block_id")?,
+        is_unresolved: row.get::<_, i64>("is_unresolved")? != 0,
+        unresolved_reason: row.get("unresolved_reason")?,
+        source_field: row.get("source_field")?,
+    })
+}
+
+fn collect_sql_rows<T, F>(
+    rows: rusqlite::MappedRows<'_, F>,
+    operation: &'static str,
+) -> Result<Vec<T>, VaultSearchError>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    rows.map(|row| row.map_err(|source| VaultSearchError::Sql { operation, source }))
+        .collect()
 }
 
 fn graph_match(link: LinkWithPaths, score: i64) -> SearchGraphMatch {
@@ -1573,9 +2072,23 @@ fn excerpt_for(content: &str, needle: &SearchNeedle) -> Option<String> {
         .find(&needle.raw.to_ascii_lowercase())
         .or_else(|| lower.find(&needle.compact))
         .or_else(|| needle.tokens.first().and_then(|token| lower.find(token)))?;
-    let start = index.saturating_sub(120);
-    let end = (index + 240).min(content.len());
+    let start = previous_char_boundary(content, index.saturating_sub(120));
+    let end = next_char_boundary(content, (index + 240).min(content.len()));
     Some(content[start..end].replace('\n', " "))
+}
+
+fn previous_char_boundary(content: &str, mut index: usize) -> usize {
+    while index > 0 && !content.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char_boundary(content: &str, mut index: usize) -> usize {
+    while index < content.len() && !content.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn bound_excerpt(content: &str) -> String {

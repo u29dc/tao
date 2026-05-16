@@ -1,5 +1,8 @@
 use super::*;
 
+const MAX_DAEMON_CACHED_RESULTS: usize = 256;
+const DAEMON_IO_TIMEOUT_MS: u64 = 120_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonExecutionPolicy {
     ObservationalFresh,
@@ -377,6 +380,10 @@ pub(crate) fn update_daemon_command_cache(
         && let Some(key) = cache_key
     {
         let cache_runtime_key = runtime_key.unwrap_or("<global>").to_string();
+        cache
+            .command_result_order
+            .retain(|existing| existing != &key);
+        cache.command_result_order.push_back(key.clone());
         cache.command_results.insert(
             key,
             CachedCommandResult {
@@ -384,6 +391,7 @@ pub(crate) fn update_daemon_command_cache(
                 result: result.clone(),
             },
         );
+        evict_daemon_command_cache(cache);
         return;
     }
 
@@ -392,6 +400,7 @@ pub(crate) fn update_daemon_command_cache(
             clear_cached_results_for_runtime(cache, runtime_key);
         } else {
             cache.command_results.clear();
+            cache.command_result_order.clear();
         }
     }
 }
@@ -400,6 +409,21 @@ pub(crate) fn clear_cached_results_for_runtime(cache: &mut RuntimeCache, runtime
     cache
         .command_results
         .retain(|_, entry| entry.runtime_key != runtime_key);
+    cache
+        .command_result_order
+        .retain(|key| cache.command_results.contains_key(key));
+}
+
+fn evict_daemon_command_cache(cache: &mut RuntimeCache) {
+    while cache.command_results.len() > MAX_DAEMON_CACHED_RESULTS {
+        let Some(oldest) = cache.command_result_order.pop_front() else {
+            break;
+        };
+        cache.command_results.remove(&oldest);
+    }
+    cache
+        .command_result_order
+        .retain(|key| cache.command_results.contains_key(key));
 }
 
 pub(crate) fn resolve_daemon_socket(
@@ -728,6 +752,13 @@ pub(crate) fn daemon_request(socket: &str, request: &DaemonRequest) -> Result<Da
     {
         let mut stream = UnixStream::connect(socket)
             .with_context(|| format!("connect daemon socket '{}'", socket))?;
+        let timeout = Some(Duration::from_millis(DAEMON_IO_TIMEOUT_MS));
+        stream
+            .set_read_timeout(timeout)
+            .context("set daemon read timeout")?;
+        stream
+            .set_write_timeout(timeout)
+            .context("set daemon write timeout")?;
         let payload = serde_json::to_vec(request).context("serialize daemon request")?;
         stream
             .write_all(&payload)
@@ -785,6 +816,13 @@ pub(crate) fn run_daemon_server(socket: &str) -> Result<()> {
 
         while !should_shutdown {
             let (mut stream, _) = listener.accept().context("accept daemon request stream")?;
+            let timeout = Some(Duration::from_millis(DAEMON_IO_TIMEOUT_MS));
+            stream
+                .set_read_timeout(timeout)
+                .context("set daemon server read timeout")?;
+            stream
+                .set_write_timeout(timeout)
+                .context("set daemon server write timeout")?;
             let request_bytes = match read_bounded_bytes(&mut stream, MAX_DAEMON_REQUEST_BYTES) {
                 Ok(bytes) => bytes,
                 Err(source) => {

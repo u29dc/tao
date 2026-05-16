@@ -824,6 +824,7 @@ dependencies = [
  "serde_json",
  "tao-sdk-bridge",
  "tao-sdk-links",
+ "tao-sdk-markdown",
  "tao-sdk-search",
  "tao-sdk-service",
  "tempfile",

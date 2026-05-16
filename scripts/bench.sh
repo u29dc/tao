@@ -729,9 +729,9 @@ EOF
 }
 
 run_sdk_suite() {
-  run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
+  run_tao_bench_scenario parse 500 "${PARSE_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --bridge-notes 1000
   run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 5000
-  run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
+  run_tao_bench_scenario search 500 "${SEARCH_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100
   run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
   run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200
@@ -855,13 +855,15 @@ case "${SUITE}" in
     validate_startup_budget
     ;;
   parse)
-    run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
+    prepare_fixture
+    run_tao_bench_scenario parse 500 "${PARSE_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --bridge-notes 1000
     ;;
   resolve)
     run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 5000
     ;;
   search)
-    run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
+    prepare_fixture
+    run_tao_bench_scenario search 500 "${SEARCH_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100
     ;;
 esac
 

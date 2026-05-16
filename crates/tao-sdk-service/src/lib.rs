@@ -5,6 +5,7 @@ mod config;
 mod feature_flags;
 mod graph;
 mod health;
+#[cfg(test)]
 mod import_export;
 mod indexing;
 mod ingest;
@@ -27,11 +28,6 @@ pub use config::{
 pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use graph::*;
 pub use health::*;
-pub use import_export::{
-    FilesystemImportExportService, ImportExportBoundaryError, ImportExportServiceBoundary,
-    TransferExecutionRequest, TransferExecutionResult, TransferFailure, TransferItem,
-    TransferItemKind, TransferJobKind, TransferMode, TransferPlan, TransferSummary,
-};
 pub use indexing::{
     CURRENT_LINK_RESOLUTION_VERSION, CheckpointedIndexError, CheckpointedIndexResult,
     CheckpointedIndexService, CoalescedBatchIndexResult, CoalescedBatchIndexService,

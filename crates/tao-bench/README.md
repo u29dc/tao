@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Run deterministic benchmark scenarios for bridge, startup, query, graph, parser, and CLI hot paths.
+Run deterministic benchmark scenarios for bridge, startup, query, graph, parser, search, and CLI hot paths.
 
 ## Public API
 
@@ -24,7 +24,7 @@ Scenario args -> benchmark loop -> latency samples -> JSON report for scripts/bu
 
 ## Dependencies
 
-- Internal: `tao-sdk-bridge`, `tao-sdk-service`, `tao-sdk-links`, `tao-sdk-search`
+- Internal: `tao-sdk-bridge`, `tao-sdk-service`, `tao-sdk-links`, `tao-sdk-markdown`, `tao-sdk-search`
 - External: `clap`, `serde`, `serde_json`, `rusqlite`, `anyhow`, `tempfile`
 
 ## Testing

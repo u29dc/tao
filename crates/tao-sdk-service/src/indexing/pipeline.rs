@@ -9,8 +9,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tao_sdk_links::{
-    WikiLink, extract_block_ids, extract_markdown_links, extract_wikilinks, resolve_block_target,
-    resolve_heading_target, resolve_target, slugify_heading,
+    LinkResolutionIndex, WikiLink, extract_block_ids, extract_markdown_links, extract_wikilinks,
+    resolve_block_target, resolve_heading_target, slugify_heading,
 };
 use tao_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
 use tao_sdk_properties::{
@@ -501,7 +501,7 @@ fn build_task_records(file_id: &str, source_path: &str, markdown: &str) -> Vec<T
 }
 
 struct LinkResolutionContext<'a> {
-    resolution_candidates: &'a [String],
+    resolution_index: &'a LinkResolutionIndex,
     file_id_by_path: &'a HashMap<String, String>,
     heading_index: &'a HashMap<String, Vec<String>>,
     block_index: &'a HashMap<String, Vec<String>>,
@@ -520,11 +520,9 @@ fn build_incremental_link_records(
         .enumerate()
     {
         let link = &indexed_link.link;
-        let resolution = resolve_target(
-            &link.target,
-            Some(source_path),
-            context.resolution_candidates,
-        );
+        let resolution = context
+            .resolution_index
+            .resolve(&link.target, Some(source_path));
         let mut resolved_file_id = resolution
             .resolved_path
             .as_ref()
@@ -586,16 +584,12 @@ fn build_incremental_link_records(
 
 fn stored_link_requires_refresh(
     link: &LinkWithPaths,
-    resolution_candidates: &[String],
+    resolution_index: &LinkResolutionIndex,
     file_id_by_path: &HashMap<String, String>,
     heading_index: &HashMap<String, Vec<String>>,
     block_index: &HashMap<String, Vec<String>>,
 ) -> bool {
-    let resolution = resolve_target(
-        &link.raw_target,
-        Some(&link.source_path),
-        resolution_candidates,
-    );
+    let resolution = resolution_index.resolve(&link.raw_target, Some(&link.source_path));
     let mut resolved_file_id = resolution
         .resolved_path
         .as_ref()
@@ -884,7 +878,7 @@ fn build_prepared_index_entry(
 
 fn resolve_document_link_records(
     document: &MarkdownIndexDocument,
-    resolution_candidates: &[String],
+    resolution_index: &LinkResolutionIndex,
     file_id_by_path: &HashMap<String, String>,
     heading_index: &HashMap<String, Vec<String>>,
     block_index: &HashMap<String, Vec<String>>,
@@ -894,11 +888,7 @@ fn resolve_document_link_records(
 
     for (index, indexed_link) in document.links.iter().enumerate() {
         let link = &indexed_link.link;
-        let resolution = resolve_target(
-            &link.target,
-            Some(&document.source_path),
-            resolution_candidates,
-        );
+        let resolution = resolution_index.resolve(&link.target, Some(&document.source_path));
 
         let mut resolved_file_id = resolution
             .resolved_path

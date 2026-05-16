@@ -45,6 +45,7 @@ impl FullIndexService {
             .iter()
             .map(|entry| entry.normalized.clone())
             .collect();
+        let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
         let markdown_candidates: Vec<String> = manifest
             .entries
             .iter()
@@ -111,7 +112,7 @@ impl FullIndexService {
             .map(|document| {
                 resolve_document_link_records(
                     document,
-                    &resolution_candidates,
+                    &resolution_index,
                     &file_id_by_path,
                     &heading_index,
                     &block_index,

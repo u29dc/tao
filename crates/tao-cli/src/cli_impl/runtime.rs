@@ -14,6 +14,7 @@ pub(crate) struct RuntimeCache {
     pub(crate) kernels: HashMap<String, BridgeKernel>,
     pub(crate) connections: HashMap<String, Connection>,
     pub(crate) command_results: HashMap<String, CachedCommandResult>,
+    pub(crate) command_result_order: VecDeque<String>,
     pub(crate) change_monitors: HashMap<String, VaultChangeMonitor>,
     pub(crate) last_reconciled_generation: HashMap<String, u64>,
 }

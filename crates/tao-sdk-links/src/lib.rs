@@ -1,6 +1,6 @@
 //! Markdown/wikilink parsing and deterministic link-resolution primitives.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use tao_sdk_core::{cmp_normalized_paths, normalize_path_like};
@@ -136,6 +136,88 @@ pub struct LinkResolution {
     pub is_ambiguous: bool,
 }
 
+/// Precomputed lookup table for deterministic link resolution.
+#[derive(Debug, Clone, Default)]
+pub struct LinkResolutionIndex {
+    by_normalized_target: HashMap<String, Vec<String>>,
+    by_basename: HashMap<String, Vec<String>>,
+}
+
+impl LinkResolutionIndex {
+    /// Build one resolution index from normalized vault-relative candidate paths.
+    #[must_use]
+    pub fn new(candidates: &[String]) -> Self {
+        let mut by_normalized_target = HashMap::<String, Vec<String>>::new();
+        let mut by_basename = HashMap::<String, Vec<String>>::new();
+
+        for candidate in candidates {
+            let normalized_candidate = normalize_path_like(candidate.trim());
+            let normalized_key = resolution_lookup_key(&normalized_candidate);
+            by_normalized_target
+                .entry(normalized_key)
+                .or_default()
+                .push(candidate.clone());
+
+            let basename_key = basename_lookup_key(&normalized_candidate);
+            by_basename
+                .entry(basename_key)
+                .or_default()
+                .push(candidate.clone());
+        }
+
+        for candidates in by_normalized_target
+            .values_mut()
+            .chain(by_basename.values_mut())
+        {
+            candidates.sort_by(|left, right| cmp_normalized_paths(left, right));
+            candidates.dedup();
+        }
+
+        Self {
+            by_normalized_target,
+            by_basename,
+        }
+    }
+
+    /// Resolve raw target using precomputed candidate lookup tables.
+    #[must_use]
+    pub fn resolve(&self, raw_target: &str, source_path: Option<&str>) -> LinkResolution {
+        let target = parse_wikilink(raw_target)
+            .map(|link| link.target)
+            .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
+        let Some(target) = normalize_resolution_target(&target) else {
+            return LinkResolution {
+                resolved_path: None,
+                matched_candidates: Vec::new(),
+                is_ambiguous: false,
+            };
+        };
+
+        let mut matched_candidates = Vec::<String>::new();
+        if target.contains('/') {
+            let source_dir = source_path.map(parent_dir);
+            let mut seen = HashSet::<String>::new();
+            for variant in resolve_target_variants(&target, source_dir.as_deref()) {
+                let key = resolution_lookup_key(&variant);
+                if let Some(candidates) = self.by_normalized_target.get(&key) {
+                    for candidate in candidates {
+                        if seen.insert(candidate.clone()) {
+                            matched_candidates.push(candidate.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            let key = basename_lookup_key(&target);
+            if let Some(candidates) = self.by_basename.get(&key) {
+                matched_candidates.extend(candidates.iter().cloned());
+            }
+        }
+
+        finish_resolution(matched_candidates, source_path)
+    }
+}
+
 /// Heading fragment resolution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadingResolution {
@@ -208,24 +290,7 @@ pub fn resolve_target(
         }
     }
 
-    if matched_candidates.is_empty() {
-        return LinkResolution {
-            resolved_path: None,
-            matched_candidates,
-            is_ambiguous: false,
-        };
-    }
-
-    let source_dir = source_path.map(parent_dir);
-    matched_candidates
-        .sort_by(|left, right| compare_candidates(left, right, source_dir.as_deref()));
-
-    let resolved_path = matched_candidates.first().cloned();
-    LinkResolution {
-        resolved_path,
-        is_ambiguous: matched_candidates.len() > 1,
-        matched_candidates,
-    }
+    finish_resolution(matched_candidates, source_path)
 }
 
 /// Convert heading text or heading fragment value into an Obsidian-style slug.
@@ -577,6 +642,39 @@ fn basename_without_extension(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
+fn resolution_lookup_key(path: &str) -> String {
+    strip_markdown_extension(path.trim()).to_ascii_lowercase()
+}
+
+fn basename_lookup_key(path: &str) -> String {
+    basename_without_extension(path).to_ascii_lowercase()
+}
+
+fn finish_resolution(
+    mut matched_candidates: Vec<String>,
+    source_path: Option<&str>,
+) -> LinkResolution {
+    if matched_candidates.is_empty() {
+        return LinkResolution {
+            resolved_path: None,
+            matched_candidates,
+            is_ambiguous: false,
+        };
+    }
+
+    let source_dir = source_path.map(parent_dir);
+    matched_candidates
+        .sort_by(|left, right| compare_candidates(left, right, source_dir.as_deref()));
+    matched_candidates.dedup();
+
+    let resolved_path = matched_candidates.first().cloned();
+    LinkResolution {
+        resolved_path,
+        is_ambiguous: matched_candidates.len() > 1,
+        matched_candidates,
+    }
+}
+
 fn parent_dir(path: &str) -> String {
     let normalized = normalize_path_like(path);
     let mut parts: Vec<&str> = normalized.split('/').collect();
@@ -647,9 +745,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        WikiLinkParseError, extract_block_ids, extract_markdown_links, extract_wikilinks,
-        parse_wikilink, resolve_block_target, resolve_heading_target, resolve_target,
-        slugify_heading,
+        LinkResolutionIndex, WikiLinkParseError, extract_block_ids, extract_markdown_links,
+        extract_wikilinks, parse_wikilink, resolve_block_target, resolve_heading_target,
+        resolve_target, slugify_heading,
     };
 
     #[test]
@@ -795,6 +893,28 @@ mod tests {
             resolution.matched_candidates,
             vec!["WORK/13-RELATIONS/Contents/Media/foo.jpg"]
         );
+    }
+
+    #[test]
+    fn resolution_index_matches_linear_resolver() {
+        let candidates = vec![
+            "notes/project/alpha.md".to_string(),
+            "notes/project/zeta.md".to_string(),
+            "archive/project/alpha.md".to_string(),
+            "assets/company-deck.pdf".to_string(),
+        ];
+        let index = LinkResolutionIndex::new(&candidates);
+
+        for raw_target in [
+            "[[alpha]]",
+            "[[notes/project/zeta]]",
+            "../assets/company-deck.pdf",
+            "[[missing]]",
+        ] {
+            let indexed = index.resolve(raw_target, Some("notes/project/today.md"));
+            let linear = resolve_target(raw_target, Some("notes/project/today.md"), &candidates);
+            assert_eq!(indexed, linear);
+        }
     }
 
     #[test]

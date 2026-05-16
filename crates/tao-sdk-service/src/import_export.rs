@@ -162,14 +162,6 @@ pub struct FilesystemImportExportService {
     case_policy: CasePolicy,
 }
 
-impl FilesystemImportExportService {
-    /// Create a filesystem boundary with explicit path case policy.
-    #[must_use]
-    pub fn new(case_policy: CasePolicy) -> Self {
-        Self { case_policy }
-    }
-}
-
 impl Default for FilesystemImportExportService {
     fn default() -> Self {
         Self {

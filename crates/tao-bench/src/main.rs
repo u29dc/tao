@@ -8,10 +8,13 @@ use clap::{Parser, ValueEnum};
 use rusqlite::Connection;
 use serde_json::{Value as JsonValue, json};
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
-use tao_sdk_links::resolve_target;
+use tao_sdk_links::LinkResolutionIndex;
+use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
-use tao_sdk_service::{BacklinkGraphService, GraphWalkRequest};
-use tempfile::tempdir;
+use tao_sdk_service::{
+    BacklinkGraphService, GraphWalkRequest, SearchKind, VaultSearchRequest, VaultSearchService,
+};
+use tempfile::{TempDir, tempdir};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum Scenario {
@@ -108,35 +111,132 @@ fn run() -> Result<()> {
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
         Scenario::GraphWalk => run_graph_walk_benchmark(&args),
+        Scenario::Parse => run_parse_benchmark(&args),
         Scenario::Resolve => run_resolve_benchmark(&args),
+        Scenario::Search => run_search_benchmark(&args),
         Scenario::Startup => run_startup_benchmark(&args),
         Scenario::UnifiedQuery => run_unified_query_benchmark(&args),
-        Scenario::Parse | Scenario::Search => run_cpu_smoke_benchmark(&args),
     }
 }
 
-fn run_cpu_smoke_benchmark(args: &Args) -> Result<()> {
-    let start = Instant::now();
-    for i in 0..args.iterations {
-        std::hint::black_box(i.wrapping_mul(31).wrapping_add(7));
+fn run_parse_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("parse benchmark iterations must be greater than zero");
     }
-    let elapsed_ms = elapsed_ms(start);
+    let (vault_root, _temp) = parse_benchmark_vault(args)?;
+    let docs =
+        collect_markdown_payloads(&vault_root, usize::try_from(args.bridge_notes.max(128))?)?;
+    if docs.is_empty() {
+        bail!(
+            "parse benchmark found no markdown files under {}",
+            vault_root.display()
+        );
+    }
 
+    let parser = MarkdownParser;
+    let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut headings_total = 0_u64;
+    let docs_len = u64::try_from(docs.len()).context("convert parsed document count")?;
+    for iteration in 0..args.iterations {
+        let index = usize::try_from(iteration % docs_len).context("convert sample index")?;
+        let (path, raw) = &docs[index];
+        let start = Instant::now();
+        let parsed = parser
+            .parse(MarkdownParseRequest {
+                normalized_path: path.clone(),
+                raw: raw.clone(),
+            })
+            .context("parse benchmark markdown sample failed")?;
+        samples.push(elapsed_ms(start));
+        headings_total = headings_total.saturating_add(u64::try_from(parsed.headings.len())?);
+        std::hint::black_box(parsed);
+    }
+
+    let summary = LatencySummary::from_samples(samples)?;
     println!(
-        "scenario={:?} iterations={} elapsed_ms={:.3}",
-        args.scenario, args.iterations, elapsed_ms
+        "parse docs={} p50_ms={:.3} p95_ms={:.3} headings_avg={:.1}",
+        docs.len(),
+        summary.p50_ms,
+        summary.p95_ms,
+        headings_total as f64 / args.iterations as f64
     );
-
+    let report = json!({
+        "scenario": "parse",
+        "iterations": args.iterations,
+        "docs_loaded": docs.len(),
+        "generated_at_unix": now_unix(),
+        "latency": summary.as_json(),
+        "headings_avg": round_ms(headings_total as f64 / args.iterations as f64),
+    });
     if let Some(path) = &args.json_out {
-        let report = json!({
-            "scenario": format!("{:?}", args.scenario).to_lowercase(),
-            "iterations": args.iterations,
-            "elapsed_ms": round_ms(elapsed_ms),
-            "generated_at_unix": now_unix(),
-        });
         write_json_report(path, &report)?;
     }
 
+    Ok(())
+}
+
+fn run_search_benchmark(args: &Args) -> Result<()> {
+    if args.iterations == 0 {
+        bail!("search benchmark iterations must be greater than zero");
+    }
+    let (vault_root, db_path, _temp) = search_benchmark_vault(args)?;
+    let request = VaultSearchRequest {
+        vault_root: vault_root.clone(),
+        query: Some(args.query_text.trim().to_string()),
+        path: None,
+        kind: SearchKind::Auto,
+        scope: None,
+        extensions: Vec::new(),
+        include_context: true,
+        depth: 2,
+        limit: u32::try_from(args.query_limit.clamp(1, 100))?,
+        include_content: false,
+        include_pii: true,
+    };
+    if request.query.as_deref().unwrap_or_default().is_empty() {
+        bail!("query text must not be empty");
+    }
+
+    let connection =
+        Connection::open(&db_path).with_context(|| format!("open sqlite {}", db_path.display()))?;
+    let service = VaultSearchService;
+    let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut candidates_total = 0_u64;
+    for _ in 0..args.iterations {
+        let start = Instant::now();
+        let result = service
+            .search(&connection, request.clone())
+            .context("vault search sample failed")?;
+        samples.push(elapsed_ms(start));
+        candidates_total = candidates_total.saturating_add(u64::try_from(result.candidates.len())?);
+        std::hint::black_box(result);
+    }
+
+    let summary = LatencySummary::from_samples(samples)?;
+    println!(
+        "search p50_ms={:.3} p95_ms={:.3} candidates_avg={:.1}",
+        summary.p50_ms,
+        summary.p95_ms,
+        candidates_total as f64 / args.iterations as f64
+    );
+
+    let report = json!({
+        "scenario": "search",
+        "iterations": args.iterations,
+        "generated_at_unix": now_unix(),
+        "vault_root": vault_root,
+        "db_path": db_path.display().to_string(),
+        "request": {
+            "query": request.query,
+            "kind": request.kind.label(),
+            "limit": request.limit,
+            "context": request.include_context,
+            "depth": request.depth,
+        },
+        "latency": summary.as_json(),
+        "candidates_avg": round_ms(candidates_total as f64 / args.iterations as f64),
+    });
+    write_benchmark_reports(args, &report, "search")?;
     Ok(())
 }
 
@@ -154,6 +254,7 @@ fn run_resolve_benchmark(args: &Args) -> Result<()> {
     for index in 0..(candidate_total / 5) {
         candidates.push(format!("archive/note-{index:05}.md"));
     }
+    let resolution_index = LinkResolutionIndex::new(&candidates);
 
     let links_per_iteration = 256_u64;
     let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
@@ -165,7 +266,7 @@ fn run_resolve_benchmark(args: &Args) -> Result<()> {
             let index = usize::try_from((iteration + offset) % args.bridge_notes.max(1_000))
                 .context("convert resolver index to usize")?;
             let target = format!("[[note-{index:05}]]");
-            let resolution = resolve_target(&target, Some("notes/current.md"), &candidates);
+            let resolution = resolution_index.resolve(&target, Some("notes/current.md"));
             std::hint::black_box(resolution.resolved_path);
         }
         samples.push(elapsed_ms(start));
@@ -567,6 +668,91 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     Ok(())
 }
 
+fn parse_benchmark_vault(args: &Args) -> Result<(PathBuf, Option<TempDir>)> {
+    if let Some(vault_root) = &args.vault_root {
+        if !vault_root.is_dir() {
+            bail!(
+                "vault root does not exist or is not a directory: {}",
+                vault_root.display()
+            );
+        }
+        return Ok((vault_root.clone(), None));
+    }
+
+    let temp = tempdir().context("create parse benchmark temp directory")?;
+    let vault_root = temp.path().join("vault");
+    let notes_dir = vault_root.join("notes");
+    fs::create_dir_all(&notes_dir).context("create parse benchmark notes directory")?;
+    for idx in 0..args.bridge_notes.max(128) {
+        let path = notes_dir.join(format!("parse-{idx:05}.md"));
+        let content = format!(
+            "---\nkind: benchmark\nindex: {idx}\n---\n# Parse {idx}\n\nProject benchmark note with [[parse-{next:05}]].\n\n- [ ] Follow up on project {idx}\n",
+            next = (idx + 1) % args.bridge_notes.max(128),
+        );
+        fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok((vault_root, Some(temp)))
+}
+
+fn search_benchmark_vault(args: &Args) -> Result<(PathBuf, PathBuf, Option<TempDir>)> {
+    if args.vault_root.is_some() || args.db_path.is_some() {
+        let (vault_root, db_path) = resolve_vault_and_db_paths(args)?;
+        return Ok((vault_root, db_path, None));
+    }
+
+    let temp = tempdir().context("create search benchmark temp directory")?;
+    let vault_root = temp.path().join("vault");
+    let db_path = temp.path().join("tao.sqlite");
+    seed_indexed_bridge_vault(&vault_root, &db_path, args.bridge_notes.max(128))
+        .context("seed search benchmark vault")?;
+    Ok((vault_root, db_path, Some(temp)))
+}
+
+fn collect_markdown_payloads(vault_root: &Path, limit: usize) -> Result<Vec<(String, String)>> {
+    let mut paths = Vec::<PathBuf>::new();
+    collect_markdown_paths(vault_root, &mut paths)?;
+    paths.sort();
+    paths.truncate(limit.max(1));
+
+    let mut payloads = Vec::with_capacity(paths.len());
+    for path in paths {
+        let normalized = path
+            .strip_prefix(vault_root)
+            .with_context(|| format!("strip vault prefix from {}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        payloads.push((normalized, raw));
+    }
+    Ok(payloads)
+}
+
+fn collect_markdown_paths(current: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(current).with_context(|| format!("read dir {}", current.display()))? {
+        let entry = entry.with_context(|| format!("read dir entry {}", current.display()))?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name == ".git" || name == ".obsidian" || name == ".tao" {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .with_context(|| format!("metadata {}", path.display()))?;
+        if metadata.is_dir() {
+            collect_markdown_paths(&path, paths)?;
+        } else if metadata.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn seed_indexed_bridge_vault(vault_root: &Path, db_path: &Path, notes_total: u64) -> Result<()> {
     let notes_dir = vault_root.join("notes");
     fs::create_dir_all(&notes_dir).context("create bridge benchmark notes directory")?;
@@ -574,7 +760,9 @@ fn seed_indexed_bridge_vault(vault_root: &Path, db_path: &Path, notes_total: u64
     for idx in 0..notes_total {
         let next = (idx + 1) % notes_total;
         let path = notes_dir.join(format!("note-{idx:05}.md"));
-        let content = format!("# Note {idx}\n\nseed note with [[note-{next:05}]]\n");
+        let content = format!(
+            "# Note {idx}\n\nProject seed note with [[note-{next:05}]].\n\n- [ ] Follow project benchmark task {idx}\n"
+        );
         fs::write(&path, content).with_context(|| format!("write seed note {}", path.display()))?;
     }
 
@@ -708,10 +896,12 @@ fn write_markdown_summary(path: &Path, report: &JsonValue) -> Result<()> {
         .unwrap_or(0);
     let warm_p50 = report
         .pointer("/latency/warm/p50_ms")
+        .or_else(|| report.pointer("/latency/p50_ms"))
         .and_then(JsonValue::as_f64)
         .unwrap_or(0.0);
     let warm_p95 = report
         .pointer("/latency/warm/p95_ms")
+        .or_else(|| report.pointer("/latency/p95_ms"))
         .and_then(JsonValue::as_f64)
         .unwrap_or(0.0);
     let cold_p50 = report

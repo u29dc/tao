@@ -1237,6 +1237,118 @@ fn search_path_context_returns_links_walk_timeline_and_attachments() {
                 .and_then(JsonValue::as_array)
                 .is_some_and(|rows| !rows.is_empty())
         );
+        let base_rows = context
+            .get("base_rows")
+            .and_then(JsonValue::as_array)
+            .expect("base rows");
+        assert!(
+            base_rows.iter().any(|row| {
+                row.get("path").and_then(JsonValue::as_str)
+                    == Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+            }),
+            "path context should hydrate base rows for the selected note"
+        );
+    });
+}
+
+#[test]
+fn search_bases_scans_beyond_first_base_page() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes/projects")).expect("create projects");
+        fs::create_dir_all(vault_root.join("views")).expect("create views");
+        fs::write(
+            vault_root.join("views/projects.base"),
+            r#"
+views:
+  - name: Projects
+    type: table
+    source: notes/projects
+    columns:
+      - title
+      - marker
+"#,
+        )
+        .expect("write base");
+        for index in 0..75_u32 {
+            fs::write(
+                vault_root.join(format!("notes/projects/a-{index:03}.md")),
+                format!("---\nmarker: ordinary-{index}\n---\n# A {index}\n"),
+            )
+            .expect("write ordinary project");
+        }
+        fs::write(
+            vault_root.join("notes/projects/zz-target.md"),
+            "---\nmarker: after-page-one\n---\n# Target\n",
+        )
+        .expect("write target project");
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "after-page-one",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--kind",
+            "bases",
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(cli.json, &dispatch(cli.command).expect("dispatch search"))
+            .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let surface_rows = envelope
+            .get("data")
+            .and_then(|data| data.get("candidates"))
+            .and_then(JsonValue::as_array)
+            .expect("candidates");
+        assert!(surface_rows.iter().any(|row| {
+            row.get("path").and_then(JsonValue::as_str) == Some("notes/projects/zz-target.md")
+        }));
+    });
+}
+
+#[test]
+fn search_include_content_handles_unicode_excerpt_boundaries() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        let prefix = format!("é{}", "a".repeat(119));
+        fs::write(
+            vault_root.join("notes/unicode.md"),
+            format!("{prefix}needle appears after unicode boundary"),
+        )
+        .expect("write unicode note");
+        open_and_reindex_fixture(&vault_root);
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "needle",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--include-content",
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(cli.json, &dispatch(cli.command).expect("dispatch search"))
+            .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let docs = envelope
+            .get("data")
+            .and_then(|data| data.get("docs"))
+            .and_then(JsonValue::as_array)
+            .expect("docs");
+        assert!(docs.iter().any(|doc| {
+            doc.get("path").and_then(JsonValue::as_str) == Some("notes/unicode.md")
+                && doc
+                    .get("excerpt")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|excerpt| excerpt.contains("needle"))
+        }));
     });
 }
 
@@ -4201,6 +4313,33 @@ fn observational_policy_leaves_existing_daemon_result_cache_untouched() {
     if let RuntimeMode::Daemon(cache) = &runtime {
         assert_eq!(cache.command_results.len(), 1);
         assert!(cache.command_results.contains_key("cached-key"));
+    }
+}
+
+#[test]
+fn daemon_result_cache_evicts_old_entries() {
+    let mut runtime = RuntimeMode::Daemon(Box::<RuntimeCache>::default());
+    let result = CommandResult {
+        command: "query.run".to_string(),
+        summary: "cached".to_string(),
+        args: serde_json::json!({ "total": 1 }),
+    };
+
+    for index in 0..300_u32 {
+        update_daemon_command_cache(
+            &mut runtime,
+            DaemonExecutionPolicy::CachedReadWithRefresh,
+            Some("runtime-key"),
+            Some(format!("cache-{index:03}")),
+            &result,
+        );
+    }
+
+    if let RuntimeMode::Daemon(cache) = &runtime {
+        assert_eq!(cache.command_results.len(), 256);
+        assert_eq!(cache.command_result_order.len(), 256);
+        assert!(!cache.command_results.contains_key("cache-000"));
+        assert!(cache.command_results.contains_key("cache-299"));
     }
 }
 

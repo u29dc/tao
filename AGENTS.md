@@ -42,7 +42,7 @@
 
 - `bun install` installs JS tooling and activates Husky hooks
 - `cargo run -p tao-cli -- --help` iterates on the CLI without requiring a prior release build
-- `bun run util:check` is the full completion gate: path-guard tests, Biome, `cargo fmt`, clippy, release `cargo check`, release tests, `cargo audit`, and `bun run build`
+- `bun run util:check` is the full completion gate: path-guard tests, Biome, `cargo fmt --check`, clippy, release `cargo check`, release tests, `cargo audit`, and `bun run build`
 - `bun run build` packages release CLI artifacts via [`scripts/release.sh`](scripts/release.sh)
 - `bun run bench`, `bun run bench:smoke`, and `bun run bench:budget` are the package benchmark entrypoints; pass suite flags through `bun run bench -- --suite live` or `bun run bench -- --suite cli`
 - `./scripts/fixtures.sh --profile parity` refreshes compact parity fixtures; generated synthetic benchmark fixtures are limited to `1k` and `5k`

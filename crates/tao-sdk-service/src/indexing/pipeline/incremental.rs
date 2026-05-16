@@ -313,9 +313,10 @@ impl IncrementalIndexService {
                     heading_index.insert(normalized.clone(), heading_slugs);
                     block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
 
+                    let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
                     let link_records = build_incremental_link_records(
                         &LinkResolutionContext {
-                            resolution_candidates: &resolution_candidates,
+                            resolution_index: &resolution_index,
                             file_id_by_path: &file_id_by_path,
                             heading_index: &heading_index,
                             block_index: &block_index,
@@ -405,12 +406,13 @@ impl IncrementalIndexService {
             })?
         };
 
+        let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
         let affected_sources = candidate_link_rows
             .iter()
             .filter(|link| {
                 stored_link_requires_refresh(
                     link,
-                    &resolution_candidates,
+                    &resolution_index,
                     &file_id_by_path,
                     &heading_index,
                     &block_index,
@@ -455,9 +457,10 @@ impl IncrementalIndexService {
                     operation: "delete_links_for_dependent_source",
                     source: Box::new(source),
                 })?;
+            let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
             let link_records = build_incremental_link_records(
                 &LinkResolutionContext {
-                    resolution_candidates: &resolution_candidates,
+                    resolution_index: &resolution_index,
                     file_id_by_path: &file_id_by_path,
                     heading_index: &heading_index,
                     block_index: &block_index,
