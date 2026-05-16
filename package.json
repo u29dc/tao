@@ -20,7 +20,8 @@
 		"util:clean": "./scripts/clean.sh",
 		"util:path-guards": "./scripts/tests/path_guards_test.sh",
 		"util:biome": "bunx @biomejs/biome check biome.json package.json commitlint.config.js lint-staged.config.js",
-		"util:format": "cargo fmt --all",
+		"util:format": "cargo fmt --all -- --check",
+		"util:format:write": "cargo fmt --all",
 		"util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
 		"util:types": "cargo check --workspace --release",
 		"util:test": "cargo test --workspace --release",
@@ -33,8 +34,8 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.15",
-		"@commitlint/cli": "^21.0.0",
-		"@commitlint/config-conventional": "^21.0.0",
+		"@commitlint/cli": "^21.0.1",
+		"@commitlint/config-conventional": "^21.0.1",
 		"husky": "^9.1.7",
 		"lint-staged": "^17.0.4"
 	}
