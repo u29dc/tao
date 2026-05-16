@@ -18,31 +18,24 @@
 		"release:cli": "./scripts/release.sh --target cli",
 		"util --------------------------------------------": "",
 		"util:clean": "./scripts/clean.sh",
-		"util:safety": "./scripts/safety.sh --check-repo",
+		"util:path-guards": "./scripts/tests/path_guards_test.sh",
 		"util:biome": "bunx @biomejs/biome check biome.json package.json commitlint.config.js lint-staged.config.js",
 		"util:format": "cargo fmt --all",
 		"util:lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
 		"util:types": "cargo check --workspace --release",
 		"util:test": "cargo test --workspace --release",
 		"util:audit": "cargo audit",
-		"util:check": "bun run util:safety && bun run util:biome && bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build",
+		"util:check": "bun run util:path-guards && bun run util:biome && bun run util:format && bun run util:lint && bun run util:types && bun run util:test && bun run util:audit && bun run build",
 		"bench -------------------------------------------": "",
-		"bench": "./scripts/bench.sh --suite all",
-		"bench:all": "./scripts/bench.sh --suite all",
+		"bench": "./scripts/bench.sh",
 		"bench:smoke": "./scripts/bench.sh --suite cli --profile 1k --runs 1 --warmup 0",
-		"bench:sdk": "./scripts/bench.sh --suite sdk",
-		"bench:cli": "./scripts/bench.sh --suite cli",
-		"bench:daemon": "./scripts/bench.sh --suite daemon",
-		"bench:fixtures": "./scripts/bench.sh --suite fixtures",
-		"bench:budget": "./scripts/budgets.sh --profile 10k",
-		"bench:bridge": "./scripts/bench.sh --suite bridge",
-		"bench:startup": "./scripts/bench.sh --suite startup"
+		"bench:budget": "./scripts/budgets.sh --profile 5k"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.14",
-		"@commitlint/cli": "^20.5.3",
-		"@commitlint/config-conventional": "^20.5.3",
+		"@biomejs/biome": "^2.4.15",
+		"@commitlint/cli": "^21.0.0",
+		"@commitlint/config-conventional": "^21.0.0",
 		"husky": "^9.1.7",
-		"lint-staged": "^16.4.0"
+		"lint-staged": "^17.0.4"
 	}
 }

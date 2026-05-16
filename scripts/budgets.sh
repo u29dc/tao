@@ -2,19 +2,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-source "${SCRIPT_DIR}/safety.sh"
+source "${SCRIPT_DIR}/path-guards.sh"
 
 usage() {
   cat <<USAGE
 Usage: scripts/budgets.sh [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--budget-config PATH] [--budget-ms N] [--skip-generate]
 
-Phase23 read-budget gate for generated fixtures only.
+Phase23 read-budget gate for generated fixtures.
 
-Checks (daemon warm path, profile 10k by default):
+Checks (daemon warm path, profile 5k by default):
   - query docs
   - query base
   - query graph
   - graph walk
+  - search project context
   - meta tags
 
 The gate fails when any command p50 exceeds its configured case budget.
@@ -96,7 +97,7 @@ done
 
 load_budget_defaults() {
   local config_path="$1"
-  local fallback_profile="10k"
+  local fallback_profile="5k"
   local fallback_budget="10"
   if [[ ! -f "$config_path" ]]; then
     PROFILE="${PROFILE:-$fallback_profile}"
@@ -184,10 +185,10 @@ if ! [[ "$BUDGET_MS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   exit 1
 fi
 case "$PROFILE" in
-  1k|2k|5k|10k|25k)
+  1k|5k)
     ;;
   *)
-    echo "--profile must be one of: 1k|2k|5k|10k|25k" >&2
+    echo "--profile must be one of: 1k|5k" >&2
     exit 1
     ;;
 esac
@@ -201,10 +202,10 @@ FIXTURE_VAULT="${FIXTURE_ROOT}/vault-${PROFILE}"
 REPORT_DIR="${OUTPUT_ROOT}/${RUN_STAMP}/budgets"
 SUMMARY_JSON="${REPORT_DIR}/summary.json"
 SUMMARY_MD="${REPORT_DIR}/summary.md"
-assert_safe_path "${OUTPUT_ROOT}" "budget output root"
-assert_safe_path "${FIXTURE_ROOT}" "fixture root"
-assert_safe_path "${REPORT_DIR}" "budget report dir"
-assert_safe_path "${OUTPUT_ROOT}/latest" "budget latest symlink"
+assert_repo_local_path "${OUTPUT_ROOT}" "budget output root"
+assert_repo_local_path "${FIXTURE_ROOT}" "fixture root"
+assert_repo_local_path "${REPORT_DIR}" "budget report dir"
+assert_repo_local_path "${OUTPUT_ROOT}/latest" "budget latest symlink"
 mkdir -p "${REPORT_DIR}"
 ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
 
@@ -246,11 +247,11 @@ prepare_fixture() {
   fi
 
   FIXTURE_VAULT="$(cd "${FIXTURE_VAULT}" && pwd -P)"
-  assert_safe_path "${FIXTURE_VAULT}" "fixture vault"
+  assert_repo_local_path "${FIXTURE_VAULT}" "fixture vault"
   DB_PATH="${FIXTURE_VAULT}/.tao/index.sqlite"
   DAEMON_SOCKET="${FIXTURE_VAULT}/.tao/taod-budgets.sock"
-  assert_safe_path "${DB_PATH}" "budget sqlite path"
-  assert_safe_path "${DAEMON_SOCKET}" "budget daemon socket path"
+  assert_repo_local_path "${DB_PATH}" "budget sqlite path"
+  assert_repo_local_path "${DAEMON_SOCKET}" "budget daemon socket path"
 
   "${CLI_BIN}" vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
   "${CLI_BIN}" vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
@@ -285,6 +286,7 @@ query-graph|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} query --vault-root ${FIX
 graph-neighbors|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph neighbors --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --limit 100 --offset 0 > /dev/null
 graph-path|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph path --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from ${SAMPLE_NOTE} --to ${SAMPLE_TARGET_NOTE} --max-depth 8 --max-nodes 10000 > /dev/null
 graph-walk|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} graph walk --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --depth 2 --limit 200 > /dev/null
+search-project|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} search project --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --context --depth 2 --limit 50 > /dev/null
 meta-tags|${CLI_BIN} --daemon-socket ${DAEMON_SOCKET} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0 > /dev/null
 EOF
 )

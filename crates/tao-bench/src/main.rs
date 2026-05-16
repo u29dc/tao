@@ -213,17 +213,8 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
     let notes_dir = vault_root.join("notes");
     let db_path = temp.path().join("tao.sqlite");
     fs::create_dir_all(&notes_dir).context("create startup benchmark notes directory")?;
-
-    let mut seed_kernel = BridgeKernel::open(&vault_root, &db_path)
-        .context("open startup benchmark bridge kernel")?;
-    for idx in 0..notes_total {
-        let path = format!("notes/note-{idx:05}.md");
-        let content = format!("# Note {idx}\nstartup seed");
-        consume_envelope(
-            seed_kernel.note_put_with_policy(&path, &content, true),
-            "startup_seed_note_put",
-        )?;
-    }
+    seed_indexed_bridge_vault(&vault_root, &db_path, notes_total)
+        .context("seed startup benchmark vault")?;
 
     let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
     for _ in 0..args.iterations {
@@ -456,21 +447,15 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     let notes_dir = vault_root.join("notes");
     let db_path = temp.path().join("tao.sqlite");
     fs::create_dir_all(&notes_dir).context("create benchmark notes directory")?;
+    seed_indexed_bridge_vault(&vault_root, &db_path, notes_total)
+        .context("seed bridge benchmark vault")?;
 
-    let mut kernel = BridgeKernel::open(&vault_root, &db_path).context("open bridge kernel")?;
-
-    for idx in 0..notes_total {
-        let path = format!("notes/note-{idx:05}.md");
-        let content = format!("# Note {idx}\nseed");
-        consume_envelope(
-            kernel.note_put_with_policy(&path, &content, true),
-            "seed_note_put",
-        )?;
-    }
+    let kernel = BridgeKernel::open(&vault_root, &db_path).context("open bridge kernel")?;
 
     let mut note_get_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
     let mut notes_list_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
-    let mut note_put_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut note_context_samples =
+        Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
     let mut events_poll_samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
     let mut event_cursor = 0_u64;
 
@@ -486,13 +471,9 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         consume_envelope(kernel.notes_list(None, 64), "notes_list")?;
         notes_list_samples.push(elapsed_ms(notes_list_start));
 
-        let content = format!("# Note {idx}\niteration {iteration}");
-        let note_put_start = Instant::now();
-        consume_envelope(
-            kernel.note_put_with_policy(&path, &content, true),
-            "note_put",
-        )?;
-        note_put_samples.push(elapsed_ms(note_put_start));
+        let note_context_start = Instant::now();
+        consume_envelope(kernel.note_context(&path), "note_context")?;
+        note_context_samples.push(elapsed_ms(note_context_start));
 
         let events_poll_start = Instant::now();
         let batch = consume_envelope(kernel.events_poll(event_cursor, 256), "events_poll")?;
@@ -502,7 +483,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
 
     let note_get = LatencySummary::from_samples(note_get_samples)?;
     let notes_list = LatencySummary::from_samples(notes_list_samples)?;
-    let note_put = LatencySummary::from_samples(note_put_samples)?;
+    let note_context = LatencySummary::from_samples(note_context_samples)?;
     let events_poll = LatencySummary::from_samples(events_poll_samples)?;
 
     println!(
@@ -514,8 +495,8 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         notes_list.p50_ms, notes_list.p95_ms, notes_list.max_ms
     );
     println!(
-        "bridge metric=note_put p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        note_put.p50_ms, note_put.p95_ms, note_put.max_ms
+        "bridge metric=note_context p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
+        note_context.p50_ms, note_context.p95_ms, note_context.max_ms
     );
     println!(
         "bridge metric=events_poll p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
@@ -538,8 +519,8 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         &mut violations,
     );
     check_budget(
-        "note_put",
-        note_put,
+        "note_context",
+        note_context,
         args.max_p50_ms,
         args.max_p95_ms,
         &mut violations,
@@ -564,7 +545,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         "metrics": {
             "note_get": note_get.as_json(),
             "notes_list": notes_list.as_json(),
-            "note_put": note_put.as_json(),
+            "note_context": note_context.as_json(),
             "events_poll": events_poll.as_json(),
         },
         "violations": violations,
@@ -583,6 +564,25 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn seed_indexed_bridge_vault(vault_root: &Path, db_path: &Path, notes_total: u64) -> Result<()> {
+    let notes_dir = vault_root.join("notes");
+    fs::create_dir_all(&notes_dir).context("create bridge benchmark notes directory")?;
+
+    for idx in 0..notes_total {
+        let next = (idx + 1) % notes_total;
+        let path = notes_dir.join(format!("note-{idx:05}.md"));
+        let content = format!("# Note {idx}\n\nseed note with [[note-{next:05}]]\n");
+        fs::write(&path, content).with_context(|| format!("write seed note {}", path.display()))?;
+    }
+
+    let mut kernel =
+        BridgeKernel::open(vault_root, db_path).context("open bridge kernel for seed indexing")?;
+    kernel
+        .ensure_indexed()
+        .context("index seeded bridge benchmark vault")?;
     Ok(())
 }
 

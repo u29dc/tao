@@ -2,26 +2,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-source "${SCRIPT_DIR}/safety.sh"
+source "${SCRIPT_DIR}/path-guards.sh"
 
 usage() {
   cat <<USAGE
 Usage: scripts/fixtures.sh [--profile PROFILE] [--notes N] [--seed N] [--output DIR] [--skip-validate]
 
 Profiles:
-  all      Generate vault-1k, vault-2k, vault-5k, vault-10k, vault-25k (default)
+  all      Generate vault-1k and vault-5k (default)
   parity   Generate graph-parity and base-parity deterministic fixture sets
   1k       Generate vault-1k
-  2k       Generate vault-2k
   5k       Generate vault-5k
-  10k      Generate vault-10k
-  25k      Generate vault-25k
 
 Examples:
   scripts/fixtures.sh
-  scripts/fixtures.sh --profile 10k --seed 7
+  scripts/fixtures.sh --profile 5k --seed 7
   scripts/fixtures.sh --notes 2000 --seed 99 --output vault/generated
-  scripts/fixtures.sh --profile 10k --skip-validate
+  scripts/fixtures.sh --profile 5k --skip-validate
 USAGE
 }
 
@@ -30,6 +27,7 @@ NOTES=""
 SEED="42"
 OUTPUT_ROOT="vault/generated"
 VALIDATE=1
+GENERATED_VAULTS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -79,7 +77,7 @@ if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-assert_safe_path "$OUTPUT_ROOT" "fixture output root"
+assert_repo_local_path "$OUTPUT_ROOT" "fixture output root"
 mkdir -p "$OUTPUT_ROOT"
 
 fail_validation() {
@@ -167,8 +165,8 @@ validate_generated_vault() {
   ratio=$(awk -v unresolved="$unresolved_links" -v total="$total_links" 'BEGIN { if (total == 0) { print 0 } else { print unresolved / total } }')
   awk -v r="$ratio" 'BEGIN { exit !(r > 0.005 && r < 0.40) }' || fail_validation "unresolved ratio out of bounds in $vault: $ratio"
 
-  if rg -n 'Dropbox/VAULT|/Users/han/' "$vault" -g '*.md' >/dev/null 2>&1; then
-    fail_validation "potential personal path leakage detected in $vault"
+  if rg -n '(/Users/[^[:space:]]+|/home/[^[:space:]]+|[A-Za-z]:\\Users\\)' "$vault" -g '*.md' >/dev/null 2>&1; then
+    fail_validation "potential absolute user-path leakage detected in $vault"
   fi
 
   echo "validated $(basename "$vault"): links=$total_links frontmatter_links=$fm_links unresolved=$unresolved_links tasks=$tasks_count tags=$tag_count"
@@ -176,11 +174,25 @@ validate_generated_vault() {
 
 validate_generated_root() {
   local root="$1"
-  assert_safe_path "$root" "fixture validation root"
+  assert_repo_local_path "$root" "fixture validation root"
   while IFS= read -r vault; do
     validate_generated_vault "$vault"
   done <<< "$(list_generated_vaults "$root")"
   echo "fixture validation passed for root: $root"
+}
+
+validate_generated_selection() {
+  local root="$1"
+  assert_repo_local_path "$root" "fixture validation root"
+  if (( ${#GENERATED_VAULTS[@]} == 0 )); then
+    validate_generated_root "$root"
+    return
+  fi
+  local vault
+  for vault in "${GENERATED_VAULTS[@]}"; do
+    validate_generated_vault "$vault"
+  done
+  echo "fixture validation passed for generated selection under: $root"
 }
 
 write_base_files() {
@@ -412,7 +424,7 @@ generate_profile() {
   local seed="$3"
   local root="$OUTPUT_ROOT/$name"
 
-  assert_safe_path "$root" "generated fixture root"
+  assert_repo_local_path "$root" "generated fixture root"
   rm -rf "$root"
   mkdir -p "$root/notes/projects" "$root/notes/contacts" "$root/notes/companies" "$root/notes/meetings" "$root/daily" "$root/templates"
 
@@ -458,6 +470,7 @@ template: daily
 TPL
 
   write_base_files "$root"
+  GENERATED_VAULTS+=("$root")
   echo "generated ${name}: notes=${notes_total} seed=${seed} root=${root}"
 }
 
@@ -466,9 +479,9 @@ generate_parity_fixtures() {
   local graph_root="$root/graph-parity"
   local base_root="$root/base-parity"
 
-  assert_safe_path "$root" "parity fixture root"
-  assert_safe_path "$graph_root" "graph parity fixture root"
-  assert_safe_path "$base_root" "base parity fixture root"
+  assert_repo_local_path "$root" "parity fixture root"
+  assert_repo_local_path "$graph_root" "graph parity fixture root"
+  assert_repo_local_path "$base_root" "base parity fixture root"
   rm -rf "$graph_root" "$base_root"
   mkdir -p "$graph_root/notes" "$graph_root/expected"
   mkdir -p "$base_root/notes/projects" "$base_root/notes/meetings" "$base_root/views"
@@ -567,7 +580,7 @@ validate_parity_root() {
   local root="$1"
   local graph_root="$root/graph-parity"
   local base_root="$root/base-parity"
-  assert_safe_path "$root" "parity fixture root"
+  assert_repo_local_path "$root" "parity fixture root"
   [[ -f "$graph_root/notes/root.md" ]] || fail_validation "missing graph parity root note"
   [[ -f "$graph_root/notes/alpha.md" ]] || fail_validation "missing graph parity alpha note"
   [[ -f "$base_root/views/projects.base" ]] || fail_validation "missing base parity projects.base"
@@ -587,25 +600,13 @@ else
       ;;
     all)
       generate_profile "vault-1k" 1000 "$((SEED + 1000))"
-      generate_profile "vault-2k" 2000 "$((SEED + 2000))"
       generate_profile "vault-5k" 5000 "$((SEED + 5000))"
-      generate_profile "vault-10k" 10000 "$((SEED + 10000))"
-      generate_profile "vault-25k" 25000 "$((SEED + 25000))"
       ;;
     1k)
       generate_profile "vault-1k" 1000 "$SEED"
       ;;
-    2k)
-      generate_profile "vault-2k" 2000 "$SEED"
-      ;;
     5k)
       generate_profile "vault-5k" 5000 "$SEED"
-      ;;
-    10k)
-      generate_profile "vault-10k" 10000 "$SEED"
-      ;;
-    25k)
-      generate_profile "vault-25k" 25000 "$SEED"
       ;;
     *)
       echo "unsupported profile: $PROFILE" >&2
@@ -619,6 +620,6 @@ if [[ "${VALIDATE}" -eq 1 ]]; then
   if [[ "${PROFILE}" == "parity" ]]; then
     validate_parity_root "${OUTPUT_ROOT}"
   else
-    validate_generated_root "${OUTPUT_ROOT}"
+    validate_generated_selection "${OUTPUT_ROOT}"
   fi
 fi

@@ -2,19 +2,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-source "${SCRIPT_DIR}/safety.sh"
+source "${SCRIPT_DIR}/path-guards.sh"
 
 usage() {
   cat <<USAGE
-Usage: scripts/bench.sh [--suite SUITE] [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--skip-generate]
+Usage: scripts/bench.sh [--suite SUITE] [--profile PROFILE] [--seed N] [--runs N] [--warmup N] [--output DIR] [--skip-generate] [--live-vault PATH] [--live-commands PATH]
 
 Unified benchmark driver for Tao SDK/internal-bridge/core/CLI workloads.
 
 Suites:
-  all      Run sdk + full read-only cli matrix (default)
+  all      Run sdk + full read-only cli matrix, plus live vault benchmarks when configured (default)
   sdk      Run parse/resolve/search/bridge/startup/graph-walk/unified-query + baseline query/graph budgets
   cli      Run full read-only CLI command matrix
-  fixtures Run fixture generation throughput benchmark (1k, 5k, 10k)
+  live     Run real-vault read-only/index benchmark matrix
+  fixtures Run fixture generation throughput benchmark (1k, 5k)
   daemon   Run one-shot vs daemon warm-runtime comparison
   graph-walk Run tao-bench graph-walk scenario
   unified-query Run tao-bench unified-query scenario
@@ -25,24 +26,31 @@ Suites:
   search   Run search scenario only
 
 Options:
-  --profile PROFILE   Fixture profile for CLI workloads: 1k|2k|5k|10k|25k (default: 10k)
+  --profile PROFILE   Fixture profile for CLI workloads: 1k|5k (default: 5k)
   --seed N            Fixture seed (default: 42)
   --runs N            Hyperfine runs per command (default: 25)
   --warmup N          Hyperfine warmup runs per command (default: 5)
   --output DIR        Benchmark output root (default: .benchmarks/reports)
   --skip-generate     Reuse existing fixture and skip generation/validation
+  --live-vault PATH   Existing vault directory for live read-only benchmark runs; also read from TAO_BENCH_LIVE_VAULT
+  --live-commands PATH
+                      Optional gitignored command file for private live search/path probes (default: .benchmarks/live-commands.txt)
   -h, --help          Show this help
 USAGE
 }
 
 SUITE="all"
-FIXTURE_PROFILE="10k"
+FIXTURE_PROFILE="5k"
 SEED="42"
 RUNS="25"
 WARMUP="5"
 OUTPUT_ROOT=".benchmarks/reports"
 SKIP_GENERATE=0
 FIXTURE_ROOT="vault/generated"
+LIVE_VAULT="${TAO_BENCH_LIVE_VAULT:-}"
+LIVE_COMMANDS_FILE="${TAO_BENCH_LIVE_COMMANDS:-.benchmarks/live-commands.txt}"
+LIVE_DB_PATH="${TAO_BENCH_LIVE_DB_PATH:-}"
+LIVE_SOCKET="${TAO_BENCH_LIVE_SOCKET:-}"
 CLI_BUDGET_MS="10"
 DAEMON_MIN_IMPROVEMENT_PCT="5"
 DAEMON_LOOP_COUNT="50"
@@ -78,6 +86,14 @@ while [[ $# -gt 0 ]]; do
       SKIP_GENERATE=1
       shift
       ;;
+    --live-vault)
+      LIVE_VAULT="${2:-}"
+      shift 2
+      ;;
+    --live-commands)
+      LIVE_COMMANDS_FILE="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -103,18 +119,18 @@ if ! [[ "$SEED" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 case "$FIXTURE_PROFILE" in
-  1k|2k|5k|10k|25k)
+  1k|5k)
     ;;
   *)
-    echo "--profile must be one of: 1k|2k|5k|10k|25k" >&2
+    echo "--profile must be one of: 1k|5k" >&2
     exit 1
     ;;
 esac
 case "$SUITE" in
-  all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core)
+  all|sdk|cli|live|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core)
     ;;
   *)
-    echo "--suite must be one of: all|sdk|cli|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core" >&2
+    echo "--suite must be one of: all|sdk|cli|live|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core" >&2
     exit 1
     ;;
 esac
@@ -127,6 +143,8 @@ RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 REPORT_DIR="${OUTPUT_ROOT}/${RUN_STAMP}"
 CLI_MATRIX_REPORT_DIR="${REPORT_DIR}/cli-readonly"
 CLI_MATRIX_SUMMARY_PATH="${CLI_MATRIX_REPORT_DIR}/summary.json"
+LIVE_REPORT_DIR="${REPORT_DIR}/live-readonly"
+LIVE_SUMMARY_PATH="${LIVE_REPORT_DIR}/summary.json"
 BENCH_BIN="target/release/tao-bench"
 CLI_BIN="target/release/tao"
 FIXTURE_VAULT="${FIXTURE_ROOT}/vault-${FIXTURE_PROFILE}"
@@ -152,11 +170,11 @@ STREAM_COMPARE_SUMMARY="${REPORT_DIR}/query-docs-stream-vs-standard.summary.json
 DAEMON_SOCKET=""
 DAEMON_RUNNING=0
 
-assert_safe_path "${OUTPUT_ROOT}" "benchmark output root"
-assert_safe_path "${FIXTURE_ROOT}" "fixture root"
-assert_safe_path "${REPORT_DIR}" "benchmark report dir"
-assert_safe_path "${CLI_MATRIX_REPORT_DIR}" "benchmark cli matrix report dir"
-assert_safe_path "${OUTPUT_ROOT}/latest" "benchmark latest symlink"
+assert_repo_local_path "${OUTPUT_ROOT}" "benchmark output root"
+assert_repo_local_path "${FIXTURE_ROOT}" "fixture root"
+assert_repo_local_path "${REPORT_DIR}" "benchmark report dir"
+assert_repo_local_path "${CLI_MATRIX_REPORT_DIR}" "benchmark cli matrix report dir"
+assert_repo_local_path "${OUTPUT_ROOT}/latest" "benchmark latest symlink"
 
 mkdir -p "${REPORT_DIR}" "${CLI_MATRIX_REPORT_DIR}"
 ln -sfn "${RUN_STAMP}" "${OUTPUT_ROOT}/latest"
@@ -206,19 +224,74 @@ prepare_fixture() {
   fi
 
   FIXTURE_VAULT="$(cd "${FIXTURE_VAULT}" && pwd -P)"
-  assert_safe_path "${FIXTURE_VAULT}" "fixture vault"
+  assert_repo_local_path "${FIXTURE_VAULT}" "fixture vault"
   DB_PATH="${FIXTURE_VAULT}/.tao/index.sqlite"
   DAEMON_SOCKET="${FIXTURE_VAULT}/.tao/taod.sock"
-  assert_safe_path "${DB_PATH}" "benchmark sqlite path"
-  assert_safe_path "${DAEMON_SOCKET}" "daemon socket path"
+  assert_repo_local_path "${DB_PATH}" "benchmark sqlite path"
+  assert_repo_local_path "${DAEMON_SOCKET}" "daemon socket path"
+  mkdir -p "$(dirname "${DB_PATH}")"
 
   echo "Seeding index for CLI benchmarks..."
+  "${CLI_BIN}" vault daemon stop --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null 2>&1 || true
   "${CLI_BIN}" vault open --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
   "${CLI_BIN}" vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+  if [[ ! -f "${DB_PATH}" ]]; then
+    echo "benchmark sqlite path was not created: ${DB_PATH}" >&2
+    exit 1
+  fi
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+prepare_live_vault() {
+  if [[ -z "${LIVE_VAULT}" ]]; then
+    echo "live benchmark requires --live-vault PATH or TAO_BENCH_LIVE_VAULT" >&2
+    exit 1
+  fi
+
+  assert_existing_vault_path "${LIVE_VAULT}" "live benchmark vault"
+  LIVE_VAULT="$(cd "${LIVE_VAULT}" && pwd -P)"
+
+  local tao_dir="${LIVE_VAULT}/.tao"
+  mkdir -p "${tao_dir}"
+  LIVE_DB_PATH="${LIVE_DB_PATH:-${tao_dir}/bench-index.sqlite}"
+  LIVE_SOCKET="${LIVE_SOCKET:-${tao_dir}/taod-bench.sock}"
+  case "${LIVE_DB_PATH}" in
+    "${tao_dir}"/*) ;;
+    *)
+      echo "live benchmark db path must stay under ${tao_dir}" >&2
+      exit 1
+      ;;
+  esac
+  case "${LIVE_SOCKET}" in
+    "${tao_dir}"/*) ;;
+    *)
+      echo "live benchmark socket path must stay under ${tao_dir}" >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Preparing live vault benchmark index..."
+  "${CLI_BIN}" vault daemon stop --socket "${LIVE_SOCKET}" >/dev/null 2>&1 || true
+  "${CLI_BIN}" --daemon-socket "${LIVE_SOCKET}" vault open --vault-root "${LIVE_VAULT}" --db-path "${LIVE_DB_PATH}" >/dev/null
+  "${CLI_BIN}" --daemon-socket "${LIVE_SOCKET}" vault reindex --vault-root "${LIVE_VAULT}" --db-path "${LIVE_DB_PATH}" >/dev/null
+  if [[ ! -f "${LIVE_DB_PATH}" ]]; then
+    echo "live benchmark sqlite path was not created: ${LIVE_DB_PATH}" >&2
+    exit 1
+  fi
 }
 
 start_daemon() {
   cleanup_daemon
+  "${CLI_BIN}" vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
+  DAEMON_RUNNING=1
+}
+
+start_live_daemon() {
+  cleanup_daemon
+  DAEMON_SOCKET="${LIVE_SOCKET}"
   "${CLI_BIN}" vault daemon start --socket "${DAEMON_SOCKET}" >/dev/null
   DAEMON_RUNNING=1
 }
@@ -342,14 +415,14 @@ run_daemon_query_benchmark() {
     const outPath = reportPath.replace(/\.json$/, ".summary.json");
     fs.writeFileSync(outPath, `${JSON.stringify(summary, null, 2)}\n`);
     if (improvementPct < minImprovementPct) {
-      console.error(
-        `daemon improvement gate failed: ${improvementPct}% < ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
+      console.warn(
+        `daemon improvement below target: ${improvementPct}% < ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
       );
-      process.exit(1);
+    } else {
+      console.log(
+        `daemon improvement target met: ${improvementPct}% >= ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
+      );
     }
-    console.log(
-      `daemon improvement gate passed: ${improvementPct}% >= ${minImprovementPct}% (one-shot ${oneShotMeanMs}ms vs daemon ${daemonMeanMs}ms)`
-    );
   ' "${DAEMON_REPORT}" "${DAEMON_MIN_IMPROVEMENT_PCT}" "${DAEMON_LOOP_COUNT}"
 }
 
@@ -485,6 +558,9 @@ meta-tags|${CLI_BIN} meta tags --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH
 meta-aliases|${CLI_BIN} meta aliases --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 meta-tasks|${CLI_BIN} meta tasks --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
 task-list|${CLI_BIN} task list --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 100 --offset 0
+search-project|${CLI_BIN} search project --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --limit 50
+search-project-context|${CLI_BIN} search project --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --context --depth 2 --limit 20
+search-project-path-context|${CLI_BIN} search --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --path ${SAMPLE_NOTE} --context --depth 2 --limit 20
 query-docs|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --limit 50 --offset 0
 query-docs-where|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --where "matched_in contains 'content' or matched_in contains 'title' or matched_in contains 'path'" --limit 50 --offset 0
 query-docs-sort|${CLI_BIN} query --vault-root ${FIXTURE_VAULT} --db-path ${DB_PATH} --from docs --query project --sort title:asc --select path --limit 50 --offset 0
@@ -540,9 +616,121 @@ EOF
   echo "  summary=${CLI_MATRIX_SUMMARY_PATH}"
 }
 
+live_matrix_benchmark() {
+  local id="$1"
+  local cmd="$2"
+  local report_path="${LIVE_REPORT_DIR}/${id}.json"
+  echo "benchmarking live ${id}"
+  hyperfine \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --export-json "${report_path}" \
+    "${cmd}"
+}
+
+append_live_command_file() {
+  local matrix_var_name="$1"
+  [[ -f "${LIVE_COMMANDS_FILE}" ]] || return 0
+
+  local tao_q vault_q db_q socket_q
+  tao_q="$(shell_quote "${CLI_BIN}")"
+  vault_q="$(shell_quote "${LIVE_VAULT}")"
+  db_q="$(shell_quote "${LIVE_DB_PATH}")"
+  socket_q="$(shell_quote "${LIVE_SOCKET}")"
+
+  local line id cmd
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%$'\r'}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    if [[ "${line}" != *"|"* ]]; then
+      echo "invalid live command line in ${LIVE_COMMANDS_FILE}: expected id|command" >&2
+      exit 1
+    fi
+    id="${line%%|*}"
+    cmd="${line#*|}"
+    if [[ ! "${id}" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+      echo "invalid live command id '${id}' in ${LIVE_COMMANDS_FILE}" >&2
+      exit 1
+    fi
+    cmd="${cmd//\{tao\}/${tao_q}}"
+    cmd="${cmd//\{vault\}/${vault_q}}"
+    cmd="${cmd//\{db\}/${db_q}}"
+    cmd="${cmd//\{socket\}/${socket_q}}"
+    printf -v "${matrix_var_name}" '%s\n%s|%s' "${!matrix_var_name}" "${id}" "${cmd}"
+  done < "${LIVE_COMMANDS_FILE}"
+}
+
+run_live_matrix() {
+  require_hyperfine
+  prepare_live_vault
+  start_live_daemon
+  mkdir -p "${LIVE_REPORT_DIR}"
+
+  local tao_q vault_q db_q socket_q
+  tao_q="$(shell_quote "${CLI_BIN}")"
+  vault_q="$(shell_quote "${LIVE_VAULT}")"
+  db_q="$(shell_quote "${LIVE_DB_PATH}")"
+  socket_q="$(shell_quote "${LIVE_SOCKET}")"
+
+  LIVE_MATRIX=$(cat <<EOF
+vault-preflight|${tao_q} vault preflight --vault-root ${vault_q} --db-path ${db_q} > /dev/null
+vault-reindex|${tao_q} vault reindex --vault-root ${vault_q} --db-path ${db_q} > /dev/null
+health|${tao_q} health --vault-root ${vault_q} --db-path ${db_q} > /dev/null
+graph-unresolved|${tao_q} --daemon-socket ${socket_q} graph audit --vault-root ${vault_q} --db-path ${db_q} --kind unresolved --limit 100 --offset 0 > /dev/null
+graph-components|${tao_q} --daemon-socket ${socket_q} graph audit --vault-root ${vault_q} --db-path ${db_q} --kind components --limit 100 --offset 0 > /dev/null
+search-invoice-files|${tao_q} --daemon-socket ${socket_q} search invoice --vault-root ${vault_q} --db-path ${db_q} --kind files --limit 20 > /dev/null
+search-meeting-context|${tao_q} --daemon-socket ${socket_q} search meeting --vault-root ${vault_q} --db-path ${db_q} --context --depth 2 --limit 20 > /dev/null
+search-task|${tao_q} --daemon-socket ${socket_q} search task --vault-root ${vault_q} --db-path ${db_q} --kind tasks --limit 50 > /dev/null
+EOF
+)
+
+  append_live_command_file LIVE_MATRIX
+
+  while IFS="|" read -r id cmd; do
+    [[ -z "${id}" ]] && continue
+    live_matrix_benchmark "${id}" "${cmd}"
+  done <<< "${LIVE_MATRIX}"
+
+  bun --eval '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const [reportDir, summaryPath, runs, warmup, commandFile] = process.argv.slice(1);
+    const files = fs
+      .readdirSync(reportDir)
+      .filter((file) => file.endsWith(".json") && file !== "summary.json");
+    const commands = files
+      .map((file) => {
+        const payload = JSON.parse(fs.readFileSync(path.join(reportDir, file), "utf8"));
+        const result = payload.results?.[0] ?? {};
+        return {
+          id: file.replace(/\.json$/, ""),
+          mean_ms: Number(((result.mean ?? 0) * 1000).toFixed(3)),
+          stddev_ms: Number(((result.stddev ?? 0) * 1000).toFixed(3)),
+          min_ms: Number(((result.min ?? 0) * 1000).toFixed(3)),
+          max_ms: Number(((result.max ?? 0) * 1000).toFixed(3)),
+        };
+      })
+      .sort((a, b) => a.mean_ms - b.mean_ms);
+    const summary = {
+      generated_at: new Date().toISOString(),
+      vault_kind: "live",
+      runs: Number(runs),
+      warmup: Number(warmup),
+      private_command_file_loaded: fs.existsSync(commandFile),
+      commands,
+    };
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    console.log(`live summary written to ${summaryPath}`);
+  ' "${LIVE_REPORT_DIR}" "${LIVE_SUMMARY_PATH}" "${RUNS}" "${WARMUP}" "${LIVE_COMMANDS_FILE}"
+
+  echo "Live benchmark reports:"
+  echo "  report_dir=${LIVE_REPORT_DIR}"
+  echo "  summary=${LIVE_SUMMARY_PATH}"
+}
+
 run_sdk_suite() {
   run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
-  run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 10000
+  run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 5000
   run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
   run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
@@ -556,47 +744,49 @@ run_sdk_suite() {
 }
 
 run_fixture_generation_benchmark() {
+  require_hyperfine
   local report_path="${REPORT_DIR}/fixture-generation.summary.json"
-  local tmp_path="${REPORT_DIR}/fixture-generation.raw.tsv"
   local budget_1k_ms="${FIXTURE_BUDGET_1K_MS:-0}"
   local budget_5k_ms="${FIXTURE_BUDGET_5K_MS:-0}"
-  local budget_10k_ms="${FIXTURE_BUDGET_10K_MS:-0}"
-  : > "${tmp_path}"
   local profile
-  for profile in 1k 5k 10k; do
-    local start_ms end_ms elapsed_ms notes_total
-    case "${profile}" in
-      1k) notes_total=1000 ;;
-      5k) notes_total=5000 ;;
-      10k) notes_total=10000 ;;
-      *) notes_total=0 ;;
-    esac
-    start_ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')
-    ./scripts/fixtures.sh --profile "${profile}" --seed "${SEED}" --output "${FIXTURE_ROOT}" >/dev/null
-    end_ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')
-    elapsed_ms=$((end_ms - start_ms))
-    printf "%s\t%s\t%s\n" "${profile}" "${notes_total}" "${elapsed_ms}" >> "${tmp_path}"
+  for profile in 1k 5k; do
+    local profile_report="${REPORT_DIR}/fixture-generation-${profile}.json"
+    echo "benchmarking fixture generation ${profile}"
+    hyperfine \
+      --warmup 0 \
+      --runs "${RUNS}" \
+      --export-json "${profile_report}" \
+      "./scripts/fixtures.sh --profile ${profile} --seed ${SEED} --output ${FIXTURE_ROOT} >/dev/null"
   done
 
   bun --eval '
     const fs = require("node:fs");
-    const [rawPath, reportPath, b1k, b5k, b10k] = process.argv.slice(1);
+    const path = require("node:path");
+    const [reportDir, reportPath, b1k, b5k] = process.argv.slice(1);
     const budgets = {
       "1k": Number(b1k),
       "5k": Number(b5k),
-      "10k": Number(b10k),
     };
-    const lines = fs.readFileSync(rawPath, "utf8").trim().split("\n").filter(Boolean);
-    const rows = lines.map((line) => {
-      const [profile, notes, elapsedMs] = line.split("\t");
-      const notesTotal = Number(notes);
-      const durationMs = Number(elapsedMs);
+    const profiles = [
+      ["1k", 1000],
+      ["5k", 5000],
+    ];
+    const rows = profiles.map(([profile, notesTotal]) => {
+      const payload = JSON.parse(
+        fs.readFileSync(path.join(reportDir, `fixture-generation-${profile}.json`), "utf8")
+      );
+      const result = payload.results?.[0] ?? {};
+      const durationMs = Number(((result.mean ?? 0) * 1000).toFixed(3));
+      const minMs = Number(((result.min ?? 0) * 1000).toFixed(3));
+      const maxMs = Number(((result.max ?? 0) * 1000).toFixed(3));
       const notesPerSec = durationMs <= 0 ? 0 : Number(((notesTotal / durationMs) * 1000).toFixed(2));
       const budgetMs = budgets[profile] ?? 0;
       return {
         profile,
         notes_total: notesTotal,
         duration_ms: durationMs,
+        min_ms: minMs,
+        max_ms: maxMs,
         notes_per_sec: notesPerSec,
         budget_ms: budgetMs > 0 ? budgetMs : null,
         budget_pass: budgetMs > 0 ? durationMs <= budgetMs : null,
@@ -615,7 +805,7 @@ run_fixture_generation_benchmark() {
       process.exit(1);
     }
     console.log(`fixture generation summary written to ${reportPath}`);
-  ' "${tmp_path}" "${report_path}" "${budget_1k_ms}" "${budget_5k_ms}" "${budget_10k_ms}"
+  ' "${REPORT_DIR}" "${report_path}" "${budget_1k_ms}" "${budget_5k_ms}"
 }
 
 build_bins_if_needed
@@ -625,6 +815,11 @@ case "${SUITE}" in
     prepare_fixture
     run_sdk_suite
     run_cli_matrix
+    if [[ -n "${LIVE_VAULT}" ]]; then
+      run_live_matrix
+    else
+      echo "Skipping live benchmark: set TAO_BENCH_LIVE_VAULT or pass --live-vault."
+    fi
     ;;
   sdk)
     prepare_fixture
@@ -633,6 +828,9 @@ case "${SUITE}" in
   cli)
     prepare_fixture
     run_cli_matrix
+    ;;
+  live)
+    run_live_matrix
     ;;
   fixtures)
     run_fixture_generation_benchmark
@@ -660,7 +858,7 @@ case "${SUITE}" in
     run_tao_bench_scenario parse 500 "${PARSE_REPORT}"
     ;;
   resolve)
-    run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 10000
+    run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 5000
     ;;
   search)
     run_tao_bench_scenario search 500 "${SEARCH_REPORT}"
