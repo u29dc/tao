@@ -57,3 +57,4 @@ strip = "symbols"
 [profile.bench]
 inherits = "release"
 debug = true
+strip = "none"

@@ -72,6 +72,7 @@ pub(crate) fn handle(command: BaseCommands, runtime: &mut RuntimeMode) -> Result
                     BaseTableExecutionOptions {
                         include_summaries: false,
                         coercion_mode: tao_sdk_bases::BaseCoercionMode::Permissive,
+                        case_policy: resolved.case_policy,
                     },
                 )?)
             })

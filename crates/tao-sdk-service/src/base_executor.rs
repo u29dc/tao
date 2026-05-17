@@ -16,8 +16,9 @@ use tao_sdk_bases::{
     compare_optional_json_values, evaluate_filter, validate_base_config_json,
 };
 use tao_sdk_core::{note_extension_from_path, note_folder_from_path, note_title_from_path};
-use tao_sdk_links::resolve_target;
+use tao_sdk_links::{LinkCasePolicy, resolve_target_with_case_policy};
 use tao_sdk_storage::{BaseRecordInput, BasesRepository, FilesRepository};
+use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
 /// One row returned from base table execution.
@@ -107,6 +108,8 @@ pub struct BaseTableExecutionOptions {
     pub include_summaries: bool,
     /// Coercion mode for typed field normalization.
     pub coercion_mode: BaseCoercionMode,
+    /// Path case policy for relation target resolution.
+    pub case_policy: CasePolicy,
 }
 
 impl Default for BaseTableExecutionOptions {
@@ -114,6 +117,7 @@ impl Default for BaseTableExecutionOptions {
         Self {
             include_summaries: true,
             coercion_mode: BaseCoercionMode::Permissive,
+            case_policy: CasePolicy::Sensitive,
         }
     }
 }
@@ -239,10 +243,12 @@ ORDER BY p.file_id ASC, p.key ASC
         let mut relation_diagnostics = Vec::new();
         if !plan.relations.is_empty() {
             let targets = load_relation_target_lookup(connection)?;
+            let case_policy = link_case_policy(options.case_policy);
             resolve_relation_fields(
                 &mut candidates,
                 &plan.relations,
                 &targets,
+                case_policy,
                 &mut relation_diagnostics,
             );
         }
@@ -355,6 +361,13 @@ fn map_field_type(value_type: &str) -> BaseFieldType {
     }
 }
 
+fn link_case_policy(case_policy: CasePolicy) -> LinkCasePolicy {
+    match case_policy {
+        CasePolicy::Sensitive => LinkCasePolicy::Sensitive,
+        CasePolicy::Insensitive => LinkCasePolicy::Insensitive,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RelationTarget {
     file_id: String,
@@ -424,6 +437,7 @@ fn resolve_relation_fields(
     candidates: &mut [TableRowCandidate],
     relations: &[BaseRelationSpec],
     relation_targets: &RelationTargetLookup,
+    case_policy: LinkCasePolicy,
     diagnostics: &mut Vec<BaseRelationDiagnostic>,
 ) {
     for row in candidates {
@@ -454,10 +468,11 @@ fn resolve_relation_fields(
                     continue;
                 };
 
-                let resolution = resolve_target(
+                let resolution = resolve_target_with_case_policy(
                     &normalized_target,
                     Some(&row.file_path),
                     &relation_targets.candidates,
+                    case_policy,
                 );
                 if let Some(resolved_path) = resolution.resolved_path {
                     let lookup_key = resolved_path.to_ascii_lowercase();

@@ -2,7 +2,7 @@
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::Connection;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -97,15 +97,15 @@ impl VaultChangeMonitor {
         let ignored_runtime_root = canonical_root.join(".tao");
         let generation = Arc::new(AtomicU64::new(0));
         let generation_ref = Arc::clone(&generation);
+        let canonical_root_ref = canonical_root.clone();
         let ignored_runtime_root_ref = ignored_runtime_root.clone();
 
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
                 let should_mark_dirty = match result {
-                    Ok(event) => event
-                        .paths
-                        .iter()
-                        .any(|path| !path.starts_with(&ignored_runtime_root_ref)),
+                    Ok(event) => {
+                        should_mark_dirty(&canonical_root_ref, &ignored_runtime_root_ref, &event)
+                    }
                     Err(_) => true,
                 };
                 if should_mark_dirty {
@@ -131,6 +131,41 @@ impl VaultChangeMonitor {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
+}
+
+fn should_mark_dirty(
+    canonical_root: &Path,
+    ignored_runtime_root: &Path,
+    event: &notify::Event,
+) -> bool {
+    event.paths.iter().any(|path| {
+        let normalized_path = normalize_event_path(canonical_root, path);
+        !normalized_path.starts_with(ignored_runtime_root)
+    })
+}
+
+fn normalize_event_path(canonical_root: &Path, path: &Path) -> PathBuf {
+    let rooted_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        canonical_root.join(path)
+    };
+    lexical_normalize(&rooted_path)
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+            Component::Prefix(_) | Component::RootDir => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Watch adapter failures.
@@ -178,6 +213,7 @@ pub enum VaultChangeMonitorError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -187,7 +223,7 @@ mod tests {
     use tao_sdk_vault::CasePolicy;
     use tempfile::tempdir;
 
-    use super::{VaultChangeMonitor, WatchReconcileService};
+    use super::{VaultChangeMonitor, WatchReconcileService, should_mark_dirty};
 
     #[test]
     fn reconcile_once_detects_changed_paths() {
@@ -231,5 +267,50 @@ mod tests {
         }
 
         panic!("expected watcher generation to advance after note update");
+    }
+
+    #[test]
+    fn change_monitor_ignores_runtime_paths_after_event_path_normalization() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+        let canonical_root = fs::canonicalize(&vault).expect("canonicalize vault");
+        let ignored_runtime_root = canonical_root.join(".tao");
+
+        for path in [
+            ignored_runtime_root.join("index.sqlite"),
+            PathBuf::from(".tao/index.sqlite"),
+            PathBuf::from("./.tao/index.sqlite"),
+            PathBuf::from("notes/../.tao/index.sqlite"),
+        ] {
+            let event = notify::Event::default().add_path(path);
+            assert!(!should_mark_dirty(
+                &canonical_root,
+                &ignored_runtime_root,
+                &event
+            ));
+        }
+    }
+
+    #[test]
+    fn change_monitor_marks_normalized_content_paths_dirty() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        fs::create_dir_all(&vault).expect("create vault");
+        let canonical_root = fs::canonicalize(&vault).expect("canonicalize vault");
+        let ignored_runtime_root = canonical_root.join(".tao");
+
+        for path in [
+            canonical_root.join("notes/a.md"),
+            PathBuf::from("notes/a.md"),
+            PathBuf::from(".tao/../notes/a.md"),
+        ] {
+            let event = notify::Event::default().add_path(path);
+            assert!(should_mark_dirty(
+                &canonical_root,
+                &ignored_runtime_root,
+                &event
+            ));
+        }
     }
 }

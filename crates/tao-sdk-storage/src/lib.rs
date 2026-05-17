@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 mod bases;
@@ -147,7 +147,51 @@ pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchema
                 source,
             });
         }
+
+        record_applied_schema_migration(connection, migration)?;
     }
+
+    Ok(())
+}
+
+fn record_applied_schema_migration(
+    connection: &Connection,
+    migration: &Migration,
+) -> Result<(), StorageSchemaError> {
+    let expected_checksum = migration_checksum(migration.sql);
+    let recorded_checksum: Option<String> = connection
+        .query_row(
+            "SELECT checksum FROM schema_migrations WHERE id = ?1",
+            params![migration.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| StorageSchemaError::RecordMigration {
+            migration_id: migration.id,
+            source,
+        })?;
+
+    if let Some(recorded_checksum) = recorded_checksum {
+        if recorded_checksum != expected_checksum {
+            return Err(StorageSchemaError::ChecksumMismatch {
+                migration_id: migration.id,
+                expected_checksum,
+                recorded_checksum,
+            });
+        }
+
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            "INSERT INTO schema_migrations (id, checksum) VALUES (?1, ?2)",
+            params![migration.id, expected_checksum],
+        )
+        .map_err(|source| StorageSchemaError::RecordMigration {
+            migration_id: migration.id,
+            source,
+        })?;
 
     Ok(())
 }
@@ -226,7 +270,10 @@ pub fn preflight_migrations(
     }
 
     let applied_total = applied_checksums.len() as u64;
-    let pending_total = known_total.saturating_sub(applied_total.min(known_total));
+    let pending_total = known_migrations()
+        .iter()
+        .filter(|migration| !applied_checksums.contains_key(migration.id))
+        .count() as u64;
     Ok(MigrationPreflightReport {
         migrations_table_exists: true,
         known_migrations: known_total,
@@ -375,6 +422,27 @@ pub enum StorageSchemaError {
         #[source]
         source: rusqlite::Error,
     },
+    /// Persisting migration metadata failed.
+    #[error("failed to record migration '{migration_id}': {source}")]
+    RecordMigration {
+        /// Migration id.
+        migration_id: &'static str,
+        /// SQLite execution error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Stored checksum differs from current migration SQL checksum.
+    #[error(
+        "migration checksum mismatch for '{migration_id}': expected {expected_checksum}, got {recorded_checksum}"
+    )]
+    ChecksumMismatch {
+        /// Migration id.
+        migration_id: &'static str,
+        /// Current migration SQL checksum.
+        expected_checksum: String,
+        /// Checksum recorded in schema_migrations.
+        recorded_checksum: String,
+    },
 }
 
 /// Migration runner failures.
@@ -510,6 +578,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_initial_schema_records_migrations_for_runner() {
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+
+        apply_initial_schema(&connection).expect("apply initial schema");
+
+        let report = run_migrations(&mut connection).expect("run migrations after initial schema");
+        let migration_ids: Vec<String> = known_migrations()
+            .iter()
+            .map(|migration| migration.id.to_string())
+            .collect();
+
+        assert!(report.applied.is_empty());
+        assert_eq!(report.skipped, migration_ids);
+    }
+
+    #[test]
     fn run_migrations_applies_pending_and_records_checksums() {
         let mut connection = Connection::open_in_memory().expect("open in-memory database");
         let report = run_migrations(&mut connection).expect("run migrations");
@@ -552,6 +636,28 @@ mod tests {
         assert!(!report.migrations_table_exists);
         assert_eq!(report.known_migrations, known_total);
         assert_eq!(report.applied_migrations, 0);
+        assert_eq!(report.pending_migrations, known_total);
+    }
+
+    #[test]
+    fn preflight_does_not_count_unknown_migration_ids_as_known_applied() {
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(super::CREATE_SCHEMA_MIGRATIONS_SQL)
+            .expect("create schema_migrations table");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (id, checksum) VALUES (?1, ?2)",
+                params!["9999_future", "future-checksum"],
+            )
+            .expect("insert unknown migration row");
+
+        let report = preflight_migrations(&connection).expect("preflight migrations");
+        let known_total = known_migrations().len() as u64;
+
+        assert!(report.migrations_table_exists);
+        assert_eq!(report.known_migrations, known_total);
+        assert_eq!(report.applied_migrations, 1);
         assert_eq!(report.pending_migrations, known_total);
     }
 

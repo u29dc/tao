@@ -96,6 +96,7 @@ impl IncrementalIndexService {
         let mut changed_markdown_paths = std::collections::BTreeSet::<String>::new();
         let mut has_new_files = false;
         let mut removed_file_ids = Vec::<String>::new();
+        let resolution_case_policy = link_case_policy(case_policy);
 
         let existing_records = FilesRepository::list_all(&transaction).map_err(|source| {
             FullIndexError::UpsertFileMetadata {
@@ -313,7 +314,10 @@ impl IncrementalIndexService {
                     heading_index.insert(normalized.clone(), heading_slugs);
                     block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
 
-                    let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
+                    let resolution_index = LinkResolutionIndex::with_case_policy(
+                        &resolution_candidates,
+                        resolution_case_policy,
+                    );
                     let link_records = build_incremental_link_records(
                         &LinkResolutionContext {
                             resolution_index: &resolution_index,
@@ -406,7 +410,8 @@ impl IncrementalIndexService {
             })?
         };
 
-        let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
+        let resolution_index =
+            LinkResolutionIndex::with_case_policy(&resolution_candidates, resolution_case_policy);
         let affected_sources = candidate_link_rows
             .iter()
             .filter(|link| {
@@ -457,7 +462,10 @@ impl IncrementalIndexService {
                     operation: "delete_links_for_dependent_source",
                     source: Box::new(source),
                 })?;
-            let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
+            let resolution_index = LinkResolutionIndex::with_case_policy(
+                &resolution_candidates,
+                resolution_case_policy,
+            );
             let link_records = build_incremental_link_records(
                 &LinkResolutionContext {
                     resolution_index: &resolution_index,

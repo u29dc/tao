@@ -370,5 +370,19 @@ mod tests {
         assert_eq!(result.total, 3);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].path, "notes/b.md");
+
+        let empty_page = SearchQueryService
+            .query(
+                &vault,
+                &connection,
+                SearchQueryRequest {
+                    query: "notes".to_string(),
+                    limit: 1,
+                    offset: 3,
+                },
+            )
+            .expect("empty page query");
+        assert_eq!(empty_page.total, 3);
+        assert!(empty_page.items.is_empty());
     }
 }

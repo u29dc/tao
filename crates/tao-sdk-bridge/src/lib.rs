@@ -17,7 +17,7 @@ use tao_sdk_properties::{
     project_typed_properties,
 };
 use tao_sdk_service::{
-    BaseTableExecutorService, FullIndexService, HealthSnapshotService,
+    BaseTableExecutionOptions, BaseTableExecutorService, FullIndexService, HealthSnapshotService,
     ReconciliationScannerService, WatcherStatus,
 };
 use tao_sdk_storage::{
@@ -469,6 +469,8 @@ impl BridgeKernel {
             .map_err(|source| BridgeEnsureIndexError::CountIndexedFiles { source })?;
 
         if existing_markdown_rows > 0 {
+            let before_events_snapshot = bridge_markdown_events_snapshot(&self.connection)
+                .map_err(|source| BridgeEnsureIndexError::ListIndexedFiles { source })?;
             let reconcile = ReconciliationScannerService::default()
                 .scan_and_repair(
                     &self.vault_root,
@@ -477,12 +479,26 @@ impl BridgeKernel {
                     128,
                 )
                 .map_err(|source| BridgeEnsureIndexError::ReconcileIndex { source })?;
+            if reconcile.drift_paths > 0 {
+                let after_events_snapshot = bridge_markdown_events_snapshot(&self.connection)
+                    .map_err(|source| BridgeEnsureIndexError::ListIndexedFiles { source })?;
+                append_bridge_reconcile_events(
+                    &self.connection,
+                    &before_events_snapshot,
+                    &after_events_snapshot,
+                )
+                .map_err(|source| BridgeEnsureIndexError::AppendBridgeEvent { source })?;
+            }
             return Ok(reconcile.drift_paths > 0);
         }
 
         FullIndexService::default()
             .rebuild(&self.vault_root, &mut self.connection, self.case_policy)
             .map_err(|source| BridgeEnsureIndexError::RebuildIndex { source })?;
+        let indexed = bridge_markdown_events_snapshot(&self.connection)
+            .map_err(|source| BridgeEnsureIndexError::ListIndexedFiles { source })?;
+        append_bridge_indexed_events(&self.connection, &indexed)
+            .map_err(|source| BridgeEnsureIndexError::AppendBridgeEvent { source })?;
 
         Ok(true)
     }
@@ -522,7 +538,11 @@ impl BridgeKernel {
     #[must_use]
     pub fn note_get(&self, normalized_path: &str) -> BridgeEnvelope<BridgeNoteView> {
         let normalized_path = normalized_path.trim();
-        let absolute_path = match resolve_bridge_note_read_path(&self.vault_root, normalized_path) {
+        let absolute_path = match resolve_indexed_bridge_note_read_path(
+            &self.connection,
+            &self.vault_root,
+            normalized_path,
+        ) {
             Ok(path) => path,
             Err(error) => return BridgeEnvelope::failure(error),
         };
@@ -609,6 +629,13 @@ impl BridgeKernel {
                 )
                 .with_hint("provide a vault-relative markdown path"),
             );
+        }
+        if let Err(error) = validate_bridge_relative_note_path(
+            normalized_path,
+            BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH,
+            "provide a vault-relative markdown path",
+        ) {
+            return BridgeEnvelope::failure(error);
         }
 
         let source =
@@ -872,7 +899,14 @@ impl BridgeKernel {
             }
         };
 
-        let page_result = match BaseTableExecutorService.execute(&self.connection, &plan) {
+        let page_result = match BaseTableExecutorService.execute_with_options(
+            &self.connection,
+            &plan,
+            BaseTableExecutionOptions {
+                case_policy: self.case_policy,
+                ..BaseTableExecutionOptions::default()
+            },
+        ) {
             Ok(page_result) => page_result,
             Err(source) => {
                 return BridgeEnvelope::failure(
@@ -1154,6 +1188,40 @@ fn resolve_bridge_note_read_path(
     Ok(joined)
 }
 
+fn resolve_indexed_bridge_note_read_path(
+    connection: &Connection,
+    vault_root: &Path,
+    normalized_path: &str,
+) -> Result<PathBuf, BridgeError> {
+    validate_bridge_relative_note_path(
+        normalized_path,
+        BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
+        "provide a vault-relative markdown path",
+    )?;
+
+    let file = match FilesRepository::get_by_normalized_path(connection, normalized_path) {
+        Ok(Some(file)) if file.is_markdown => file,
+        Ok(Some(_)) | Ok(None) => {
+            return Err(BridgeError::with_code(
+                BRIDGE_ERROR_NOTE_GET_INVALID_PATH,
+                "note is not indexed as markdown",
+            )
+            .with_hint("reindex the vault and provide an indexed markdown path")
+            .with_context("path", JsonValue::String(normalized_path.to_string())));
+        }
+        Err(source) => {
+            return Err(BridgeError::with_code(
+                BRIDGE_ERROR_NOTE_GET_READ_FAILED,
+                source.to_string(),
+            )
+            .with_hint("ensure bridge database is available")
+            .with_context("path", JsonValue::String(normalized_path.to_string())));
+        }
+    };
+
+    resolve_bridge_note_read_path(vault_root, &file.normalized_path)
+}
+
 fn validate_bridge_relative_note_path(
     normalized_path: &str,
     code: &'static str,
@@ -1260,7 +1328,67 @@ fn ensure_bridge_event_log(connection: &Connection) -> Result<(), rusqlite::Erro
     )
 }
 
-#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgeMarkdownEventSnapshot {
+    file_id: String,
+    hash_blake3: String,
+}
+
+fn bridge_markdown_events_snapshot(
+    connection: &Connection,
+) -> Result<BTreeMap<String, BridgeMarkdownEventSnapshot>, tao_sdk_storage::FilesRepositoryError> {
+    let files = FilesRepository::list_all(connection)?;
+    Ok(files
+        .into_iter()
+        .filter(|file| file.is_markdown)
+        .map(|file| {
+            (
+                file.normalized_path,
+                BridgeMarkdownEventSnapshot {
+                    file_id: file.file_id,
+                    hash_blake3: file.hash_blake3,
+                },
+            )
+        })
+        .collect())
+}
+
+fn append_bridge_indexed_events(
+    connection: &Connection,
+    indexed: &BTreeMap<String, BridgeMarkdownEventSnapshot>,
+) -> Result<(), rusqlite::Error> {
+    for (path, file) in indexed {
+        append_bridge_note_changed_event(connection, &file.file_id, path, "indexed")?;
+    }
+    Ok(())
+}
+
+fn append_bridge_reconcile_events(
+    connection: &Connection,
+    before: &BTreeMap<String, BridgeMarkdownEventSnapshot>,
+    after: &BTreeMap<String, BridgeMarkdownEventSnapshot>,
+) -> Result<(), rusqlite::Error> {
+    for (path, file) in after {
+        match before.get(path) {
+            None => append_bridge_note_changed_event(connection, &file.file_id, path, "created")?,
+            Some(previous)
+                if previous.file_id != file.file_id || previous.hash_blake3 != file.hash_blake3 =>
+            {
+                append_bridge_note_changed_event(connection, &file.file_id, path, "updated")?;
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (path, file) in before {
+        if !after.contains_key(path) {
+            append_bridge_note_changed_event(connection, &file.file_id, path, "deleted")?;
+        }
+    }
+
+    Ok(())
+}
+
 fn append_bridge_note_changed_event(
     connection: &Connection,
     file_id: &str,
@@ -1406,6 +1534,20 @@ pub enum BridgeEnsureIndexError {
         #[source]
         source: tao_sdk_service::ReconciliationScanError,
     },
+    /// Listing indexed files for bridge event production failed.
+    #[error("failed to list indexed files for bridge events: {source}")]
+    ListIndexedFiles {
+        /// Files repository error.
+        #[source]
+        source: tao_sdk_storage::FilesRepositoryError,
+    },
+    /// Appending bridge index event failed.
+    #[error("failed to append bridge event: {source}")]
+    AppendBridgeEvent {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
 }
 
 #[cfg(test)]
@@ -1421,9 +1563,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BRIDGE_ERROR_NOTE_GET_INVALID_PATH, BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED,
-        BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel, BridgePing, BridgeSchemaVersion,
-        BridgeWriteAck, is_bridge_schema_compatible, parse_bridge_schema_version,
+        BRIDGE_ERROR_NOTE_GET_INVALID_PATH, BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH,
+        BRIDGE_ERROR_NOTE_PUT_WRITE_DISABLED, BRIDGE_SCHEMA_VERSION, BridgeEnvelope, BridgeKernel,
+        BridgePing, BridgeSchemaVersion, BridgeWriteAck, is_bridge_schema_compatible,
+        parse_bridge_schema_version,
     };
 
     fn write_note_fixture(
@@ -1568,7 +1711,8 @@ mod tests {
         .expect("write markdown");
         let db_path = temp.path().join("tao.db");
 
-        let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        kernel.ensure_indexed().expect("ensure indexed");
         let note = kernel.note_get("notes/a.md");
 
         assert!(note.ok);
@@ -1621,6 +1765,41 @@ mod tests {
     }
 
     #[test]
+    fn bridge_kernel_note_get_rejects_unindexed_or_non_markdown_files() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::create_dir_all(vault_root.join(".obsidian")).expect("create obsidian");
+        fs::write(vault_root.join("notes/a.md"), "# A").expect("write markdown");
+        fs::write(vault_root.join("notes/a.txt"), "plain text").expect("write text");
+        fs::write(
+            vault_root.join(".obsidian/app.json"),
+            "{\"theme\":\"dark\"}",
+        )
+        .expect("write obsidian config");
+        let db_path = temp.path().join("tao.db");
+
+        let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        kernel.ensure_indexed().expect("ensure indexed");
+
+        let markdown = kernel.note_get("notes/a.md");
+        assert!(markdown.ok);
+
+        let text = kernel.note_get("notes/a.txt");
+        assert!(!text.ok);
+        let text_error = text.error.expect("text path error");
+        assert_eq!(text_error.code, BRIDGE_ERROR_NOTE_GET_INVALID_PATH);
+
+        let ignored_dot_dir = kernel.note_get(".obsidian/app.json");
+        assert!(!ignored_dot_dir.ok);
+        let ignored_dot_dir_error = ignored_dot_dir.error.expect("dot dir path error");
+        assert_eq!(
+            ignored_dot_dir_error.code,
+            BRIDGE_ERROR_NOTE_GET_INVALID_PATH
+        );
+    }
+
+    #[test]
     fn bridge_kernel_note_get_rejects_absolute_and_parent_paths() {
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
@@ -1638,6 +1817,26 @@ mod tests {
         assert!(!parent.ok);
         let parent_error = parent.error.expect("parent path error");
         assert_eq!(parent_error.code, BRIDGE_ERROR_NOTE_GET_INVALID_PATH);
+    }
+
+    #[test]
+    fn bridge_kernel_note_links_rejects_absolute_and_parent_paths() {
+        let temp = tempdir().expect("tempdir");
+        let vault_root = temp.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(vault_root.join("notes/a.md"), "# A").expect("write markdown");
+        let db_path = temp.path().join("tao.db");
+
+        let kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
+        let absolute = kernel.note_links("/etc/hosts");
+        assert!(!absolute.ok);
+        let absolute_error = absolute.error.expect("absolute path error");
+        assert_eq!(absolute_error.code, BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH);
+
+        let parent = kernel.note_links("../notes/a.md");
+        assert!(!parent.ok);
+        let parent_error = parent.error.expect("parent path error");
+        assert_eq!(parent_error.code, BRIDGE_ERROR_NOTE_LINKS_INVALID_PATH);
     }
 
     #[test]
@@ -2013,38 +2212,56 @@ views:
         let temp = tempdir().expect("tempdir");
         let vault_root = temp.path().join("vault");
         fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(vault_root.join("notes/events.md"), "# Event\nindexed").expect("write note");
         let db_path = temp.path().join("tao.db");
 
         let mut kernel = BridgeKernel::open(&vault_root, &db_path).expect("open bridge");
-        let indexed = write_note_fixture(&mut kernel, "notes/events.md", "# Event\nindexed");
-        let file_id = indexed.value.expect("indexed event fixture").file_id;
-        super::append_bridge_note_changed_event(
-            &kernel.connection,
-            &file_id,
-            "notes/events.md",
-            "indexed",
-        )
-        .expect("append indexed event");
-        super::append_bridge_note_changed_event(
-            &kernel.connection,
-            &file_id,
-            "notes/events.md",
-            "refreshed",
-        )
-        .expect("append refreshed event");
+        assert!(kernel.ensure_indexed().expect("initial index"));
+        let indexed =
+            FilesRepository::get_by_normalized_path(&kernel.connection, "notes/events.md")
+                .expect("lookup indexed event note")
+                .expect("indexed event note");
 
         let first_batch = kernel.events_poll(0, 10);
         assert!(first_batch.ok);
         let first_value = first_batch.value.expect("first batch");
-        assert_eq!(first_value.events.len(), 2);
+        assert_eq!(first_value.events.len(), 1);
         assert_eq!(first_value.events[0].kind, "note_changed");
+        assert_eq!(
+            first_value.events[0].file_id.as_deref(),
+            Some(indexed.file_id.as_str())
+        );
+        assert_eq!(
+            first_value.events[0].path.as_deref(),
+            Some("notes/events.md")
+        );
         assert_eq!(first_value.events[0].action.as_deref(), Some("indexed"));
-        assert_eq!(first_value.events[1].action.as_deref(), Some("refreshed"));
 
         let second_batch = kernel.events_poll(first_value.next_cursor, 10);
         assert!(second_batch.ok);
         let second_value = second_batch.value.expect("second batch");
         assert!(second_value.events.is_empty());
         assert_eq!(second_value.next_cursor, first_value.next_cursor);
+
+        fs::write(
+            vault_root.join("notes/events.md"),
+            "# Event\nindexed\nupdated",
+        )
+        .expect("update note");
+        assert!(kernel.ensure_indexed().expect("reconcile update"));
+        let updated_batch = kernel.events_poll(first_value.next_cursor, 10);
+        assert!(updated_batch.ok);
+        let updated_value = updated_batch.value.expect("updated batch");
+        assert_eq!(updated_value.events.len(), 1);
+        assert_eq!(updated_value.events[0].kind, "note_changed");
+        assert_eq!(
+            updated_value.events[0].file_id.as_deref(),
+            Some(indexed.file_id.as_str())
+        );
+        assert_eq!(
+            updated_value.events[0].path.as_deref(),
+            Some("notes/events.md")
+        );
+        assert_eq!(updated_value.events[0].action.as_deref(), Some("updated"));
     }
 }

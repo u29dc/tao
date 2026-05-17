@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -168,9 +169,7 @@ fn run_parse_benchmark(args: &Args) -> Result<()> {
         "latency": summary.as_json(),
         "headings_avg": round_ms(headings_total as f64 / args.iterations as f64),
     });
-    if let Some(path) = &args.json_out {
-        write_json_report(path, &report)?;
-    }
+    write_benchmark_reports(args, &report, "parse")?;
 
     Ok(())
 }
@@ -295,10 +294,7 @@ fn run_resolve_benchmark(args: &Args) -> Result<()> {
         "latency": summary.as_json(),
         "throughput_ops_per_sec": round_ms(throughput_ops_per_sec),
     });
-    if let Some(path) = &args.json_out {
-        write_json_report(path, &report)?;
-        println!("resolve report written to {}", path.display());
-    }
+    write_benchmark_reports(args, &report, "resolve")?;
 
     Ok(())
 }
@@ -333,11 +329,8 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
 
     let summary = LatencySummary::from_samples(samples)?;
     let target_p95_ms = 900.0;
-    let status = if summary.p95_ms <= target_p95_ms {
-        "pass"
-    } else {
-        "fail"
-    };
+    let budget_failed = summary.p95_ms > target_p95_ms;
+    let status = if budget_failed { "fail" } else { "pass" };
 
     println!(
         "startup p50_ms={:.3} p95_ms={:.3} max_ms={:.3} target_p95_ms={:.1} status={status}",
@@ -355,10 +348,8 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
         },
         "status": status,
     });
-    if let Some(path) = &args.json_out {
-        write_json_report(path, &report)?;
-        println!("startup report written to {}", path.display());
-    }
+    write_benchmark_reports(args, &report, "startup")?;
+    enforce_startup_budget(args, budget_failed, summary.p95_ms, target_p95_ms)?;
 
     Ok(())
 }
@@ -653,10 +644,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
         "status": if violations.is_empty() { "pass" } else { "fail" },
     });
 
-    if let Some(path) = &args.json_out {
-        write_json_report(path, &report)?;
-        println!("bridge report written to {}", path.display());
-    }
+    write_benchmark_reports(args, &report, "bridge")?;
 
     if args.enforce_budgets && !violations.is_empty() {
         bail!(
@@ -861,28 +849,62 @@ fn resolve_vault_and_db_paths(args: &Args) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn write_benchmark_reports(args: &Args, report: &JsonValue, scenario: &str) -> Result<()> {
+    validate_report_output_paths(args)?;
     if let Some(path) = &args.json_out {
         write_json_report(path, report)?;
         println!("{scenario} report written to {}", path.display());
     }
-    if let Some(path) = resolve_markdown_path(args, scenario) {
-        write_markdown_summary(&path, report)?;
+    if let Some(path) = &args.markdown_out {
+        write_markdown_summary(path, report)?;
         println!("{scenario} markdown summary written to {}", path.display());
     }
     Ok(())
 }
 
-fn resolve_markdown_path(args: &Args, scenario: &str) -> Option<PathBuf> {
-    if let Some(path) = &args.markdown_out {
-        return Some(path.clone());
+fn validate_report_output_paths(args: &Args) -> Result<()> {
+    if let (Some(json_path), Some(markdown_path)) = (&args.json_out, &args.markdown_out)
+        && report_output_identity(json_path)? == report_output_identity(markdown_path)?
+    {
+        bail!(
+            "--json-out and --markdown-out must be different paths: {}",
+            json_path.display()
+        );
     }
-    args.json_out.as_ref().map(|path| {
-        if path.extension().is_some() {
-            path.with_extension("md")
-        } else {
-            path.join(format!("{scenario}.md"))
+    Ok(())
+}
+
+fn report_output_identity(path: &Path) -> Result<PathBuf> {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve current directory for report output path")?
+            .join(path)
+    };
+    if let (Some(parent), Some(file_name)) = (absolute.parent(), absolute.file_name())
+        && let Ok(canonical_parent) = fs::canonicalize(parent)
+    {
+        return Ok(canonical_parent.join(file_name));
+    }
+    Ok(normalize_lexical_path(&absolute))
+}
+
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
         }
-    })
+    }
+    normalized
 }
 
 fn write_markdown_summary(path: &Path, report: &JsonValue) -> Result<()> {
@@ -894,42 +916,43 @@ fn write_markdown_summary(path: &Path, report: &JsonValue) -> Result<()> {
         .get("iterations")
         .and_then(JsonValue::as_u64)
         .unwrap_or(0);
-    let warm_p50 = report
-        .pointer("/latency/warm/p50_ms")
-        .or_else(|| report.pointer("/latency/p50_ms"))
-        .and_then(JsonValue::as_f64)
-        .unwrap_or(0.0);
-    let warm_p95 = report
-        .pointer("/latency/warm/p95_ms")
-        .or_else(|| report.pointer("/latency/p95_ms"))
-        .and_then(JsonValue::as_f64)
-        .unwrap_or(0.0);
-    let cold_p50 = report
-        .pointer("/latency/cold/p50_ms")
-        .and_then(JsonValue::as_f64)
-        .unwrap_or(0.0);
-    let cold_p95 = report
-        .pointer("/latency/cold/p95_ms")
-        .and_then(JsonValue::as_f64)
-        .unwrap_or(0.0);
-    let improvement_pct = report
-        .pointer("/improvement/p50_vs_cold_pct")
-        .and_then(JsonValue::as_f64)
-        .unwrap_or(0.0);
 
     let mut markdown = String::new();
     markdown.push_str("# Tao Bench Summary\n\n");
     markdown.push_str(&format!("- scenario: `{scenario}`\n"));
     markdown.push_str(&format!("- iterations: `{iterations}`\n"));
     markdown.push_str(&format!("- generated_at_unix: `{}`\n\n", now_unix()));
-    markdown.push_str("| mode | p50_ms | p95_ms |\n");
-    markdown.push_str("| --- | ---: | ---: |\n");
-    markdown.push_str(&format!("| warm | {:.3} | {:.3} |\n", warm_p50, warm_p95));
-    markdown.push_str(&format!("| cold | {:.3} | {:.3} |\n\n", cold_p50, cold_p95));
-    markdown.push_str(&format!(
-        "- warm_vs_cold_p50_improvement_pct: `{:.3}`\n",
-        improvement_pct
-    ));
+    if let Some(metrics) = report.get("metrics").and_then(JsonValue::as_object) {
+        markdown.push_str("| metric | p50_ms | p95_ms | max_ms |\n");
+        markdown.push_str("| --- | ---: | ---: | ---: |\n");
+        for (metric, values) in metrics {
+            markdown.push_str(&format!(
+                "| {metric} | {:.3} | {:.3} | {:.3} |\n",
+                json_number(values, "p50_ms"),
+                json_number(values, "p95_ms"),
+                json_number(values, "max_ms")
+            ));
+        }
+        markdown.push('\n');
+    } else if let Some(latency) = report.get("latency") {
+        markdown.push_str("| mode | p50_ms | p95_ms | max_ms |\n");
+        markdown.push_str("| --- | ---: | ---: | ---: |\n");
+        if latency.get("warm").is_some() || latency.get("cold").is_some() {
+            write_latency_row(&mut markdown, "warm", latency.get("warm"));
+            write_latency_row(&mut markdown, "cold", latency.get("cold"));
+        } else {
+            write_latency_row(&mut markdown, "sample", Some(latency));
+        }
+        markdown.push('\n');
+    }
+    if let Some(improvement_pct) = report
+        .pointer("/improvement/p50_vs_cold_pct")
+        .and_then(JsonValue::as_f64)
+    {
+        markdown.push_str(&format!(
+            "- warm_vs_cold_p50_improvement_pct: `{improvement_pct:.3}`\n"
+        ));
+    }
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -948,4 +971,208 @@ fn write_json_report(path: &Path, report: &JsonValue) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(report).context("serialize benchmark report json")?;
     fs::write(path, bytes).with_context(|| format!("write benchmark report {}", path.display()))?;
     Ok(())
+}
+
+fn write_latency_row(markdown: &mut String, mode: &str, values: Option<&JsonValue>) {
+    markdown.push_str(&format!(
+        "| {mode} | {:.3} | {:.3} | {:.3} |\n",
+        values.map_or(0.0, |value| json_number(value, "p50_ms")),
+        values.map_or(0.0, |value| json_number(value, "p95_ms")),
+        values.map_or(0.0, |value| json_number(value, "max_ms"))
+    ));
+}
+
+fn json_number(value: &JsonValue, key: &str) -> f64 {
+    value.get(key).and_then(JsonValue::as_f64).unwrap_or(0.0)
+}
+
+fn enforce_startup_budget(
+    args: &Args,
+    budget_failed: bool,
+    p95_ms: f64,
+    target_p95_ms: f64,
+) -> Result<()> {
+    if args.enforce_budgets && budget_failed {
+        bail!(
+            "startup benchmark exceeded p95 budget: p95_ms={p95_ms:.3} target_p95_ms={target_p95_ms:.1}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_args(markdown_out: Option<PathBuf>) -> Args {
+        Args {
+            scenario: Scenario::Parse,
+            iterations: 1,
+            bridge_notes: 1,
+            max_p50_ms: 50.0,
+            max_p95_ms: 120.0,
+            enforce_budgets: false,
+            json_out: None,
+            markdown_out,
+            vault_root: None,
+            db_path: None,
+            graph_root: "notes/projects/project-1.md".to_string(),
+            graph_depth: 2,
+            graph_limit: 200,
+            graph_include_folders: false,
+            query_text: "project".to_string(),
+            query_limit: 100,
+        }
+    }
+
+    #[test]
+    fn report_writer_honors_markdown_out_for_simple_latency() {
+        let temp = tempdir().expect("tempdir");
+        let markdown_out = temp.path().join("parse.md");
+        let report = json!({
+            "scenario": "parse",
+            "iterations": 1,
+            "generated_at_unix": 1,
+            "latency": {
+                "p50_ms": 1.0,
+                "p95_ms": 2.0,
+                "max_ms": 3.0,
+            },
+        });
+
+        write_benchmark_reports(&report_args(Some(markdown_out.clone())), &report, "parse")
+            .expect("write markdown report");
+
+        let markdown = std::fs::read_to_string(markdown_out).expect("read markdown report");
+        assert!(markdown.contains("- scenario: `parse`"));
+        assert!(markdown.contains("| sample | 1.000 | 2.000 | 3.000 |"));
+    }
+
+    #[test]
+    fn report_writer_honors_markdown_out_for_bridge_metrics() {
+        let temp = tempdir().expect("tempdir");
+        let markdown_out = temp.path().join("bridge.md");
+        let report = json!({
+            "scenario": "bridge",
+            "iterations": 1,
+            "generated_at_unix": 1,
+            "metrics": {
+                "note_get": {
+                    "p50_ms": 1.0,
+                    "p95_ms": 2.0,
+                    "max_ms": 3.0,
+                },
+            },
+        });
+
+        write_benchmark_reports(&report_args(Some(markdown_out.clone())), &report, "bridge")
+            .expect("write markdown report");
+
+        let markdown = std::fs::read_to_string(markdown_out).expect("read markdown report");
+        assert!(markdown.contains("- scenario: `bridge`"));
+        assert!(markdown.contains("| note_get | 1.000 | 2.000 | 3.000 |"));
+    }
+
+    #[test]
+    fn report_writer_does_not_infer_markdown_out_from_json_out() {
+        let temp = tempdir().expect("tempdir");
+        let json_out = temp.path().join("bench.md");
+        let mut args = report_args(None);
+        args.json_out = Some(json_out.clone());
+        let report = json!({
+            "scenario": "parse",
+            "iterations": 1,
+            "generated_at_unix": 1,
+            "latency": {
+                "p50_ms": 1.0,
+                "p95_ms": 2.0,
+                "max_ms": 3.0,
+            },
+        });
+
+        write_benchmark_reports(&args, &report, "parse").expect("write json report");
+
+        let written = std::fs::read_to_string(json_out).expect("read json report");
+        let parsed: JsonValue = serde_json::from_str(&written).expect("json report remains json");
+        assert_eq!(parsed["scenario"], "parse");
+    }
+
+    #[test]
+    fn report_writer_rejects_identical_json_and_markdown_paths_before_write() {
+        let temp = tempdir().expect("tempdir");
+        let report_path = temp.path().join("bench.json");
+        std::fs::write(&report_path, "sentinel").expect("seed report file");
+        let mut args = report_args(Some(report_path.clone()));
+        args.json_out = Some(report_path.clone());
+        let report = json!({
+            "scenario": "parse",
+            "iterations": 1,
+            "generated_at_unix": 1,
+            "latency": {
+                "p50_ms": 1.0,
+                "p95_ms": 2.0,
+                "max_ms": 3.0,
+            },
+        });
+
+        let error = write_benchmark_reports(&args, &report, "parse")
+            .expect_err("identical report paths should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--json-out and --markdown-out must be different paths")
+        );
+        let written = std::fs::read_to_string(report_path).expect("read seeded report file");
+        assert_eq!(written, "sentinel");
+    }
+
+    #[test]
+    fn report_writer_rejects_normalized_json_and_markdown_path_collision() {
+        let temp = tempdir().expect("tempdir");
+        let reports_dir = temp.path().join("reports");
+        std::fs::create_dir_all(&reports_dir).expect("create reports dir");
+        let report_path = reports_dir.join("bench.json");
+        std::fs::write(&report_path, "sentinel").expect("seed report file");
+        let mut args = report_args(Some(reports_dir.join(".").join("bench.json")));
+        args.json_out = Some(report_path.clone());
+        let report = json!({
+            "scenario": "parse",
+            "iterations": 1,
+            "generated_at_unix": 1,
+            "latency": {
+                "p50_ms": 1.0,
+                "p95_ms": 2.0,
+                "max_ms": 3.0,
+            },
+        });
+
+        let error = write_benchmark_reports(&args, &report, "parse")
+            .expect_err("normalized report path collision should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--json-out and --markdown-out must be different paths")
+        );
+        let written = std::fs::read_to_string(report_path).expect("read seeded report file");
+        assert_eq!(written, "sentinel");
+    }
+
+    #[test]
+    fn startup_budget_enforcement_rejects_failed_status() {
+        let temp = tempdir().expect("tempdir");
+        let mut args = report_args(Some(temp.path().join("startup.md")));
+        args.scenario = Scenario::Startup;
+        args.enforce_budgets = true;
+
+        let error = enforce_startup_budget(&args, true, 901.0, 900.0)
+            .expect_err("failed startup budget should be enforced");
+
+        assert!(
+            error
+                .to_string()
+                .contains("startup benchmark exceeded p95 budget")
+        );
+    }
 }

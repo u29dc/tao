@@ -26,6 +26,12 @@ fn copy_fixture_vault() -> tempfile::TempDir {
     temp
 }
 
+fn fixture_db_path(vault_root: &Path) -> PathBuf {
+    let runtime_dir = vault_root.join(".tao");
+    fs::create_dir_all(&runtime_dir).expect("create fixture runtime db dir");
+    runtime_dir.join("index.sqlite")
+}
+
 fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
@@ -86,7 +92,7 @@ ORDER BY sf.normalized_path ASC, l.raw_target ASC, resolved_path ASC
 #[test]
 fn integration_harness_indexes_fixture_vault_end_to_end() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("tao.sqlite");
+    let db_path = fixture_db_path(fixture.path());
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -108,6 +114,11 @@ fn integration_harness_indexes_fixture_vault_end_to_end() {
     assert_eq!(snapshot.watcher_status, "stopped");
     assert!(snapshot.files_total >= 10);
     assert!(snapshot.markdown_files >= 7);
+    assert!(
+        FilesRepository::get_by_normalized_path(&connection, ".tao/index.sqlite")
+            .expect("lookup runtime database")
+            .is_none()
+    );
 
     let alpha = FilesRepository::get_by_normalized_path(&connection, "notes/alpha.md")
         .expect("lookup alpha")
@@ -145,7 +156,7 @@ fn integration_harness_indexes_fixture_vault_end_to_end() {
 #[test]
 fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("tao.sqlite");
+    let db_path = fixture_db_path(fixture.path());
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -173,7 +184,7 @@ fn resolver_outputs_are_deterministic_across_repeated_rebuilds() {
 #[test]
 fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("tao.sqlite");
+    let db_path = fixture_db_path(fixture.path());
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");
@@ -195,7 +206,7 @@ fn malformed_front_matter_is_tolerated_without_crash_or_corrupt_rows() {
 #[test]
 fn bases_parser_and_table_snapshot_match_fixture_expectations() {
     let fixture = copy_fixture_vault();
-    let db_path = fixture.path().join("tao.sqlite");
+    let db_path = fixture_db_path(fixture.path());
 
     let mut connection = Connection::open(db_path).expect("open sqlite");
     run_migrations(&mut connection).expect("run migrations");

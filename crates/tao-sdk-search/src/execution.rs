@@ -47,6 +47,23 @@ pub fn execute_projected_query(
 
     let needle = query.to_lowercase();
     let fts_query = parser::build_fts_query(query);
+    let mut count_statement = connection
+        .prepare_cached(
+            r#"
+WITH matches AS (
+  SELECT 1
+  FROM search_index si
+  JOIN search_index_fts ON search_index_fts.rowid = si.rowid
+  WHERE search_index_fts MATCH ?1
+)
+SELECT COUNT(*) FROM matches
+"#,
+        )
+        .map_err(|source| SearchQueryError::PrepareQuery { source })?;
+    let total = count_statement
+        .query_row(params![fts_query], |row| row.get::<_, u64>(0))
+        .map_err(|source| SearchQueryError::RunQuery { source })?;
+
     let mut statement = connection
         .prepare_cached(
             r#"
@@ -83,8 +100,7 @@ SELECT
     CASE WHEN title_match > 0 THEN 3 ELSE 0 END
     + CASE WHEN path_match > 0 THEN 2 ELSE 0 END
     + CASE WHEN content_match > 0 THEN 1 ELSE 0 END
-  ) AS score,
-  COUNT(*) OVER() AS total_count
+  ) AS score
 FROM scored
 ORDER BY score DESC, normalized_path ASC
 LIMIT ?3
@@ -111,7 +127,6 @@ OFFSET ?4
             } else {
                 0
             };
-            let total: u64 = row.get("total_count")?;
             let matched_in = if projection.include_matched_in {
                 let mut matched_in = Vec::new();
                 if title_match != 0 {
@@ -149,18 +164,10 @@ OFFSET ?4
                 indexed_at: row.get("indexed_at")?,
                 matched_in,
             })
-            .map(|item| (item, total))
         })
         .map_err(|source| SearchQueryError::RunQuery { source })?;
-    let mut total = 0_u64;
     let items = rows
         .map(|row| row.map_err(|source| SearchQueryError::MapQueryRow { source }))
-        .map(|row| {
-            row.map(|(item, row_total)| {
-                total = row_total;
-                item
-            })
-        })
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(SearchQueryProjectedPage {

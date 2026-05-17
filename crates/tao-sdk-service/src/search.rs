@@ -1014,6 +1014,7 @@ fn search_bases(
                         BaseTableExecutionOptions {
                             include_summaries: false,
                             coercion_mode: BaseCoercionMode::Permissive,
+                            ..BaseTableExecutionOptions::default()
                         },
                     )
                     .map_err(|source| VaultSearchError::BaseExecute {
@@ -1095,6 +1096,7 @@ fn base_rows_for_path(
                         BaseTableExecutionOptions {
                             include_summaries: false,
                             coercion_mode: BaseCoercionMode::Permissive,
+                            ..BaseTableExecutionOptions::default()
                         },
                     )
                     .map_err(|source| VaultSearchError::BaseExecute {

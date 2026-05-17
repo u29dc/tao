@@ -1,6 +1,7 @@
 //! Typed configuration schema and merge helpers for Tao runtime settings.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -200,10 +201,13 @@ pub fn load_or_bootstrap(root: &Path) -> Result<TaoConfig, TaoConfigError> {
 
 /// Persist default config template at `path` if file does not already exist.
 pub fn bootstrap_default_file(path: &Path) -> Result<(), TaoConfigError> {
-    if path.exists() {
-        return Ok(());
-    }
+    bootstrap_default_file_with_hook(path, || {})
+}
 
+fn bootstrap_default_file_with_hook(
+    path: &Path,
+    before_create: impl FnOnce(),
+) -> Result<(), TaoConfigError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| TaoConfigError::CreateParent {
             path: parent.to_path_buf(),
@@ -211,10 +215,23 @@ pub fn bootstrap_default_file(path: &Path) -> Result<(), TaoConfigError> {
         })?;
     }
 
-    fs::write(path, default_template()).map_err(|source| TaoConfigError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    before_create();
+
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(source) => {
+            return Err(TaoConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    file.write_all(default_template().as_bytes())
+        .map_err(|source| TaoConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
     Ok(())
 }
 
@@ -286,8 +303,9 @@ mod tests {
 
     use super::{
         CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, SecurityConfig, StorageConfig,
-        TaoConfig, TaoConfigError, VaultConfig, bootstrap_default_file, config_path,
-        default_template, load_from_path, load_or_bootstrap, parse_toml,
+        TaoConfig, TaoConfigError, VaultConfig, bootstrap_default_file,
+        bootstrap_default_file_with_hook, config_path, default_template, load_from_path,
+        load_or_bootstrap, parse_toml,
     };
 
     #[test]
@@ -422,6 +440,21 @@ mod tests {
         bootstrap_default_file(&path).expect("bootstrap should not overwrite existing file");
 
         let loaded = load_from_path(&path).expect("load existing config");
+        assert_eq!(loaded.runtime.tracing_enabled, Some(false));
+    }
+
+    #[test]
+    fn bootstrap_default_file_does_not_clobber_file_created_before_create() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join(CONFIG_FILE_NAME);
+
+        bootstrap_default_file_with_hook(&path, || {
+            std::fs::write(&path, "[runtime]\ntracing_enabled = false\n")
+                .expect("create raced config");
+        })
+        .expect("bootstrap should treat raced create as success");
+
+        let loaded = load_from_path(&path).expect("load raced config");
         assert_eq!(loaded.runtime.tracing_enabled, Some(false));
     }
 

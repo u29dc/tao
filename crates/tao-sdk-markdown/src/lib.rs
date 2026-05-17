@@ -77,30 +77,55 @@ impl MarkdownParser {
 }
 
 fn split_front_matter(raw: &str) -> Result<(Option<String>, String), MarkdownParseError> {
-    let lines: Vec<&str> = raw.lines().collect();
-    if lines.first() != Some(&"---") {
+    let Some(opening_fence) = source_line_at(raw, 0) else {
         return Ok((None, raw.to_string()));
-    }
-
-    let closing_index = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, line)| (*line == "---").then_some(index))
-        .unwrap_or(0);
-    if closing_index == 0 {
-        // Tolerate malformed front matter fences by treating the whole file as body.
-        return Ok((None, raw.to_string()));
-    }
-
-    let front_matter = lines[1..closing_index].join("\n");
-    let body = if closing_index + 1 < lines.len() {
-        lines[(closing_index + 1)..].join("\n")
-    } else {
-        String::new()
     };
+    if opening_fence.content != "---" {
+        return Ok((None, raw.to_string()));
+    }
 
-    Ok((Some(front_matter), body))
+    let mut front_matter_lines = Vec::new();
+    let mut line_start = opening_fence.next_start;
+    while let Some(line) = source_line_at(raw, line_start) {
+        if line.content == "---" {
+            let front_matter = front_matter_lines.join("\n");
+            let body = raw[line.next_start..].to_string();
+            return Ok((Some(front_matter), body));
+        }
+
+        front_matter_lines.push(line.content);
+        line_start = line.next_start;
+    }
+
+    // Tolerate malformed front matter fences by treating the whole file as body.
+    Ok((None, raw.to_string()))
+}
+
+struct SourceLine<'a> {
+    content: &'a str,
+    next_start: usize,
+}
+
+fn source_line_at(raw: &str, start: usize) -> Option<SourceLine<'_>> {
+    if start >= raw.len() {
+        return None;
+    }
+
+    let rest = &raw[start..];
+    let next_start = rest.find('\n').map_or(raw.len(), |index| start + index + 1);
+    let mut content_end = next_start;
+    let bytes = raw.as_bytes();
+    if content_end > start && bytes[content_end - 1] == b'\n' {
+        content_end -= 1;
+        if content_end > start && bytes[content_end - 1] == b'\r' {
+            content_end -= 1;
+        }
+    }
+
+    Some(SourceLine {
+        content: &raw[start..content_end],
+        next_start,
+    })
 }
 
 fn collect_headings(body: &str) -> Vec<HeadingToken> {
@@ -123,7 +148,16 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
         return None;
     }
 
-    let text = trimmed[level..].trim_start();
+    let after_hashes = &trimmed[level..];
+    if !after_hashes
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_whitespace())
+    {
+        return None;
+    }
+
+    let text = after_hashes.trim_start();
     if text.is_empty() {
         return None;
     }
@@ -176,6 +210,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_preserves_front_matter_body_line_endings_and_trailing_newline() {
+        let parser = MarkdownParser;
+        let input = MarkdownParseRequest {
+            normalized_path: "notes/today.md".to_string(),
+            raw: "---\r\ntags: x\r\n---\r\n# Title\r\nBody\r\n".to_string(),
+        };
+
+        let parsed = parser.parse(input).expect("parse markdown");
+
+        assert_eq!(parsed.title, "Title");
+        assert_eq!(parsed.front_matter, Some("tags: x".to_string()));
+        assert_eq!(parsed.body, "# Title\r\nBody\r\n");
+    }
+
+    #[test]
     fn parse_falls_back_to_file_stem_for_title() {
         let parser = MarkdownParser;
         let input = MarkdownParseRequest {
@@ -185,6 +234,19 @@ mod tests {
 
         let parsed = parser.parse(input).expect("parse markdown");
         assert_eq!(parsed.title, "2026-03-03");
+        assert_eq!(parsed.headings, Vec::new());
+    }
+
+    #[test]
+    fn parse_ignores_hash_prefixed_text_without_heading_space() {
+        let parser = MarkdownParser;
+        let input = MarkdownParseRequest {
+            normalized_path: "note.md".to_string(),
+            raw: "#todo item\n###identifier".to_string(),
+        };
+
+        let parsed = parser.parse(input).expect("parse markdown");
+        assert_eq!(parsed.title, "note");
         assert_eq!(parsed.headings, Vec::new());
     }
 

@@ -45,7 +45,10 @@ impl FullIndexService {
             .iter()
             .map(|entry| entry.normalized.clone())
             .collect();
-        let resolution_index = LinkResolutionIndex::new(&resolution_candidates);
+        let resolution_index = LinkResolutionIndex::with_case_policy(
+            &resolution_candidates,
+            link_case_policy(case_policy),
+        );
         let markdown_candidates: Vec<String> = manifest
             .entries
             .iter()

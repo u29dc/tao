@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use tao_sdk_core::{cmp_normalized_paths, normalize_path_like};
 use thiserror::Error;
 
@@ -53,6 +53,8 @@ pub fn parse_wikilink(raw: &str) -> Result<WikiLink, WikiLinkParseError> {
 /// Extract all valid wikilinks from a markdown string.
 #[must_use]
 pub fn extract_wikilinks(markdown: &str) -> Vec<WikiLink> {
+    let markdown = markdown_without_code_contexts(markdown);
+    let markdown = markdown.as_str();
     let mut links = Vec::new();
     let mut cursor = 0;
 
@@ -91,11 +93,7 @@ pub struct MarkdownLink {
 /// This parser supports inline markdown links/embeds and excludes external URL schemes.
 #[must_use]
 pub fn extract_markdown_links(markdown: &str) -> Vec<MarkdownLink> {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH;
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(markdown, markdown_parser_options());
     let mut links = Vec::new();
 
     for event in parser {
@@ -136,29 +134,52 @@ pub struct LinkResolution {
     pub is_ambiguous: bool,
 }
 
+/// Controls how link targets and candidate paths are compared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinkCasePolicy {
+    /// Preserve path casing for comparisons.
+    #[default]
+    Sensitive,
+    /// Lowercase paths before comparing.
+    Insensitive,
+}
+
 /// Precomputed lookup table for deterministic link resolution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LinkResolutionIndex {
+    case_policy: LinkCasePolicy,
     by_normalized_target: HashMap<String, Vec<String>>,
     by_basename: HashMap<String, Vec<String>>,
+}
+
+impl Default for LinkResolutionIndex {
+    fn default() -> Self {
+        Self::new(&[])
+    }
 }
 
 impl LinkResolutionIndex {
     /// Build one resolution index from normalized vault-relative candidate paths.
     #[must_use]
     pub fn new(candidates: &[String]) -> Self {
+        Self::with_case_policy(candidates, LinkCasePolicy::Sensitive)
+    }
+
+    /// Build one resolution index with explicit path case matching semantics.
+    #[must_use]
+    pub fn with_case_policy(candidates: &[String], case_policy: LinkCasePolicy) -> Self {
         let mut by_normalized_target = HashMap::<String, Vec<String>>::new();
         let mut by_basename = HashMap::<String, Vec<String>>::new();
 
         for candidate in candidates {
             let normalized_candidate = normalize_path_like(candidate.trim());
-            let normalized_key = resolution_lookup_key(&normalized_candidate);
+            let normalized_key = resolution_lookup_key(&normalized_candidate, case_policy);
             by_normalized_target
                 .entry(normalized_key)
                 .or_default()
                 .push(candidate.clone());
 
-            let basename_key = basename_lookup_key(&normalized_candidate);
+            let basename_key = basename_lookup_key(&normalized_candidate, case_policy);
             by_basename
                 .entry(basename_key)
                 .or_default()
@@ -174,6 +195,7 @@ impl LinkResolutionIndex {
         }
 
         Self {
+            case_policy,
             by_normalized_target,
             by_basename,
         }
@@ -198,7 +220,7 @@ impl LinkResolutionIndex {
             let source_dir = source_path.map(parent_dir);
             let mut seen = HashSet::<String>::new();
             for variant in resolve_target_variants(&target, source_dir.as_deref()) {
-                let key = resolution_lookup_key(&variant);
+                let key = resolution_lookup_key(&variant, self.case_policy);
                 if let Some(candidates) = self.by_normalized_target.get(&key) {
                     for candidate in candidates {
                         if seen.insert(candidate.clone()) {
@@ -208,13 +230,13 @@ impl LinkResolutionIndex {
                 }
             }
         } else {
-            let key = basename_lookup_key(&target);
+            let key = basename_lookup_key(&target, self.case_policy);
             if let Some(candidates) = self.by_basename.get(&key) {
                 matched_candidates.extend(candidates.iter().cloned());
             }
         }
 
-        finish_resolution(matched_candidates, source_path)
+        finish_resolution(matched_candidates, source_path, self.case_policy)
     }
 }
 
@@ -243,6 +265,22 @@ pub fn resolve_target(
     source_path: Option<&str>,
     candidates: &[String],
 ) -> LinkResolution {
+    resolve_target_with_case_policy(
+        raw_target,
+        source_path,
+        candidates,
+        LinkCasePolicy::Sensitive,
+    )
+}
+
+/// Resolve raw target against candidate normalized paths with explicit case semantics.
+#[must_use]
+pub fn resolve_target_with_case_policy(
+    raw_target: &str,
+    source_path: Option<&str>,
+    candidates: &[String],
+    case_policy: LinkCasePolicy,
+) -> LinkResolution {
     let target = parse_wikilink(raw_target)
         .map(|link| link.target)
         .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
@@ -260,7 +298,7 @@ pub fn resolve_target(
         let resolved_variants = resolve_target_variants(&target, source_dir.as_deref());
         for candidate in candidates {
             if resolved_variants.iter().any(|resolved_target| {
-                normalized_candidate_equals_target(candidate, resolved_target)
+                normalized_candidate_equals_target(candidate, resolved_target, case_policy)
             }) {
                 matched_candidates.push(candidate.clone());
             }
@@ -271,9 +309,11 @@ pub fn resolve_target(
             let candidate_trimmed = candidate.trim();
             if candidate_trimmed.contains('\\') {
                 let normalized_candidate = normalize_path_like(candidate_trimmed);
-                if basename_without_extension(&normalized_candidate)
-                    .eq_ignore_ascii_case(&target_basename)
-                {
+                if case_policy_eq(
+                    &basename_without_extension(&normalized_candidate),
+                    &target_basename,
+                    case_policy,
+                ) {
                     matched_candidates.push(candidate.clone());
                 }
                 continue;
@@ -284,13 +324,13 @@ pub fn resolve_target(
                 .rsplit('/')
                 .next()
                 .unwrap_or(candidate_without_extension);
-            if candidate_basename.eq_ignore_ascii_case(&target_basename) {
+            if case_policy_eq(candidate_basename, &target_basename, case_policy) {
                 matched_candidates.push(candidate.clone());
             }
         }
     }
 
-    finish_resolution(matched_candidates, source_path)
+    finish_resolution(matched_candidates, source_path, case_policy)
 }
 
 /// Convert heading text or heading fragment value into an Obsidian-style slug.
@@ -373,6 +413,7 @@ pub fn resolve_heading_target(
 /// Extract unique block identifiers from markdown body text.
 #[must_use]
 pub fn extract_block_ids(markdown: &str) -> Vec<String> {
+    let markdown = markdown_without_code_contexts(markdown);
     let mut block_ids = BTreeSet::new();
 
     for line in markdown.lines() {
@@ -402,6 +443,39 @@ pub fn extract_block_ids(markdown: &str) -> Vec<String> {
     }
 
     block_ids.into_iter().collect()
+}
+
+fn markdown_parser_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+}
+
+fn markdown_without_code_contexts(markdown: &str) -> String {
+    let mut sanitized = markdown.as_bytes().to_vec();
+    let parser = Parser::new_ext(markdown, markdown_parser_options()).into_offset_iter();
+    let mut in_code_block = false;
+
+    for (event, range) in parser {
+        match event {
+            Event::Code(_) => blank_range_preserving_lines(&mut sanitized, range),
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            Event::Text(_) if in_code_block => blank_range_preserving_lines(&mut sanitized, range),
+            _ => {}
+        }
+    }
+
+    String::from_utf8(sanitized).expect("sanitized markdown remains utf-8")
+}
+
+fn blank_range_preserving_lines(markdown: &mut [u8], range: std::ops::Range<usize>) {
+    for byte in &mut markdown[range] {
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
 }
 
 /// Resolve block fragment against target block id index.
@@ -617,18 +691,22 @@ fn split_fragments(value: &str) -> (&str, Option<String>, Option<String>) {
     (value.trim(), None, None)
 }
 
-fn normalized_candidate_equals_target(candidate: &str, target: &str) -> bool {
+fn normalized_candidate_equals_target(
+    candidate: &str,
+    target: &str,
+    case_policy: LinkCasePolicy,
+) -> bool {
     if candidate.contains('\\') || target.contains('\\') {
         let normalized_candidate = normalize_path_like(candidate);
         let normalized_target = normalize_path_like(target);
         let candidate_without_ext = strip_markdown_extension(&normalized_candidate);
         let target_without_ext = strip_markdown_extension(&normalized_target);
-        return candidate_without_ext.eq_ignore_ascii_case(target_without_ext);
+        return case_policy_eq(candidate_without_ext, target_without_ext, case_policy);
     }
 
     let candidate_without_ext = strip_markdown_extension(candidate.trim());
     let target_without_ext = strip_markdown_extension(target.trim());
-    candidate_without_ext.eq_ignore_ascii_case(target_without_ext)
+    case_policy_eq(candidate_without_ext, target_without_ext, case_policy)
 }
 
 fn strip_markdown_extension(path: &str) -> &str {
@@ -642,17 +720,32 @@ fn basename_without_extension(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-fn resolution_lookup_key(path: &str) -> String {
-    strip_markdown_extension(path.trim()).to_ascii_lowercase()
+fn resolution_lookup_key(path: &str, case_policy: LinkCasePolicy) -> String {
+    apply_case_policy(strip_markdown_extension(path.trim()), case_policy)
 }
 
-fn basename_lookup_key(path: &str) -> String {
-    basename_without_extension(path).to_ascii_lowercase()
+fn basename_lookup_key(path: &str, case_policy: LinkCasePolicy) -> String {
+    apply_case_policy(&basename_without_extension(path), case_policy)
+}
+
+fn apply_case_policy(value: &str, case_policy: LinkCasePolicy) -> String {
+    match case_policy {
+        LinkCasePolicy::Sensitive => value.to_string(),
+        LinkCasePolicy::Insensitive => value.to_lowercase(),
+    }
+}
+
+fn case_policy_eq(left: &str, right: &str, case_policy: LinkCasePolicy) -> bool {
+    match case_policy {
+        LinkCasePolicy::Sensitive => left == right,
+        LinkCasePolicy::Insensitive => left.to_lowercase() == right.to_lowercase(),
+    }
 }
 
 fn finish_resolution(
     mut matched_candidates: Vec<String>,
     source_path: Option<&str>,
+    case_policy: LinkCasePolicy,
 ) -> LinkResolution {
     if matched_candidates.is_empty() {
         return LinkResolution {
@@ -664,7 +757,7 @@ fn finish_resolution(
 
     let source_dir = source_path.map(parent_dir);
     matched_candidates
-        .sort_by(|left, right| compare_candidates(left, right, source_dir.as_deref()));
+        .sort_by(|left, right| compare_candidates(left, right, source_dir.as_deref(), case_policy));
     matched_candidates.dedup();
 
     let resolved_path = matched_candidates.first().cloned();
@@ -685,19 +778,26 @@ fn parent_dir(path: &str) -> String {
     parts.join("/")
 }
 
-fn compare_candidates(left: &str, right: &str, source_dir: Option<&str>) -> std::cmp::Ordering {
+fn compare_candidates(
+    left: &str,
+    right: &str,
+    source_dir: Option<&str>,
+    case_policy: LinkCasePolicy,
+) -> std::cmp::Ordering {
     let left_dir = parent_dir(left);
     let right_dir = parent_dir(right);
 
-    let left_same_folder = source_dir.is_some_and(|dir| left_dir.eq_ignore_ascii_case(dir));
-    let right_same_folder = source_dir.is_some_and(|dir| right_dir.eq_ignore_ascii_case(dir));
+    let left_same_folder =
+        source_dir.is_some_and(|dir| case_policy_eq(&left_dir, dir, case_policy));
+    let right_same_folder =
+        source_dir.is_some_and(|dir| case_policy_eq(&right_dir, dir, case_policy));
     if left_same_folder != right_same_folder {
         return right_same_folder.cmp(&left_same_folder);
     }
 
     if let Some(source_dir) = source_dir {
-        let left_distance = relative_distance(source_dir, left);
-        let right_distance = relative_distance(source_dir, right);
+        let left_distance = relative_distance(source_dir, left, case_policy);
+        let right_distance = relative_distance(source_dir, right, case_policy);
         if left_distance != right_distance {
             return left_distance.cmp(&right_distance);
         }
@@ -706,7 +806,7 @@ fn compare_candidates(left: &str, right: &str, source_dir: Option<&str>) -> std:
     cmp_normalized_paths(left, right)
 }
 
-fn relative_distance(source_dir: &str, candidate_path: &str) -> usize {
+fn relative_distance(source_dir: &str, candidate_path: &str, case_policy: LinkCasePolicy) -> usize {
     let from: Vec<&str> = source_dir
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -720,7 +820,7 @@ fn relative_distance(source_dir: &str, candidate_path: &str) -> usize {
     let common_prefix = from
         .iter()
         .zip(to.iter())
-        .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+        .take_while(|(left, right)| case_policy_eq(left, right, case_policy))
         .count();
 
     (from.len() - common_prefix) + (to.len() - common_prefix)
@@ -745,9 +845,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        LinkResolutionIndex, WikiLinkParseError, extract_block_ids, extract_markdown_links,
-        extract_wikilinks, parse_wikilink, resolve_block_target, resolve_heading_target,
-        resolve_target, slugify_heading,
+        LinkCasePolicy, LinkResolutionIndex, WikiLinkParseError, extract_block_ids,
+        extract_markdown_links, extract_wikilinks, parse_wikilink, resolve_block_target,
+        resolve_heading_target, resolve_target, resolve_target_with_case_policy, slugify_heading,
     };
 
     #[test]
@@ -784,6 +884,27 @@ mod tests {
         assert_eq!(links[0].target, "note-one");
         assert_eq!(links[1].display.as_deref(), Some("second"));
         assert_eq!(links[2].heading.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn extract_wikilinks_ignores_code_contexts() {
+        let markdown = r#"
+see [[real-note]]
+`[[inline-code]]`
+```
+[[fenced-code]]
+```
+and [[second-real]]
+"#;
+        let links = extract_wikilinks(markdown);
+
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["real-note", "second-real"]
+        );
     }
 
     #[test]
@@ -896,6 +1017,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_target_respects_sensitive_case_policy() {
+        let candidates = vec!["foo.md".to_string()];
+        let index = LinkResolutionIndex::new(&candidates);
+
+        let indexed = index.resolve("[[Foo]]", None);
+        let linear = resolve_target("[[Foo]]", None, &candidates);
+
+        assert_eq!(indexed.resolved_path, None);
+        assert_eq!(indexed, linear);
+    }
+
+    #[test]
+    fn resolve_target_supports_insensitive_case_policy() {
+        let candidates = vec!["foo.md".to_string()];
+        let index = LinkResolutionIndex::with_case_policy(&candidates, LinkCasePolicy::Insensitive);
+
+        let indexed = index.resolve("[[Foo]]", None);
+        let linear = resolve_target_with_case_policy(
+            "[[Foo]]",
+            None,
+            &candidates,
+            LinkCasePolicy::Insensitive,
+        );
+
+        assert_eq!(indexed.resolved_path.as_deref(), Some("foo.md"));
+        assert_eq!(indexed, linear);
+    }
+
+    #[test]
+    fn resolve_target_keeps_case_collisions_distinct_in_sensitive_mode() {
+        let candidates = vec!["Foo.md".to_string(), "foo.md".to_string()];
+        let index = LinkResolutionIndex::new(&candidates);
+
+        let upper = index.resolve("[[Foo]]", None);
+        let lower = index.resolve("[[foo]]", None);
+
+        assert_eq!(upper.resolved_path.as_deref(), Some("Foo.md"));
+        assert_eq!(upper.matched_candidates, vec!["Foo.md"]);
+        assert_eq!(lower.resolved_path.as_deref(), Some("foo.md"));
+        assert_eq!(lower.matched_candidates, vec!["foo.md"]);
+    }
+
+    #[test]
     fn resolution_index_matches_linear_resolver() {
         let candidates = vec![
             "notes/project/alpha.md".to_string(),
@@ -946,6 +1110,21 @@ mod tests {
     fn extract_block_ids_finds_unique_markdown_block_markers() {
         let markdown = "line one ^block-a\nline two ^block-b\nline three ^block-a\nignored^inline";
         let blocks = extract_block_ids(markdown);
+        assert_eq!(blocks, vec!["block-a", "block-b"]);
+    }
+
+    #[test]
+    fn extract_block_ids_ignores_code_contexts() {
+        let markdown = r#"
+line one ^block-a
+`inline ^inline-code`
+```
+fenced ^fenced-code
+```
+line two ^block-b
+"#;
+        let blocks = extract_block_ids(markdown);
+
         assert_eq!(blocks, vec!["block-a", "block-b"]);
     }
 

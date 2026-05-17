@@ -27,11 +27,48 @@ pub enum FrontMatterStatus {
     Malformed { error: String },
 }
 
+struct MarkdownLine<'a> {
+    content: &'a str,
+    next_start: usize,
+}
+
+fn next_markdown_line(markdown: &str, start: usize) -> Option<MarkdownLine<'_>> {
+    if start >= markdown.len() {
+        return None;
+    }
+
+    let remaining = &markdown[start..];
+    if let Some(newline_offset) = remaining.find('\n') {
+        let line_end = start + newline_offset;
+        let content_end = if line_end > start && markdown.as_bytes()[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        Some(MarkdownLine {
+            content: &markdown[start..content_end],
+            next_start: line_end + 1,
+        })
+    } else {
+        Some(MarkdownLine {
+            content: remaining,
+            next_start: markdown.len(),
+        })
+    }
+}
+
 /// Extract front matter from markdown and capture parse failures without panicking.
 #[must_use]
 pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
-    let lines: Vec<&str> = markdown.lines().collect();
-    if lines.first() != Some(&"---") {
+    let Some(opening_fence) = next_markdown_line(markdown, 0) else {
+        return FrontMatterExtraction {
+            raw: None,
+            body: markdown.to_string(),
+            status: FrontMatterStatus::Missing,
+        };
+    };
+
+    if opening_fence.content != "---" {
         return FrontMatterExtraction {
             raw: None,
             body: markdown.to_string(),
@@ -39,40 +76,38 @@ pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
         };
     }
 
-    let Some(closing_index) = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, line)| (*line == "---").then_some(index))
-    else {
-        return FrontMatterExtraction {
-            raw: Some(lines[1..].join("\n")),
-            body: markdown.to_string(),
-            status: FrontMatterStatus::Malformed {
-                error: FrontMatterError::UnclosedFence.to_string(),
-            },
-        };
-    };
+    let mut raw_lines = Vec::new();
+    let mut cursor = opening_fence.next_start;
+    while let Some(line) = next_markdown_line(markdown, cursor) {
+        if line.content == "---" {
+            let raw = raw_lines.join("\n");
+            let body = markdown[line.next_start..].to_string();
 
-    let raw = lines[1..closing_index].join("\n");
-    let body = if closing_index + 1 < lines.len() {
-        lines[(closing_index + 1)..].join("\n")
-    } else {
-        String::new()
-    };
+            return match serde_yaml::from_str::<Value>(&raw) {
+                Ok(value) => FrontMatterExtraction {
+                    raw: Some(raw),
+                    body,
+                    status: FrontMatterStatus::Parsed { value },
+                },
+                Err(source) => FrontMatterExtraction {
+                    raw: Some(raw),
+                    body,
+                    status: FrontMatterStatus::Malformed {
+                        error: FrontMatterError::YamlParse { source }.to_string(),
+                    },
+                },
+            };
+        }
 
-    match serde_yaml::from_str::<Value>(&raw) {
-        Ok(value) => FrontMatterExtraction {
-            raw: Some(raw),
-            body,
-            status: FrontMatterStatus::Parsed { value },
-        },
-        Err(source) => FrontMatterExtraction {
-            raw: Some(raw),
-            body,
-            status: FrontMatterStatus::Malformed {
-                error: FrontMatterError::YamlParse { source }.to_string(),
-            },
+        raw_lines.push(line.content);
+        cursor = line.next_start;
+    }
+
+    FrontMatterExtraction {
+        raw: Some(raw_lines.join("\n")),
+        body: markdown.to_string(),
+        status: FrontMatterStatus::Malformed {
+            error: FrontMatterError::UnclosedFence.to_string(),
         },
     }
 }
@@ -345,6 +380,27 @@ mod tests {
         }
 
         assert_eq!(extraction.body, "# Body");
+    }
+
+    #[test]
+    fn extract_preserves_body_line_endings_after_front_matter() {
+        let lf_markdown = "---\ntitle: Today\n---\n# Body\n";
+        let lf_extraction = extract_front_matter(lf_markdown);
+
+        assert!(matches!(
+            lf_extraction.status,
+            FrontMatterStatus::Parsed { .. }
+        ));
+        assert_eq!(lf_extraction.body, "# Body\n");
+
+        let crlf_markdown = "---\r\ntitle: Today\r\n---\r\n# Body\r\n";
+        let crlf_extraction = extract_front_matter(crlf_markdown);
+
+        assert!(matches!(
+            crlf_extraction.status,
+            FrontMatterStatus::Parsed { .. }
+        ));
+        assert_eq!(crlf_extraction.body, "# Body\r\n");
     }
 
     #[test]

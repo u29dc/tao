@@ -4,6 +4,7 @@ target/
 dist/
 build/
 .tmp/
+.clawpatch/
 apps/tao-macos/.build/
 apps/tao-macos/.swiftpm/
 .benchmarks/

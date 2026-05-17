@@ -9,8 +9,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tao_sdk_links::{
-    LinkResolutionIndex, WikiLink, extract_block_ids, extract_markdown_links, extract_wikilinks,
-    resolve_block_target, resolve_heading_target, slugify_heading,
+    LinkCasePolicy, LinkResolutionIndex, WikiLink, extract_block_ids, extract_markdown_links,
+    extract_wikilinks, resolve_block_target, resolve_heading_target, slugify_heading,
 };
 use tao_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
 use tao_sdk_properties::{
@@ -106,6 +106,13 @@ impl IndexedLinkKind {
             Self::Markdown => "body:markdown".to_string(),
             Self::Embed => "body:embed".to_string(),
         }
+    }
+}
+
+fn link_case_policy(case_policy: CasePolicy) -> LinkCasePolicy {
+    match case_policy {
+        CasePolicy::Sensitive => LinkCasePolicy::Sensitive,
+        CasePolicy::Insensitive => LinkCasePolicy::Insensitive,
     }
 }
 
