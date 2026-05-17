@@ -15,6 +15,7 @@ Suites:
   sdk      Run parse/resolve/search/bridge/startup/graph-walk/unified-query + baseline query/graph budgets
   cli      Run full read-only CLI command matrix
   live     Run real-vault read-only/index benchmark matrix
+  drift    Run single-file drift reindex benchmark on generated fixtures
   fixtures Run fixture generation throughput benchmark (1k, 5k)
   daemon   Run one-shot vs daemon warm-runtime comparison
   graph-walk Run tao-bench graph-walk scenario
@@ -127,10 +128,10 @@ case "$FIXTURE_PROFILE" in
     ;;
 esac
 case "$SUITE" in
-  all|sdk|cli|live|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core)
+  all|sdk|cli|live|drift|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core)
     ;;
   *)
-    echo "--suite must be one of: all|sdk|cli|live|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core" >&2
+    echo "--suite must be one of: all|sdk|cli|live|drift|fixtures|daemon|graph-walk|unified-query|bridge|startup|parse|resolve|search|core" >&2
     exit 1
     ;;
 esac
@@ -167,6 +168,8 @@ HYPERFINE_GRAPH_REPORT="${REPORT_DIR}/graph-unresolved-hyperfine.json"
 DAEMON_REPORT="${REPORT_DIR}/daemon-query-docs-hyperfine.json"
 STREAM_COMPARE_REPORT="${REPORT_DIR}/query-docs-stream-vs-standard-hyperfine.json"
 STREAM_COMPARE_SUMMARY="${REPORT_DIR}/query-docs-stream-vs-standard.summary.json"
+DRIFT_REPORT="${REPORT_DIR}/single-file-drift-reindex-hyperfine.json"
+DRIFT_SUMMARY="${REPORT_DIR}/single-file-drift-reindex.summary.json"
 DAEMON_SOCKET=""
 DAEMON_RUNNING=0
 
@@ -519,6 +522,52 @@ run_query_stream_projection_benchmark() {
   ' "${STREAM_COMPARE_REPORT}" "${STREAM_COMPARE_SUMMARY}" "${STREAM_MIN_IMPROVEMENT_PCT}" "${standard_rss_kb}" "${stream_rss_kb}"
 }
 
+run_single_file_drift_benchmark() {
+  require_hyperfine
+
+  local note_path="${FIXTURE_VAULT}/${SAMPLE_NOTE}"
+  local baseline_path="${REPORT_DIR}/single-file-drift-baseline.md"
+  local note_q baseline_q tao_q vault_q db_q
+  note_q="$(shell_quote "${note_path}")"
+  baseline_q="$(shell_quote "${baseline_path}")"
+  tao_q="$(shell_quote "${CLI_BIN}")"
+  vault_q="$(shell_quote "${FIXTURE_VAULT}")"
+  db_q="$(shell_quote "${DB_PATH}")"
+
+  cp "${note_path}" "${baseline_path}"
+
+  echo "Running single-file drift reindex benchmark..."
+  hyperfine \
+    --shell=bash \
+    --warmup "${WARMUP}" \
+    --runs "${RUNS}" \
+    --prepare "cp ${baseline_q} ${note_q} && ${tao_q} vault reindex --vault-root ${vault_q} --db-path ${db_q} > /dev/null" \
+    --export-json "${DRIFT_REPORT}" \
+    "printf '%s\n' '# Drift benchmark' '[[project-2]]' > ${note_q} && ${tao_q} vault reindex --vault-root ${vault_q} --db-path ${db_q} > /dev/null"
+
+  cp "${baseline_path}" "${note_path}"
+  "${CLI_BIN}" vault reindex --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" >/dev/null
+
+  bun --eval '
+    const fs = require("node:fs");
+    const [reportPath, summaryPath, profile, runs, warmup] = process.argv.slice(1);
+    const payload = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    const result = payload.results?.[0] ?? {};
+    const summary = {
+      generated_at: new Date().toISOString(),
+      profile,
+      runs: Number(runs),
+      warmup: Number(warmup),
+      mean_ms: Number(((result.mean ?? 0) * 1000).toFixed(3)),
+      stddev_ms: Number(((result.stddev ?? 0) * 1000).toFixed(3)),
+      min_ms: Number(((result.min ?? 0) * 1000).toFixed(3)),
+      max_ms: Number(((result.max ?? 0) * 1000).toFixed(3)),
+    };
+    fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+    console.log(`single-file drift summary written to ${summaryPath}`);
+  ' "${DRIFT_REPORT}" "${DRIFT_SUMMARY}" "${FIXTURE_PROFILE}" "${RUNS}" "${WARMUP}"
+}
+
 cli_matrix_benchmark() {
   local id="$1"
   local cmd="$2"
@@ -741,6 +790,7 @@ run_sdk_suite() {
   run_baseline_cli_budgets
   run_daemon_query_benchmark
   run_query_stream_projection_benchmark
+  run_single_file_drift_benchmark
 }
 
 run_fixture_generation_benchmark() {
@@ -831,6 +881,10 @@ case "${SUITE}" in
     ;;
   live)
     run_live_matrix
+    ;;
+  drift)
+    prepare_fixture
+    run_single_file_drift_benchmark
     ;;
   fixtures)
     run_fixture_generation_benchmark

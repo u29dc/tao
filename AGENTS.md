@@ -74,7 +74,7 @@
 
 - `README.md` and `CLAUDE.md` are symlink mirrors of [`AGENTS.md`](AGENTS.md); edit the root file only
 - Non-interactive CLI commands emit one JSON envelope to stdout by default; bare `tao` and help/version flows use native clap output.
-- `--json-stream` is a narrow fast path: it only applies to `query --from docs` without `--where` or `--sort`
+- `--json-stream` is a narrow projected JSON envelope path: it only applies to `query --from docs` without `--where` or `--sort`
 - `query --from graph` without `--path` maps to the unresolved-link window; with `--path` it returns outgoing and backlink panels
 - Public vault-content operations are read-only. `doc write`, `task set-state`, global `--allow-writes`, and public `--text` output are not part of the CLI surface.
 - Internal state writes for `vault open`, `vault reindex`, daemon/cache/index maintenance, watch reconciliation, and health synchronization remain allowed; `vault reindex --dry-run` inspects planned index work.

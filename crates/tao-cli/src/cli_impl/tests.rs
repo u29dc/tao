@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::io::Cursor;
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -4154,6 +4156,29 @@ fn daemon_socket_prepare_removes_stale_entry_before_bind() {
         prepare_daemon_socket_path(stale_path.to_string_lossy().as_ref()).expect("prepare");
     assert_eq!(prepared, stale_path);
     assert!(!stale_path.exists(), "stale socket path should be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_socket_prepare_hardens_parent_permissions() {
+    let tempdir = tempfile::tempdir().expect("create tempdir");
+    let socket_dir = tempdir.path().join("daemon");
+    fs::create_dir_all(&socket_dir).expect("create socket dir");
+    let mut permissions = fs::metadata(&socket_dir)
+        .expect("stat socket dir")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&socket_dir, permissions).expect("loosen socket dir permissions");
+
+    let socket_path = socket_dir.join("taod.sock");
+    prepare_daemon_socket_path(socket_path.to_string_lossy().as_ref()).expect("prepare socket");
+
+    let mode = fs::metadata(&socket_dir)
+        .expect("stat hardened socket dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
 }
 
 #[test]

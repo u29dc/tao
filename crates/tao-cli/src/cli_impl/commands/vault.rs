@@ -84,10 +84,11 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 .with_context(|| {
                     format!("open sqlite database '{}' read-only", resolved.db_path)
                 })?;
-                let refresh = query_index_refresh_status(
+                let refresh = query_index_refresh_status_with_mode(
                     Path::new(&resolved.vault_root),
                     &connection,
                     resolved.case_policy,
+                    ReconciliationScanMode::VerifyContentHashes,
                 )?;
                 let totals = query_index_totals(&connection)
                     .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
@@ -119,10 +120,11 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
             }
             let (mode, reason, drift_paths, batches_applied, upserted_files, removed_files, totals) =
                 with_connection(runtime, &resolved, |connection| {
-                    let refresh = query_index_refresh_status(
+                    let refresh = query_index_refresh_status_with_mode(
                         Path::new(&resolved.vault_root),
                         connection,
                         resolved.case_policy,
+                        ReconciliationScanMode::VerifyContentHashes,
                     )?;
 
                     if let Some(reason) = refresh.rebuild_reason {
@@ -149,11 +151,13 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                         ));
                     }
 
-                    let reconcile = WatchReconcileService::default()
-                        .reconcile_once(
+                    let reconcile = ReconciliationScannerService::default()
+                        .scan_and_repair_with_mode(
                             Path::new(&resolved.vault_root),
                             connection,
                             resolved.case_policy,
+                            128,
+                            ReconciliationScanMode::VerifyContentHashes,
                         )
                         .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
                     let totals = query_index_totals(connection)

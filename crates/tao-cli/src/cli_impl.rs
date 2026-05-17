@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -32,9 +32,9 @@ use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
     BaseValidationService, CURRENT_LINK_RESOLUTION_VERSION, FullIndexService,
     GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
-    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScannerService, SdkConfigInspectionService,
-    SdkConfigLoader, SdkConfigOverrides, SearchKind, VaultSearchRequest, VaultSearchService,
-    WatcherStatus, ensure_runtime_paths,
+    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScanMode, ReconciliationScannerService,
+    SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, SearchKind,
+    VaultSearchRequest, VaultSearchService, WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,

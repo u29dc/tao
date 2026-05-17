@@ -849,6 +849,45 @@ pub(crate) fn run_daemon_server(socket: &str) -> Result<()> {
                     if policy.refreshes_runtime() {
                         maybe_refresh_daemon_state(&payload.command, &mut runtime)?;
                     }
+                    if payload.json {
+                        match maybe_render_streaming_output_for_command(
+                            &payload.command,
+                            payload.json_stream,
+                            &mut runtime,
+                        ) {
+                            Ok(Some(output)) => {
+                                let response = DaemonResponse {
+                                    ok: true,
+                                    output: Some(output),
+                                    error: None,
+                                    status: None,
+                                };
+                                let bytes = serde_json::to_vec(&response)
+                                    .context("serialize daemon response payload")?;
+                                stream
+                                    .write_all(&bytes)
+                                    .context("write daemon response payload")?;
+                                stream.flush().context("flush daemon response payload")?;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(source) => {
+                                let response = DaemonResponse {
+                                    ok: false,
+                                    output: None,
+                                    error: Some(source.to_string()),
+                                    status: None,
+                                };
+                                let bytes = serde_json::to_vec(&response)
+                                    .context("serialize daemon response payload")?;
+                                stream
+                                    .write_all(&bytes)
+                                    .context("write daemon response payload")?;
+                                stream.flush().context("flush daemon response payload")?;
+                                continue;
+                            }
+                        }
+                    }
                     let resolved = resolve_command_vault_paths(&payload.command)?;
                     let runtime_key = resolved.as_ref().map(runtime_cache_key);
                     let cache_key = if policy.uses_result_cache() {
@@ -881,62 +920,23 @@ pub(crate) fn run_daemon_server(socket: &str) -> Result<()> {
                                 &result,
                             );
 
-                            if payload.json {
-                                match maybe_render_streaming_output_for_command(
-                                    &payload.command,
-                                    payload.json_stream,
-                                    &mut runtime,
-                                ) {
-                                    Ok(Some(output)) => DaemonResponse {
-                                        ok: true,
-                                        output: Some(output),
-                                        error: None,
-                                        status: None,
-                                    },
-                                    Ok(None) => match render_output_with_elapsed(
-                                        payload.json,
-                                        &result,
-                                        started_at.elapsed(),
-                                    ) {
-                                        Ok(output) => DaemonResponse {
-                                            ok: true,
-                                            output: Some(output),
-                                            error: None,
-                                            status: None,
-                                        },
-                                        Err(source) => DaemonResponse {
-                                            ok: false,
-                                            output: None,
-                                            error: Some(source.to_string()),
-                                            status: None,
-                                        },
-                                    },
-                                    Err(source) => DaemonResponse {
-                                        ok: false,
-                                        output: None,
-                                        error: Some(source.to_string()),
-                                        status: None,
-                                    },
-                                }
-                            } else {
-                                match render_output_with_elapsed(
-                                    payload.json,
-                                    &result,
-                                    started_at.elapsed(),
-                                ) {
-                                    Ok(output) => DaemonResponse {
-                                        ok: true,
-                                        output: Some(output),
-                                        error: None,
-                                        status: None,
-                                    },
-                                    Err(source) => DaemonResponse {
-                                        ok: false,
-                                        output: None,
-                                        error: Some(source.to_string()),
-                                        status: None,
-                                    },
-                                }
+                            match render_output_with_elapsed(
+                                payload.json,
+                                &result,
+                                started_at.elapsed(),
+                            ) {
+                                Ok(output) => DaemonResponse {
+                                    ok: true,
+                                    output: Some(output),
+                                    error: None,
+                                    status: None,
+                                },
+                                Err(source) => DaemonResponse {
+                                    ok: false,
+                                    output: None,
+                                    error: Some(source.to_string()),
+                                    status: None,
+                                },
                             }
                         }
                         Err(source) => DaemonResponse {
@@ -1003,10 +1003,42 @@ pub(crate) fn prepare_daemon_socket_path(socket: &str) -> Result<PathBuf> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create daemon socket parent '{}'", parent.display()))?;
+        harden_daemon_socket_parent(parent)?;
     }
     if socket_path.exists() {
         fs::remove_file(socket_path)
             .with_context(|| format!("remove stale daemon socket '{}'", socket))?;
     }
     Ok(socket_path.to_path_buf())
+}
+
+#[cfg(unix)]
+fn harden_daemon_socket_parent(parent: &Path) -> Result<()> {
+    let metadata = fs::metadata(parent)
+        .with_context(|| format!("stat daemon socket parent '{}'", parent.display()))?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(mode & !0o077);
+    fs::set_permissions(parent, permissions).with_context(|| {
+        format!(
+            "set daemon socket parent '{}' permissions to 0700",
+            parent.display()
+        )
+    })?;
+
+    let hardened_mode = fs::metadata(parent)
+        .with_context(|| format!("stat daemon socket parent '{}'", parent.display()))?
+        .permissions()
+        .mode();
+    if hardened_mode & 0o077 != 0 {
+        return Err(anyhow!(
+            "daemon socket parent '{}' must not be group/world accessible",
+            parent.display()
+        ));
+    }
+    Ok(())
 }

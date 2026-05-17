@@ -596,7 +596,7 @@ impl CandidateSet {
             .entry(path.to_string())
             .or_insert_with(|| CandidateAccumulator {
                 path: path.to_string(),
-                score: canonical_path_boost(path),
+                score: canonical_entity_path_boost(path),
                 kinds: HashSet::new(),
                 reasons: HashSet::new(),
             });
@@ -753,7 +753,7 @@ fn search_docs(
         if matched_in.is_empty() {
             continue;
         }
-        score += canonical_path_boost(&row.normalized_path);
+        score += canonical_entity_path_boost(&row.normalized_path);
         candidates.add(
             &row.normalized_path,
             SearchKind::Docs,
@@ -815,7 +815,7 @@ fn search_files(
         if matched_in.is_empty() {
             continue;
         }
-        score += canonical_path_boost(&file.normalized_path);
+        score += canonical_entity_path_boost(&file.normalized_path);
         candidates.add(
             &file.normalized_path,
             SearchKind::Files,
@@ -860,7 +860,7 @@ fn search_properties(
         if key_score == 0 && value_score == 0 {
             continue;
         }
-        let score = 30 + key_score + value_score + canonical_path_boost(&path);
+        let score = 30 + key_score + value_score + canonical_entity_path_boost(&path);
         candidates.add(
             &path,
             SearchKind::Properties,
@@ -902,7 +902,7 @@ fn search_tasks(
         if score == 0 {
             continue;
         }
-        let score = 20 + score + canonical_path_boost(&path);
+        let score = 20 + score + canonical_entity_path_boost(&path);
         candidates.add(&path, SearchKind::Tasks, score, "task".to_string());
         matches.push(SearchTaskMatch {
             task_id,
@@ -948,7 +948,7 @@ fn search_graph(
         if score == 0 {
             continue;
         }
-        let score = 25 + score + canonical_path_boost(candidate_path);
+        let score = 25 + score + canonical_entity_path_boost(candidate_path);
         candidates.add(
             candidate_path,
             SearchKind::Graph,
@@ -1030,7 +1030,7 @@ fn search_bases(
                     if score == 0 {
                         continue;
                     }
-                    let score = 35 + score + canonical_path_boost(&row.file_path);
+                    let score = 35 + score + canonical_entity_path_boost(&row.file_path);
                     candidates.add(
                         &row.file_path,
                         SearchKind::Bases,
@@ -2025,7 +2025,7 @@ fn text_match_score(value: &str, needle: &SearchNeedle) -> Option<i64> {
 }
 
 fn score_for_match(path: &str, matched_in: &[String], needle: &SearchNeedle, base: i64) -> i64 {
-    let mut score = base + canonical_path_boost(path);
+    let mut score = base + canonical_entity_path_boost(path);
     if matched_in.iter().any(|item| item == "title") {
         score += 45;
     }
@@ -2041,20 +2041,26 @@ fn score_for_match(path: &str, matched_in: &[String], needle: &SearchNeedle, bas
     score
 }
 
-fn canonical_path_boost(path: &str) -> i64 {
+const SEARCH_CONTACT_PATH_BOOST: i64 = 30;
+const SEARCH_COMPANY_PATH_BOOST: i64 = 25;
+const SEARCH_INTERACTION_PATH_BOOST: i64 = 15;
+const SEARCH_INDEX_PATH_PENALTY: i64 = -20;
+
+/// Prefer canonical CRM entity notes over hub/index pages when relevance ties.
+fn canonical_entity_path_boost(path: &str) -> i64 {
     let lower = path.to_ascii_lowercase();
     let mut boost = 0;
     if lower.contains("contacts") || lower.contains("-con-") {
-        boost += 30;
+        boost += SEARCH_CONTACT_PATH_BOOST;
     }
     if lower.contains("companies") || lower.contains("-com-") {
-        boost += 25;
+        boost += SEARCH_COMPANY_PATH_BOOST;
     }
     if lower.contains("meetings") || lower.contains("communications") {
-        boost += 15;
+        boost += SEARCH_INTERACTION_PATH_BOOST;
     }
     if lower.contains("index") || lower.contains("contents") || lower.contains("hub") {
-        boost -= 20;
+        boost += SEARCH_INDEX_PATH_PENALTY;
     }
     boost
 }

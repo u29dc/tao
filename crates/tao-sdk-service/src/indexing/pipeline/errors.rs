@@ -384,6 +384,15 @@ pub enum ReconciliationScanError {
         #[source]
         source: Box<tao_sdk_storage::FilesRepositoryError>,
     },
+    /// Content hash verification failed for one scanned file.
+    #[error("failed to hash file '{path}' during reconciliation: {source}")]
+    HashFile {
+        /// Absolute file path.
+        path: PathBuf,
+        /// Filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
     /// Applying incremental repair batches failed.
     #[error("failed to repair reconciliation drift via incremental batches: {source}")]
     RepairBatch {

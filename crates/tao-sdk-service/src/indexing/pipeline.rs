@@ -55,7 +55,9 @@ pub use incremental::{
     CoalescedBatchIndexResult, CoalescedBatchIndexService, IncrementalIndexResult,
     IncrementalIndexService, StaleCleanupResult, StaleCleanupService,
 };
-pub use reconcile_scan::{ReconciliationScanResult, ReconciliationScannerService};
+pub use reconcile_scan::{
+    ReconciliationScanMode, ReconciliationScanResult, ReconciliationScannerService,
+};
 pub use self_heal::{IndexSelfHealResult, IndexSelfHealService};
 
 #[derive(Debug, Clone)]

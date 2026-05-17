@@ -231,8 +231,22 @@ pub(crate) fn query_index_refresh_status(
     connection: &Connection,
     case_policy: CasePolicy,
 ) -> Result<IndexRefreshStatus> {
+    query_index_refresh_status_with_mode(
+        vault_root,
+        connection,
+        case_policy,
+        ReconciliationScanMode::MetadataOnly,
+    )
+}
+
+pub(crate) fn query_index_refresh_status_with_mode(
+    vault_root: &Path,
+    connection: &Connection,
+    case_policy: CasePolicy,
+    scan_mode: ReconciliationScanMode,
+) -> Result<IndexRefreshStatus> {
     let drift = ReconciliationScannerService::default()
-        .scan(vault_root, connection, case_policy)
+        .scan_with_mode(vault_root, connection, case_policy, scan_mode)
         .map_err(|source| anyhow!("scan index drift failed: {source}"))?;
     let inconsistent_paths = count_inconsistent_file_rows(vault_root, connection, case_policy)?;
     let rebuild_reason = if index_requires_full_rebuild(connection)? {

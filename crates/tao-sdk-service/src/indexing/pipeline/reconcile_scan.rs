@@ -58,6 +58,21 @@ impl ReconciliationDrift {
     }
 }
 
+/// Drift detection policy for reconciliation scans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationScanMode {
+    /// Compare file identity, path, size, and modified time only.
+    MetadataOnly,
+    /// Also verify persisted content hashes for indexed markdown and base files.
+    VerifyContentHashes,
+}
+
+impl ReconciliationScanMode {
+    fn verifies_content_hashes(self) -> bool {
+        matches!(self, Self::VerifyContentHashes)
+    }
+}
+
 /// Scanner that detects drift and repairs it via bounded incremental index batches.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReconciliationScannerService {
@@ -72,7 +87,23 @@ impl ReconciliationScannerService {
         connection: &Connection,
         case_policy: CasePolicy,
     ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
-        let drift = collect_reconciliation_drift(vault_root, connection, case_policy)?;
+        self.scan_with_mode(
+            vault_root,
+            connection,
+            case_policy,
+            ReconciliationScanMode::MetadataOnly,
+        )
+    }
+
+    /// Scan vault vs index metadata and return drift counts with an explicit scan mode.
+    pub fn scan_with_mode(
+        &self,
+        vault_root: &Path,
+        connection: &Connection,
+        case_policy: CasePolicy,
+        scan_mode: ReconciliationScanMode,
+    ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
+        let drift = collect_reconciliation_drift(vault_root, connection, case_policy, scan_mode)?;
 
         Ok(ReconciliationScanResult {
             scanned_files: drift.scanned_files,
@@ -97,11 +128,29 @@ impl ReconciliationScannerService {
         case_policy: CasePolicy,
         max_batch_size: usize,
     ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
+        self.scan_and_repair_with_mode(
+            vault_root,
+            connection,
+            case_policy,
+            max_batch_size,
+            ReconciliationScanMode::MetadataOnly,
+        )
+    }
+
+    /// Scan vault vs index with an explicit mode and repair missed watcher events.
+    pub fn scan_and_repair_with_mode(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+        max_batch_size: usize,
+        scan_mode: ReconciliationScanMode,
+    ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
         if max_batch_size == 0 {
             return Err(ReconciliationScanError::InvalidBatchSize { value: 0 });
         }
 
-        let drift = collect_reconciliation_drift(vault_root, connection, case_policy)?;
+        let drift = collect_reconciliation_drift(vault_root, connection, case_policy, scan_mode)?;
         let drift_paths = drift.drift_paths();
         let scanned_files = drift.scanned_files;
         let inserted_paths = drift.inserted_paths;
@@ -158,6 +207,7 @@ fn collect_reconciliation_drift(
     vault_root: &Path,
     connection: &Connection,
     case_policy: CasePolicy,
+    scan_mode: ReconciliationScanMode,
 ) -> Result<ReconciliationDrift, ReconciliationScanError> {
     let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
         ReconciliationScanError::CreateScanner {
@@ -205,7 +255,7 @@ fn collect_reconciliation_drift(
                 existing_index += 1;
             }
             std::cmp::Ordering::Equal => {
-                if !indexed_record_matches_manifest_entry(indexed, scanned) {
+                if !indexed_record_matches_manifest_entry(indexed, scanned, scan_mode)? {
                     updated_changed_paths.push(PathBuf::from(&scanned.normalized));
                     updated_paths += 1;
                 }
@@ -239,13 +289,35 @@ fn collect_reconciliation_drift(
 fn indexed_record_matches_manifest_entry(
     indexed: &tao_sdk_storage::FileReconcileRecord,
     entry: &tao_sdk_vault::VaultManifestEntry,
-) -> bool {
-    indexed.normalized_path == entry.normalized
+    scan_mode: ReconciliationScanMode,
+) -> Result<bool, ReconciliationScanError> {
+    let metadata_matches = indexed.normalized_path == entry.normalized
         && indexed.match_key == entry.match_key
         && entry
             .absolute
             .to_str()
             .is_some_and(|absolute| indexed.absolute_path == absolute)
         && indexed.size_bytes == entry.size_bytes
-        && indexed.modified_unix_ms == entry.modified_unix_ms
+        && indexed.modified_unix_ms == entry.modified_unix_ms;
+
+    if !metadata_matches {
+        return Ok(false);
+    }
+    if !scan_mode.verifies_content_hashes() || !should_verify_content_hash(indexed, entry) {
+        return Ok(true);
+    }
+
+    let current_hash =
+        hash_file_blake3(&entry.absolute).map_err(|source| ReconciliationScanError::HashFile {
+            path: entry.absolute.clone(),
+            source,
+        })?;
+    Ok(current_hash == indexed.hash_blake3)
+}
+
+fn should_verify_content_hash(
+    indexed: &tao_sdk_storage::FileReconcileRecord,
+    entry: &tao_sdk_vault::VaultManifestEntry,
+) -> bool {
+    indexed.is_markdown || entry.normalized.to_ascii_lowercase().ends_with(".base")
 }

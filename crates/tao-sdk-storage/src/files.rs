@@ -37,6 +37,10 @@ pub struct FileReconcileRecord {
     pub size_bytes: u64,
     /// Last modified unix timestamp milliseconds.
     pub modified_unix_ms: i64,
+    /// Content hash fingerprint.
+    pub hash_blake3: String,
+    /// Whether file is markdown content.
+    pub is_markdown: bool,
 }
 
 /// Input payload for inserting or updating file records.
@@ -291,7 +295,9 @@ SELECT
   match_key,
   absolute_path,
   size_bytes,
-  modified_unix_ms
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown
 FROM files
 ORDER BY match_key ASC, normalized_path ASC
 "#,
@@ -418,6 +424,8 @@ fn row_to_file_reconcile_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fil
         absolute_path: row.get("absolute_path")?,
         size_bytes: row.get("size_bytes")?,
         modified_unix_ms: row.get("modified_unix_ms")?,
+        hash_blake3: row.get("hash_blake3")?,
+        is_markdown: row.get::<_, i64>("is_markdown")? != 0,
     })
 }
 

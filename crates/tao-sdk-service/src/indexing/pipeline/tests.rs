@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File, FileTimes};
 use std::path::PathBuf;
 
 use rusqlite::Connection;
@@ -11,6 +11,7 @@ use tempfile::tempdir;
 
 use crate::BacklinkGraphService;
 
+use super::ReconciliationScanMode;
 use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CasePolicy, CheckpointedIndexService,
     CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexService, IncrementalIndexService,
@@ -1222,6 +1223,72 @@ fn reconciliation_scanner_repairs_missed_add_update_delete_events() {
         .expect("get c")
         .expect("c exists");
     assert_eq!(c_file.normalized_path, "notes/c.md");
+
+    let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+        .expect("get a")
+        .expect("a exists");
+    let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source_a.file_id)
+        .expect("list outgoing links");
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].raw_target, "c");
+    assert_eq!(outgoing[0].resolved_path.as_deref(), Some("notes/c.md"));
+    assert!(!outgoing[0].is_unresolved);
+}
+
+#[test]
+fn reconciliation_scanner_verified_mode_repairs_same_metadata_content_drift() {
+    let temp = tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
+    let note_a = temp.path().join("notes/a.md");
+    fs::write(&note_a, "# A\n[[b]]").expect("write a");
+    fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
+    fs::write(temp.path().join("notes/c.md"), "# C").expect("write c");
+
+    let mut connection = Connection::open_in_memory().expect("open db");
+    run_migrations(&mut connection).expect("run migrations");
+    FullIndexService::default()
+        .rebuild(temp.path(), &mut connection, CasePolicy::Sensitive)
+        .expect("seed full index");
+
+    let original_modified = fs::metadata(&note_a)
+        .expect("read a metadata")
+        .modified()
+        .expect("read a modified time");
+    fs::write(&note_a, "# A\n[[c]]").expect("rewrite a with same byte length");
+    File::options()
+        .write(true)
+        .open(&note_a)
+        .expect("open a to restore mtime")
+        .set_times(FileTimes::new().set_modified(original_modified))
+        .expect("restore a modified time");
+
+    let metadata_only = ReconciliationScannerService::default()
+        .scan(temp.path(), &connection, CasePolicy::Sensitive)
+        .expect("metadata-only scan");
+    assert_eq!(metadata_only.drift_paths, 0);
+
+    let verified = ReconciliationScannerService::default()
+        .scan_with_mode(
+            temp.path(),
+            &connection,
+            CasePolicy::Sensitive,
+            ReconciliationScanMode::VerifyContentHashes,
+        )
+        .expect("verified scan");
+    assert_eq!(verified.updated_paths, 1);
+    assert_eq!(verified.drift_paths, 1);
+
+    let repair = ReconciliationScannerService::default()
+        .scan_and_repair_with_mode(
+            temp.path(),
+            &mut connection,
+            CasePolicy::Sensitive,
+            4,
+            ReconciliationScanMode::VerifyContentHashes,
+        )
+        .expect("verified repair");
+    assert_eq!(repair.updated_paths, 1);
+    assert_eq!(repair.drift_paths, 1);
 
     let source_a = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
         .expect("get a")
