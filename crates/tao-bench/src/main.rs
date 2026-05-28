@@ -64,6 +64,20 @@ struct Args {
     query_text: String,
     #[arg(long, default_value_t = 100)]
     query_limit: u64,
+    #[arg(long, default_value = "auto")]
+    kind: String,
+    #[arg(long)]
+    scope: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    ext: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    context: bool,
+    #[arg(long, default_value_t = 2)]
+    depth: u32,
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long)]
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,20 +193,26 @@ fn run_search_benchmark(args: &Args) -> Result<()> {
         bail!("search benchmark iterations must be greater than zero");
     }
     let (vault_root, db_path, _temp) = search_benchmark_vault(args)?;
+    let kind = SearchKind::parse(&args.kind).map_err(|source| anyhow::anyhow!("{source}"))?;
+    let limit = args.limit.unwrap_or(args.query_limit).clamp(1, 100);
     let request = VaultSearchRequest {
         vault_root: vault_root.clone(),
-        query: Some(args.query_text.trim().to_string()),
-        path: None,
-        kind: SearchKind::Auto,
-        scope: None,
-        extensions: Vec::new(),
-        include_context: true,
-        depth: 2,
-        limit: u32::try_from(args.query_limit.clamp(1, 100))?,
+        query: if args.path.is_some() {
+            None
+        } else {
+            Some(args.query_text.trim().to_string())
+        },
+        path: args.path.clone(),
+        kind,
+        scope: args.scope.clone(),
+        extensions: args.ext.clone(),
+        include_context: args.context,
+        depth: args.depth,
+        limit: u32::try_from(limit)?,
         include_content: false,
         include_pii: true,
     };
-    if request.query.as_deref().unwrap_or_default().is_empty() {
+    if request.path.is_none() && request.query.as_deref().unwrap_or_default().is_empty() {
         bail!("query text must not be empty");
     }
 
@@ -227,7 +247,10 @@ fn run_search_benchmark(args: &Args) -> Result<()> {
         "db_path": db_path.display().to_string(),
         "request": {
             "query": request.query,
+            "path": request.path,
             "kind": request.kind.label(),
+            "scope": request.scope,
+            "extensions": request.extensions,
             "limit": request.limit,
             "context": request.include_context,
             "depth": request.depth,
@@ -1022,6 +1045,13 @@ mod tests {
             graph_include_folders: false,
             query_text: "project".to_string(),
             query_limit: 100,
+            kind: "auto".to_string(),
+            scope: None,
+            ext: Vec::new(),
+            context: false,
+            depth: 2,
+            path: None,
+            limit: None,
         }
     }
 

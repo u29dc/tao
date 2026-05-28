@@ -163,6 +163,13 @@ pub enum FullIndexError {
         #[source]
         source: Box<tao_sdk_storage::SearchIndexRepositoryError>,
     },
+    /// Rebuilding derived search corpus failed.
+    #[error("failed to rebuild derived search corpus during indexing: {source}")]
+    RebuildSearchCorpus {
+        /// Search corpus error.
+        #[source]
+        source: Box<crate::SearchCorpusError>,
+    },
     /// Upserting index state failed.
     #[error("failed to upsert index state during full index: {source}")]
     UpsertIndexState {
@@ -230,6 +237,13 @@ pub enum StaleCleanupError {
         /// Repository error.
         #[source]
         source: Box<tao_sdk_storage::FilesRepositoryError>,
+    },
+    /// Rebuilding derived search corpus failed.
+    #[error("failed to rebuild derived search corpus during stale cleanup: {source}")]
+    RebuildSearchCorpus {
+        /// Search corpus error.
+        #[source]
+        source: Box<crate::SearchCorpusError>,
     },
     /// Serializing cleanup summary failed.
     #[error("failed to serialize stale cleanup summary: {source}")]

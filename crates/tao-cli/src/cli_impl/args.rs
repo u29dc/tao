@@ -52,6 +52,8 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: TaskCommands,
     },
+    /// Validate markdown frontmatter, base files, or folders.
+    Validate(ValidateArgs),
     /// Graph-aware indexed vault search.
     Search(SearchArgs),
     /// Unified read query entrypoint.
@@ -91,8 +93,6 @@ pub(crate) enum BaseCommands {
     View(BaseViewArgs),
     /// Return one base schema contract.
     Schema(BaseSchemaArgs),
-    /// Validate one base config and return diagnostics.
-    Validate(BaseSchemaArgs),
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -526,6 +526,21 @@ pub(crate) struct SearchArgs {
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub(crate) struct ValidateArgs {
+    /// File or folder path to validate. Accepts a vault-relative path or an absolute path under the vault root.
+    pub(crate) path: String,
+    /// Validate supported files under nested folders.
+    #[arg(long, default_value_t = false)]
+    pub(crate) recursive: bool,
+    /// Optional absolute vault root path. Falls back to config/env defaults.
+    #[arg(long)]
+    pub(crate) vault_root: Option<String>,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    pub(crate) db_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub(crate) struct QueryArgs {
     /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
@@ -692,6 +707,12 @@ impl VaultReindexArgs {
 }
 
 impl SearchArgs {
+    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
+    }
+}
+
+impl ValidateArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }

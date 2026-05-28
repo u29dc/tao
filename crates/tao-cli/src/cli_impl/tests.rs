@@ -40,6 +40,7 @@ fn cli_help_contains_grouped_command_names() {
     assert!(rendered.contains("graph"));
     assert!(rendered.contains("meta"));
     assert!(rendered.contains("task"));
+    assert!(rendered.contains("validate"));
     assert!(rendered.contains("query"));
     assert!(rendered.contains("search"));
     assert!(rendered.contains("tools"));
@@ -86,6 +87,19 @@ fn graph_and_vault_help_hide_compatibility_surfaces() {
     assert!(!vault_help.contains("\n  stats"));
     assert!(!vault_help.contains("\n  reconcile"));
     assert!(!vault_help.contains("\n  daemon"));
+
+    let mut base = Cli::command()
+        .find_subcommand_mut("base")
+        .expect("base command")
+        .clone();
+    let mut base_output = Vec::new();
+    base.write_long_help(&mut base_output)
+        .expect("render base help");
+    let base_help = String::from_utf8(base_output).expect("utf8 base help");
+    assert!(base_help.contains("list"));
+    assert!(base_help.contains("schema"));
+    assert!(base_help.contains("view"));
+    assert!(!base_help.contains("validate"));
 }
 
 #[test]
@@ -116,6 +130,268 @@ fn doc_and_task_help_hide_removed_write_surfaces() {
     assert!(!task_help.contains("set-state"));
     assert!(!task_help.contains("--allow-writes"));
     assert!(!task_help.contains("--text"));
+}
+
+#[test]
+fn validate_cli_parses_file_folder_and_recursive_forms() {
+    let markdown = Cli::parse_from(["tao", "validate", "notes/today.md"]);
+    match markdown.command {
+        Commands::Validate(args) => {
+            assert_eq!(args.path, "notes/today.md");
+            assert!(!args.recursive);
+        }
+        other => panic!("expected validate command, got {other:?}"),
+    }
+
+    let base = Cli::parse_from(["tao", "validate", "views/projects.base"]);
+    match base.command {
+        Commands::Validate(args) => {
+            assert_eq!(args.path, "views/projects.base");
+            assert!(!args.recursive);
+        }
+        other => panic!("expected validate command, got {other:?}"),
+    }
+
+    let folder = Cli::parse_from(["tao", "validate", "notes", "--recursive"]);
+    match folder.command {
+        Commands::Validate(args) => {
+            assert_eq!(args.path, "notes");
+            assert!(args.recursive);
+        }
+        other => panic!("expected validate command, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_missing_path_uses_json_usage_error() {
+    let result = run_from_args(
+        ["tao", "validate"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+    );
+
+    assert_eq!(result.exit_kind, ExitKind::Failure);
+    let stdout = result.stdout.expect("json stdout");
+    let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse output");
+    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
+    assert_eq!(
+        envelope
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(JsonValue::as_str),
+        Some("invalid_argument")
+    );
+}
+
+#[test]
+fn validate_markdown_frontmatter_cases() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes")).expect("create notes");
+        fs::write(
+            vault_root.join("notes/dated.md"),
+            "---\ntitle: Dated\ndate: 2026-05-25\n---\n# Dated\n",
+        )
+        .expect("write dated note");
+        fs::write(
+            vault_root.join("notes/missing.md"),
+            "# Missing frontmatter\n",
+        )
+        .expect("write missing note");
+        fs::write(
+            vault_root.join("notes/malformed.md"),
+            "---\ntitle: [\n---\n# Broken\n",
+        )
+        .expect("write malformed note");
+        fs::write(
+            vault_root.join("notes/unclosed.md"),
+            "---\ntitle: Still open\n# Body\n",
+        )
+        .expect("write unclosed note");
+
+        for path in ["notes/dated.md", "notes/missing.md"] {
+            let output = validate_output(&vault_root, path, false);
+            let data = output.get("data").expect("data");
+            assert_eq!(
+                data.get("mode").and_then(JsonValue::as_str),
+                Some("markdown")
+            );
+            assert_eq!(
+                data.get("files_checked").and_then(JsonValue::as_u64),
+                Some(1)
+            );
+            assert_eq!(data.get("valid").and_then(JsonValue::as_u64), Some(1));
+            assert_eq!(data.get("invalid").and_then(JsonValue::as_u64), Some(0));
+            assert_eq!(
+                data.get("diagnostics")
+                    .and_then(JsonValue::as_array)
+                    .map(Vec::len),
+                Some(0)
+            );
+        }
+
+        let malformed = validate_output(&vault_root, "notes/malformed.md", false);
+        let malformed_data = malformed.get("data").expect("data");
+        assert_eq!(
+            malformed_data.get("invalid").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        let diagnostics = malformed_data
+            .get("diagnostics")
+            .and_then(JsonValue::as_array)
+            .expect("diagnostics");
+        assert_eq!(
+            diagnostics[0].get("code").and_then(JsonValue::as_str),
+            Some("frontmatter.yaml_parse_failed")
+        );
+        assert_eq!(
+            diagnostics[0].get("path").and_then(JsonValue::as_str),
+            Some("notes/malformed.md")
+        );
+        assert!(
+            diagnostics[0]
+                .get("line")
+                .and_then(JsonValue::as_u64)
+                .is_some()
+        );
+
+        let unclosed = validate_output(&vault_root, "notes/unclosed.md", false);
+        let unclosed_message = unclosed
+            .get("data")
+            .and_then(|data| data.get("diagnostics"))
+            .and_then(JsonValue::as_array)
+            .and_then(|diagnostics| diagnostics.first())
+            .and_then(|diagnostic| diagnostic.get("message"))
+            .and_then(JsonValue::as_str)
+            .expect("unclosed diagnostic message");
+        assert!(unclosed_message.contains("front matter fence is not closed"));
+    });
+}
+
+#[test]
+fn validate_base_file_cases() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("views")).expect("create views");
+        fs::write(
+            vault_root.join("views/projects.base"),
+            "views:\n  - name: Projects\n    type: table\n    columns:\n      - title\n",
+        )
+        .expect("write valid base");
+        fs::write(
+            vault_root.join("views/invalid.base"),
+            "columns:\n  - title\n",
+        )
+        .expect("write invalid base");
+
+        let valid = validate_output(&vault_root, "views/projects.base", false);
+        let valid_data = valid.get("data").expect("data");
+        assert_eq!(
+            valid_data.get("mode").and_then(JsonValue::as_str),
+            Some("base")
+        );
+        assert_eq!(valid_data.get("valid").and_then(JsonValue::as_u64), Some(1));
+        assert_eq!(
+            valid_data.get("invalid").and_then(JsonValue::as_u64),
+            Some(0)
+        );
+
+        let invalid = validate_output(&vault_root, "views/invalid.base", false);
+        let invalid_data = invalid.get("data").expect("data");
+        assert_eq!(
+            invalid_data.get("invalid").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        let diagnostic = invalid_data
+            .get("diagnostics")
+            .and_then(JsonValue::as_array)
+            .and_then(|diagnostics| diagnostics.first())
+            .expect("invalid base diagnostic");
+        assert_eq!(
+            diagnostic.get("kind").and_then(JsonValue::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            diagnostic.get("code").and_then(JsonValue::as_str),
+            Some("bases.parse.invalid_schema")
+        );
+    });
+}
+
+#[test]
+fn validate_folder_respects_recursion_and_taoignore() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        fs::create_dir_all(vault_root.join("notes/deep")).expect("create nested notes");
+        fs::create_dir_all(vault_root.join("ignored")).expect("create ignored");
+        fs::write(vault_root.join(".taoignore"), "ignored/\n").expect("write taoignore");
+        fs::write(vault_root.join("notes/root.md"), "# Root\n").expect("write root note");
+        fs::write(
+            vault_root.join("notes/deep/bad.md"),
+            "---\ntitle: [\n---\n# Bad\n",
+        )
+        .expect("write bad note");
+        fs::write(vault_root.join("notes/file.pdf"), "%PDF\n").expect("write unsupported");
+        fs::write(
+            vault_root.join("ignored/bad.md"),
+            "---\ntitle: [\n---\n# Ignored\n",
+        )
+        .expect("write ignored bad note");
+
+        let shallow = validate_output(&vault_root, "notes", false);
+        let shallow_data = shallow.get("data").expect("data");
+        assert_eq!(
+            shallow_data.get("mode").and_then(JsonValue::as_str),
+            Some("folder")
+        );
+        assert_eq!(
+            shallow_data.get("recursive").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            shallow_data
+                .get("files_checked")
+                .and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            shallow_data.get("valid").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            shallow_data.get("unsupported").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+
+        let recursive = validate_output(&vault_root, "notes", true);
+        let recursive_data = recursive.get("data").expect("data");
+        assert_eq!(
+            recursive_data.get("recursive").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            recursive_data
+                .get("files_checked")
+                .and_then(JsonValue::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            recursive_data.get("invalid").and_then(JsonValue::as_u64),
+            Some(1)
+        );
+        let diagnostic_paths = recursive_data
+            .get("diagnostics")
+            .and_then(JsonValue::as_array)
+            .expect("diagnostics")
+            .iter()
+            .filter_map(|diagnostic| diagnostic.get("path").and_then(JsonValue::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostic_paths, vec!["notes/deep/bad.md"]);
+    });
 }
 
 #[test]
@@ -460,6 +736,16 @@ fn json_contract_is_stable_for_all_grouped_json_commands() {
                 ],
             ),
             (
+                "validate",
+                vec![
+                    "tao",
+                    "validate",
+                    "notes/projects/project-a.md",
+                    "--vault-root",
+                    &vault_root_string,
+                ],
+            ),
+            (
                 "base.list",
                 vec!["tao", "base", "list", "--vault-root", &vault_root_string],
             ),
@@ -593,6 +879,23 @@ fn assert_json_contract(value: &JsonValue, expected_command: &str) {
     assert_registry_output_fields_match_payload(expected_command, payload);
 }
 
+fn validate_output(vault_root: &Path, path: &str, recursive: bool) -> JsonValue {
+    let mut args = vec![
+        "tao".to_string(),
+        "validate".to_string(),
+        path.to_string(),
+        "--vault-root".to_string(),
+        vault_root.to_string_lossy().to_string(),
+    ];
+    if recursive {
+        args.push("--recursive".to_string());
+    }
+    let cli = Cli::parse_from(args);
+    let result = dispatch(cli.command).expect("dispatch validate");
+    let output = render_output(cli.json, &result).expect("render validate");
+    serde_json::from_str(&output).expect("parse validate output")
+}
+
 fn assert_registry_output_fields_match_payload(
     expected_command: &str,
     payload: &serde_json::Map<String, JsonValue>,
@@ -672,6 +975,15 @@ fn removed_write_surface_parse_failures_use_json_error_envelopes() {
             "done",
         ],
         vec!["tao", "--text", "tools"],
+        vec![
+            "tao",
+            "base",
+            "validate",
+            "--vault-root",
+            "/tmp",
+            "--path-or-id",
+            "views/projects.base",
+        ],
     ] {
         let result = run_from_args(args.into_iter().map(std::ffi::OsString::from).collect());
 
@@ -865,6 +1177,18 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
             .iter()
             .all(|tool| { tool.get("name").and_then(JsonValue::as_str) != Some("graph.outgoing") }),
         "compatibility wrappers should be available by direct lookup, not default discovery"
+    );
+    assert!(
+        public_tools
+            .iter()
+            .all(|tool| { tool.get("name").and_then(JsonValue::as_str) != Some("base.validate") }),
+        "base.validate should be replaced by top-level validate"
+    );
+    assert!(
+        public_tools
+            .iter()
+            .any(|tool| tool.get("name").and_then(JsonValue::as_str) == Some("validate")),
+        "top-level validate should be discoverable"
     );
 
     let parameters = query_tool
@@ -1122,6 +1446,111 @@ fn search_context_ranks_canonical_entity_note_first() {
                 .and_then(JsonValue::as_str),
             Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
         );
+    });
+}
+
+#[test]
+fn search_rebuilds_missing_unified_corpus_before_querying() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let db_path = vault_root.join(".tao/index.sqlite");
+        let connection = Connection::open(&db_path).expect("open fixture db");
+        connection
+            .execute("DELETE FROM search_aliases", [])
+            .expect("clear aliases");
+        connection
+            .execute("DELETE FROM search_segments", [])
+            .expect("clear search segments");
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "jordan hart",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(cli.json, &dispatch(cli.command).expect("dispatch search"))
+            .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let first_candidate = envelope
+            .get("data")
+            .and_then(|data| data.get("candidates"))
+            .and_then(JsonValue::as_array)
+            .and_then(|items| items.first())
+            .expect("first candidate");
+        assert_eq!(
+            first_candidate.get("path").and_then(JsonValue::as_str),
+            Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+        );
+
+        let rebuilt_segments: u64 = connection
+            .query_row("SELECT COUNT(*) FROM search_segments", [], |row| row.get(0))
+            .expect("count rebuilt segments");
+        let rebuilt_aliases: u64 = connection
+            .query_row("SELECT COUNT(*) FROM search_aliases", [], |row| row.get(0))
+            .expect("count rebuilt aliases");
+        assert!(rebuilt_segments > 0);
+        assert!(rebuilt_aliases > 0);
+    });
+}
+
+#[test]
+fn vault_reindex_dry_run_reports_missing_search_corpus_without_writing() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let db_path = vault_root.join(".tao/index.sqlite");
+        let connection = Connection::open(&db_path).expect("open fixture db");
+        connection
+            .execute("DELETE FROM search_aliases", [])
+            .expect("clear aliases");
+        connection
+            .execute("DELETE FROM search_segments", [])
+            .expect("clear search segments");
+
+        let dry_run = Cli::parse_from([
+            "tao",
+            "vault",
+            "reindex",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--dry-run",
+        ]);
+        let output = render_output(
+            dry_run.json,
+            &dispatch(dry_run.command).expect("dispatch dry-run reindex"),
+        )
+        .expect("render dry-run");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse dry-run");
+        let data = envelope.get("data").expect("data");
+        assert_eq!(
+            data.get("search_index_stale").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            data.get("would_rebuild_search_index")
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            data.get("search_segments_rebuilt")
+                .and_then(JsonValue::as_bool),
+            Some(false)
+        );
+
+        let segments_after_dry_run: u64 = connection
+            .query_row("SELECT COUNT(*) FROM search_segments", [], |row| row.get(0))
+            .expect("count segments after dry-run");
+        assert_eq!(segments_after_dry_run, 0);
     });
 }
 
@@ -2475,7 +2904,7 @@ views:
 }
 
 #[test]
-fn base_validate_returns_diagnostics_for_invalid_base() {
+fn validate_returns_diagnostics_for_invalid_base() {
     with_temp_cwd(|| {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().join("vault");
@@ -2498,42 +2927,25 @@ views:
         .expect("write invalid base");
         fs::write(vault_root.join("notes/alpha.md"), "# Alpha\n").expect("write note");
 
-        let open = Cli::parse_from([
-            "tao",
-            "vault",
-            "open",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-        ]);
-        dispatch(open.command).expect("open vault");
-        let reindex = Cli::parse_from([
-            "tao",
-            "vault",
-            "reindex",
-            "--vault-root",
-            vault_root.to_string_lossy().as_ref(),
-        ]);
-        dispatch(reindex.command).expect("reindex vault");
-
         let cli = Cli::parse_from([
             "tao",
-            "base",
             "validate",
+            "views/invalid.base",
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
-            "--path-or-id",
-            "views/invalid.base",
         ]);
-        let result = dispatch(cli.command).expect("dispatch base validate");
-        let output = render_output(cli.json, &result).expect("render base validate");
+        let result = dispatch(cli.command).expect("dispatch validate");
+        let output = render_output(cli.json, &result).expect("render validate");
         let envelope: JsonValue = serde_json::from_str(&output).expect("parse output");
         let args = envelope.get("data").expect("data");
 
         assert_eq!(
-            args.get("file_path").and_then(JsonValue::as_str),
+            args.get("path").and_then(JsonValue::as_str),
             Some("views/invalid.base")
         );
-        assert_eq!(args.get("valid").and_then(JsonValue::as_bool), Some(false));
+        assert_eq!(args.get("mode").and_then(JsonValue::as_str), Some("base"));
+        assert_eq!(args.get("valid").and_then(JsonValue::as_u64), Some(0));
+        assert_eq!(args.get("invalid").and_then(JsonValue::as_u64), Some(1));
         let diagnostics = args
             .get("diagnostics")
             .and_then(JsonValue::as_array)

@@ -111,6 +111,13 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                         "unresolved_links": totals.unresolved_links,
                         "properties_total": totals.properties_total,
                         "bases_total": totals.bases_total,
+                        "search_segments_total": totals.search_segments_total,
+                        "search_aliases_total": totals.search_aliases_total,
+                        "search_index_stale": refresh.search_index_stale,
+                        "would_rebuild_search_index": refresh.would_rebuild_search_index
+                            || refresh.rebuild_reason.is_some()
+                            || refresh.drift_paths > 0,
+                        "search_segments_rebuilt": false,
                         "drift_paths": refresh.drift_paths,
                         "batches_applied": 0_u64,
                         "upserted_files": 0_u64,
@@ -118,60 +125,76 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     }),
                 });
             }
-            let (mode, reason, drift_paths, batches_applied, upserted_files, removed_files, totals) =
-                with_connection(runtime, &resolved, |connection| {
-                    let refresh = query_index_refresh_status_with_mode(
-                        Path::new(&resolved.vault_root),
-                        connection,
-                        resolved.case_policy,
-                        ReconciliationScanMode::VerifyContentHashes,
-                    )?;
+            let (
+                mode,
+                reason,
+                drift_paths,
+                batches_applied,
+                upserted_files,
+                removed_files,
+                totals,
+                search_segments_rebuilt,
+            ) = with_connection(runtime, &resolved, |connection| {
+                let refresh = query_index_refresh_status_with_mode(
+                    Path::new(&resolved.vault_root),
+                    connection,
+                    resolved.case_policy,
+                    ReconciliationScanMode::VerifyContentHashes,
+                )?;
 
-                    if let Some(reason) = refresh.rebuild_reason {
-                        let rebuild = FullIndexService::default()
-                            .rebuild(
-                                Path::new(&resolved.vault_root),
-                                connection,
-                                resolved.case_policy,
-                            )
-                            .map_err(|source| {
-                                anyhow!("vault reindex full rebuild failed: {source}")
-                            })?;
-                        let totals = query_index_totals(connection).map_err(|source| {
-                            anyhow!("vault reindex total query failed: {source}")
-                        })?;
-                        return Ok((
-                            "full_rebuild",
-                            Some(reason.to_string()),
-                            refresh.drift_paths,
-                            1_u64,
-                            rebuild.indexed_files,
-                            0_u64,
-                            totals,
-                        ));
-                    }
-
-                    let reconcile = ReconciliationScannerService::default()
-                        .scan_and_repair_with_mode(
+                if let Some(reason) = refresh.rebuild_reason {
+                    let rebuild = FullIndexService::default()
+                        .rebuild(
                             Path::new(&resolved.vault_root),
                             connection,
                             resolved.case_policy,
-                            128,
-                            ReconciliationScanMode::VerifyContentHashes,
                         )
-                        .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+                        .map_err(|source| anyhow!("vault reindex full rebuild failed: {source}"))?;
                     let totals = query_index_totals(connection)
                         .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
-                    Ok((
-                        "reconcile",
-                        None,
-                        reconcile.drift_paths,
-                        reconcile.batches_applied,
-                        reconcile.upserted_files,
-                        reconcile.removed_files,
+                    return Ok((
+                        "full_rebuild",
+                        Some(reason.to_string()),
+                        refresh.drift_paths,
+                        1_u64,
+                        rebuild.indexed_files,
+                        0_u64,
                         totals,
-                    ))
-                })?;
+                        true,
+                    ));
+                }
+
+                let reconcile = ReconciliationScannerService::default()
+                    .scan_and_repair_with_mode(
+                        Path::new(&resolved.vault_root),
+                        connection,
+                        resolved.case_policy,
+                        128,
+                        ReconciliationScanMode::VerifyContentHashes,
+                    )
+                    .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+                let mut search_segments_rebuilt = reconcile.drift_paths > 0;
+                if refresh.search_index_stale {
+                    SearchCorpusService
+                        .rebuild(connection, resolved.case_policy)
+                        .map_err(|source| {
+                            anyhow!("vault reindex search corpus rebuild failed: {source}")
+                        })?;
+                    search_segments_rebuilt = true;
+                }
+                let totals = query_index_totals(connection)
+                    .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+                Ok((
+                    "reconcile",
+                    None,
+                    reconcile.drift_paths,
+                    reconcile.batches_applied,
+                    reconcile.upserted_files,
+                    reconcile.removed_files,
+                    totals,
+                    search_segments_rebuilt,
+                ))
+            })?;
             Ok(CommandResult {
                 command: "vault.reindex".to_string(),
                 summary: "vault reindex completed".to_string(),
@@ -184,6 +207,11 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     "unresolved_links": totals.unresolved_links,
                     "properties_total": totals.properties_total,
                     "bases_total": totals.bases_total,
+                    "search_segments_total": totals.search_segments_total,
+                    "search_aliases_total": totals.search_aliases_total,
+                    "search_index_stale": false,
+                    "would_rebuild_search_index": false,
+                    "search_segments_rebuilt": search_segments_rebuilt,
                     "drift_paths": drift_paths,
                     "batches_applied": batches_applied,
                     "upserted_files": upserted_files,

@@ -151,28 +151,6 @@ pub(crate) fn handle(command: BaseCommands, runtime: &mut RuntimeMode) -> Result
                 }),
             })
         }
-        BaseCommands::Validate(args) => {
-            let resolved = args.resolve()?;
-            let result = with_connection(runtime, &resolved, |connection| {
-                Ok(BaseValidationService.validate(connection, &args.path_or_id)?)
-            })
-            .map_err(|source| anyhow!("validate base failed: {source}"))?;
-            let valid = !result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == BaseDiagnosticSeverity::Error);
-            Ok(CommandResult {
-                command: "base.validate".to_string(),
-                summary: "base validate completed".to_string(),
-                args: serde_json::json!({
-                    "base_id": result.base_id,
-                    "file_id": result.file_id,
-                    "file_path": result.file_path,
-                    "valid": valid,
-                    "diagnostics": result.diagnostics,
-                }),
-            })
-        }
     }
 }
 

@@ -16,6 +16,7 @@ mod property_query;
 mod property_update;
 mod reconcile;
 mod search;
+mod search_corpus;
 mod tracing_hooks;
 mod transactions;
 
@@ -46,6 +47,7 @@ pub use property_query::*;
 pub(crate) use property_update::*;
 pub use reconcile::*;
 pub use search::*;
+pub use search_corpus::*;
 pub use tracing_hooks::ServiceTraceContext;
 pub use transactions::{
     SdkTransactionCoordinator, SdkTransactionError, StorageWriteError, StorageWriteService,

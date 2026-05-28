@@ -385,7 +385,6 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
             BaseCommands::List(_) => "base.list".to_string(),
             BaseCommands::View(_) => "base.view".to_string(),
             BaseCommands::Schema(_) => "base.schema".to_string(),
-            BaseCommands::Validate(_) => "base.validate".to_string(),
         },
         Commands::Graph { command } => match command {
             GraphCommands::Links(_) => "graph.links".to_string(),
@@ -411,6 +410,7 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
         Commands::Task { command } => match command {
             TaskCommands::List(_) => "task.list".to_string(),
         },
+        Commands::Validate(_) => "validate".to_string(),
         Commands::Search(_) => "search.run".to_string(),
         Commands::Query(_) => "query.run".to_string(),
         Commands::Vault { command } => match command {

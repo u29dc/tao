@@ -186,12 +186,16 @@ pub(crate) struct IndexTotals {
     pub(crate) unresolved_links: u64,
     pub(crate) properties_total: u64,
     pub(crate) bases_total: u64,
+    pub(crate) search_segments_total: u64,
+    pub(crate) search_aliases_total: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IndexRefreshStatus {
     pub(crate) drift_paths: u64,
     pub(crate) rebuild_reason: Option<&'static str>,
+    pub(crate) search_index_stale: bool,
+    pub(crate) would_rebuild_search_index: bool,
 }
 
 pub(crate) fn query_index_totals(connection: &Connection) -> Result<IndexTotals> {
@@ -215,6 +219,12 @@ pub(crate) fn query_index_totals(connection: &Connection) -> Result<IndexTotals>
     let bases_total: u64 = connection
         .query_row("SELECT COUNT(*) FROM bases", [], |row| row.get(0))
         .context("query bases total")?;
+    let search_segments_total: u64 = connection
+        .query_row("SELECT COUNT(*) FROM search_segments", [], |row| row.get(0))
+        .context("query search segments total")?;
+    let search_aliases_total: u64 = connection
+        .query_row("SELECT COUNT(*) FROM search_aliases", [], |row| row.get(0))
+        .context("query search aliases total")?;
 
     Ok(IndexTotals {
         indexed_files,
@@ -223,6 +233,8 @@ pub(crate) fn query_index_totals(connection: &Connection) -> Result<IndexTotals>
         unresolved_links,
         properties_total,
         bases_total,
+        search_segments_total,
+        search_aliases_total,
     })
 }
 
@@ -249,6 +261,9 @@ pub(crate) fn query_index_refresh_status_with_mode(
         .scan_with_mode(vault_root, connection, case_policy, scan_mode)
         .map_err(|source| anyhow!("scan index drift failed: {source}"))?;
     let inconsistent_paths = count_inconsistent_file_rows(vault_root, connection, case_policy)?;
+    let search_status = SearchCorpusService
+        .status(connection)
+        .map_err(|source| anyhow!("inspect search corpus status failed: {source}"))?;
     let rebuild_reason = if index_requires_full_rebuild(connection)? {
         Some("link_resolution_version_mismatch")
     } else if inconsistent_paths > 0 {
@@ -263,6 +278,8 @@ pub(crate) fn query_index_refresh_status_with_mode(
             drift.drift_paths
         },
         rebuild_reason,
+        search_index_stale: search_status.search_index_stale,
+        would_rebuild_search_index: search_status.would_rebuild_search_index,
     })
 }
 

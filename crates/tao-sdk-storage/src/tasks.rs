@@ -219,6 +219,46 @@ FROM tasks
         .collect()
     }
 
+    /// List all task rows with file paths in deterministic order.
+    pub fn list_all_with_paths(
+        connection: &Connection,
+    ) -> Result<Vec<TaskWithPath>, TasksRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  task_id,
+  file_id,
+  file_path,
+  line_number,
+  state,
+  text,
+  updated_at
+FROM tasks
+ORDER BY file_path ASC, line_number ASC
+"#,
+            )
+            .map_err(|source| TasksRepositoryError::Sql {
+                operation: "prepare_list_all_with_paths",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map([], row_to_task_with_path)
+            .map_err(|source| TasksRepositoryError::Sql {
+                operation: "list_all_with_paths",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| TasksRepositoryError::Sql {
+                operation: "list_all_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// Count task rows for one optional filter set.
     pub fn count_with_paths(
         connection: &Connection,

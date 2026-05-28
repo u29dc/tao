@@ -157,6 +157,11 @@ impl FullIndexService {
         insert_links_batch(&transaction, &link_records)?;
         upsert_bases_batch(&transaction, &base_records)?;
         upsert_search_index_batch(&transaction, &search_records)?;
+        let search_corpus = crate::SearchCorpusService
+            .rebuild(&transaction, case_policy)
+            .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                source: Box::new(source),
+            })?;
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -189,6 +194,8 @@ impl FullIndexService {
             "properties_total": property_records.len(),
             "tasks_total": task_records.len(),
             "bases_total": base_records.len(),
+            "search_segments_total": search_corpus.search_segments_total,
+            "search_aliases_total": search_corpus.search_aliases_total,
             "completed_unix_ms": now_unix_ms,
         }))
         .map_err(|source| FullIndexError::SerializeStateSummary {

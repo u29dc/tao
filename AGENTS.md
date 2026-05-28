@@ -46,6 +46,7 @@
 - `bun run build` packages release CLI artifacts via [`scripts/release.sh`](scripts/release.sh)
 - `bun run bench`, `bun run bench:smoke`, and `bun run bench:budget` are the package benchmark entrypoints; pass suite flags through `bun run bench -- --suite live` or `bun run bench -- --suite cli`
 - `./scripts/fixtures.sh --profile parity` refreshes compact parity fixtures; generated synthetic benchmark fixtures are limited to `1k` and `5k`
+- `tao validate <path>` validates markdown frontmatter, `.base` files, or a non-recursive folder window; add `--recursive` for nested folders
 
 ## 5. Architecture
 
@@ -55,6 +56,7 @@
 - [`crates/tao-sdk-vault/src/`](crates/tao-sdk-vault/src/) enforces vault boundaries and deterministic scan/fingerprint behavior; scans skip `.git`, `.obsidian`, `.tao`, and root `.taoignore`, and honor root `.taoignore` patterns for Tao indexing exclusions without reading `.gitignore`
 - [`crates/tao-sdk-bridge/src/`](crates/tao-sdk-bridge/src/) exposes `BridgeKernel` and envelope types used by CLI runtime caches and retained benchmark flows
 - `vault reindex` is not a blind full rebuild: it prefers incremental reconcile and only escalates to full rebuild when link-resolution version state or indexed file-path consistency is stale
+- `tao search` reads a derived unified search corpus (`search_segments`, `search_segments_fts`, `search_aliases`) built from the canonical file, doc FTS, property, task, graph, and base tables. `vault reindex`, incremental reconcile, daemon first-observation repair, and one-shot search stale checks keep that corpus in sync with the core index.
 - Public graph help is centered on `graph links`, `graph audit`, `graph path`, and `graph walk`; older graph-specific subcommands remain callable as compatibility wrappers, are omitted from default `tao tools`, and can still be inspected with `tao tools <name>`
 
 ## 6. Runtime and State
@@ -77,14 +79,15 @@
 - `--json-stream` is a narrow projected JSON envelope path: it only applies to `query --from docs` without `--where` or `--sort`
 - `query --from graph` without `--path` maps to the unresolved-link window; with `--path` it returns outgoing and backlink panels
 - Public vault-content operations are read-only. `doc write`, `task set-state`, global `--allow-writes`, and public `--text` output are not part of the CLI surface.
-- Internal state writes for `vault open`, `vault reindex`, daemon/cache/index maintenance, watch reconciliation, and health synchronization remain allowed; `vault reindex --dry-run` inspects planned index work.
-- `tao search <query>` is the primary graph-aware exploration entrypoint across indexed markdown docs, the indexed file inventory, bases/frontmatter properties, tasks, graph links, and context expansion. Use `rg` for raw grep; use `tao search` when index metadata and relationships matter.
+- Internal state writes for `vault open`, `vault reindex`, daemon/cache/index maintenance, watch reconciliation, search-corpus repair, and health synchronization remain allowed; `vault reindex --dry-run` inspects planned index work.
+- `tao search <query>` is the primary graph-aware exploration entrypoint across indexed markdown docs, the indexed file inventory, bases/frontmatter properties, tasks, graph links, and context expansion. Use `rg` for raw grep; use `tao search` when index metadata, exact aliases, normalized spaces/underscores/hyphens, canonical ranking, and relationships matter.
+- `tao validate <path>` is the public validation surface for markdown frontmatter and `.base` files; `tao base validate` is not part of the public command surface.
 - If you change command names, parameters, or examples, update [`crates/tao-cli/src/cli_impl/registry.rs`](crates/tao-cli/src/cli_impl/registry.rs) and the contract tests that assert the public surface
 
 ## 8. Constraints
 
-- Never run automated QA or fixture generation against personal vaults or paths outside this repository. Use [`vault/`](vault/), [`vault/generated/`](vault/generated/), or repo-local temporary directories for tests and generated fixtures.
-- Live-vault benchmarks are allowed because the public CLI is vault-content read-only. Pass live paths at runtime with `--live-vault` or `TAO_BENCH_LIVE_VAULT`; keep private benchmark probes in gitignored `.benchmarks/live-commands.txt`, never in tracked files.
+- Do not run general automated QA or fixture generation against personal vaults or paths outside this repository. Use [`vault/`](vault/), [`vault/generated/`](vault/generated/), or repo-local temporary directories for tests and generated fixtures.
+- Live-vault smoke checks and live-vault benchmarks are allowed because the public CLI is vault-content read-only. Pass live paths at runtime with `--live-vault` or `TAO_BENCH_LIVE_VAULT`; keep private benchmark probes in gitignored `.benchmarks/live-commands.txt`, never in tracked files.
 - Treat [`crates/tao-sdk-storage/`](crates/tao-sdk-storage/), [`crates/tao-sdk-bridge/`](crates/tao-sdk-bridge/), [`crates/tao-cli/src/cli_impl/contract.rs`](crates/tao-cli/src/cli_impl/contract.rs), [`crates/tao-cli/src/cli_impl/registry.rs`](crates/tao-cli/src/cli_impl/registry.rs), and [`scripts/`](scripts/) as high-risk boundaries for migrations, contract stability, packaging, and path/output guardrails
 - [`scripts/clean.sh`](scripts/clean.sh) removes `dist`, `TAO_HOME`, and the legacy `${OBS_HOME:-${TOOLS_HOME}/obs}` install directory; do not run it casually if those env vars point somewhere unexpected
 - CLI/daemon/budget benchmark flows use repository-local generated fixtures by default; `bun run bench -- --suite live` uses a runtime-provided live vault. Daemon, live, fixture-generation, and budget suites require Unix sockets and `hyperfine`, while raw `tao-bench` scenarios (`bridge`, `startup`, `parse`, `resolve`, `search`, `graph-walk`, `unified-query`) do not.

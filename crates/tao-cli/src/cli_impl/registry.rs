@@ -151,6 +151,12 @@ const PARAM_PATH: ToolParameter = ToolParameter {
     required: true,
     description: "Vault-relative normalized note path.",
 };
+const PARAM_VALIDATE_PATH: ToolParameter = ToolParameter {
+    name: "path",
+    type_name: "string",
+    required: true,
+    description: "File or folder path to validate, either vault-relative or absolute under the vault root.",
+};
 const PARAM_QUERY_PATH: ToolParameter = ToolParameter {
     name: "path",
     type_name: "string",
@@ -162,6 +168,12 @@ const PARAM_DRY_RUN: ToolParameter = ToolParameter {
     type_name: "boolean",
     required: false,
     description: "Validate the operation and return the intended action without writing state.",
+};
+const PARAM_RECURSIVE: ToolParameter = ToolParameter {
+    name: "recursive",
+    type_name: "boolean",
+    required: false,
+    description: "Validate supported files under nested folders.",
 };
 const PARAM_PATH_OR_ID: ToolParameter = ToolParameter {
     name: "path_or_id",
@@ -449,19 +461,6 @@ const TOOLS: &[ToolDefinition] = &[
         idempotent: true,
         rate_limit: None,
         example: "tao base list --vault-root /abs/vault",
-    },
-    ToolDefinition {
-        name: "base.validate",
-        command: "tao base validate --path-or-id <value>",
-        category: "base",
-        description: "Validate one base config and return diagnostics.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_PATH_OR_ID],
-        output_fields: &["base_id", "file_id", "file_path", "valid", "diagnostics"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao base validate --vault-root /abs/vault --path-or-id views/projects.base",
     },
     ToolDefinition {
         name: "base.schema",
@@ -980,6 +979,33 @@ const TOOLS: &[ToolDefinition] = &[
         example: "tao task list --vault-root /abs/vault --state open",
     },
     ToolDefinition {
+        name: "validate",
+        command: "tao validate <path>",
+        category: "validate",
+        description: "Validate markdown frontmatter, base files, or supported files in a folder.",
+        parameters: &[
+            PARAM_VAULT_ROOT,
+            PARAM_DB_PATH,
+            PARAM_VALIDATE_PATH,
+            PARAM_RECURSIVE,
+        ],
+        output_fields: &[
+            "path",
+            "mode",
+            "recursive",
+            "files_checked",
+            "valid",
+            "invalid",
+            "unsupported",
+            "diagnostics",
+        ],
+        output_schema: None,
+        input_schema: None,
+        idempotent: true,
+        rate_limit: None,
+        example: "tao validate notes/today.md --vault-root /abs/vault",
+    },
+    ToolDefinition {
         name: "tools",
         command: "tao tools [name]",
         category: "system",
@@ -1129,6 +1155,11 @@ const TOOLS: &[ToolDefinition] = &[
             "unresolved_links",
             "properties_total",
             "bases_total",
+            "search_segments_total",
+            "search_aliases_total",
+            "search_index_stale",
+            "would_rebuild_search_index",
+            "search_segments_rebuilt",
             "drift_paths",
             "batches_applied",
             "upserted_files",

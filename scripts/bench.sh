@@ -158,6 +158,10 @@ SAMPLE_VIEW="Projects"
 PARSE_REPORT="${REPORT_DIR}/parse-bench.json"
 RESOLVE_REPORT="${REPORT_DIR}/resolve-bench.json"
 SEARCH_REPORT="${REPORT_DIR}/search-bench.json"
+SEARCH_DOCS_REPORT="${REPORT_DIR}/search-docs-bench.json"
+SEARCH_FILES_REPORT="${REPORT_DIR}/search-files-bench.json"
+SEARCH_CONTEXT_REPORT="${REPORT_DIR}/search-context-bench.json"
+SEARCH_PATH_CONTEXT_REPORT="${REPORT_DIR}/search-path-context-bench.json"
 BRIDGE_REPORT="${REPORT_DIR}/bridge-call-budgets.json"
 STARTUP_REPORT="${REPORT_DIR}/startup-budgets.json"
 GRAPH_WALK_REPORT="${REPORT_DIR}/graph-walk-bench.json"
@@ -723,11 +727,17 @@ run_live_matrix() {
 
   LIVE_MATRIX=$(cat <<EOF
 vault-preflight|${tao_q} vault preflight --vault-root ${vault_q} --db-path ${db_q} > /dev/null
+vault-reindex-dry-run|${tao_q} vault reindex --vault-root ${vault_q} --db-path ${db_q} --dry-run > /dev/null
 vault-reindex|${tao_q} vault reindex --vault-root ${vault_q} --db-path ${db_q} > /dev/null
 health|${tao_q} health --vault-root ${vault_q} --db-path ${db_q} > /dev/null
 graph-unresolved|${tao_q} --daemon-socket ${socket_q} graph audit --vault-root ${vault_q} --db-path ${db_q} --kind unresolved --limit 100 --offset 0 > /dev/null
 graph-components|${tao_q} --daemon-socket ${socket_q} graph audit --vault-root ${vault_q} --db-path ${db_q} --kind components --limit 100 --offset 0 > /dev/null
+search-broad-all|${tao_q} --daemon-socket ${socket_q} search project --vault-root ${vault_q} --db-path ${db_q} --kind all --limit 100 > /dev/null
+search-docs|${tao_q} --daemon-socket ${socket_q} search meeting --vault-root ${vault_q} --db-path ${db_q} --kind docs --limit 50 > /dev/null
 search-invoice-files|${tao_q} --daemon-socket ${socket_q} search invoice --vault-root ${vault_q} --db-path ${db_q} --kind files --limit 20 > /dev/null
+search-pdf-files|${tao_q} --daemon-socket ${socket_q} search pdf --vault-root ${vault_q} --db-path ${db_q} --kind files --ext pdf --limit 20 > /dev/null
+search-properties|${tao_q} --daemon-socket ${socket_q} search status --vault-root ${vault_q} --db-path ${db_q} --kind properties --limit 50 > /dev/null
+search-graph|${tao_q} --daemon-socket ${socket_q} search meeting --vault-root ${vault_q} --db-path ${db_q} --kind graph --limit 50 > /dev/null
 search-meeting-context|${tao_q} --daemon-socket ${socket_q} search meeting --vault-root ${vault_q} --db-path ${db_q} --context --depth 2 --limit 20 > /dev/null
 search-task|${tao_q} --daemon-socket ${socket_q} search task --vault-root ${vault_q} --db-path ${db_q} --kind tasks --limit 50 > /dev/null
 EOF
@@ -781,6 +791,10 @@ run_sdk_suite() {
   run_tao_bench_scenario parse 500 "${PARSE_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --bridge-notes 1000
   run_tao_bench_scenario resolve 500 "${RESOLVE_REPORT}" --bridge-notes 5000
   run_tao_bench_scenario search 500 "${SEARCH_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100
+  run_tao_bench_scenario search 500 "${SEARCH_DOCS_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100 --kind docs
+  run_tao_bench_scenario search 500 "${SEARCH_FILES_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 100 --kind files --ext md
+  run_tao_bench_scenario search 200 "${SEARCH_CONTEXT_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-text project --query-limit 20 --context --depth 2
+  run_tao_bench_scenario search 200 "${SEARCH_PATH_CONTEXT_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --query-limit 20 --path "${SAMPLE_NOTE}" --context --depth 2
   run_tao_bench_scenario bridge 200 "${BRIDGE_REPORT}" --enforce-budgets --max-p50-ms 50 --max-p95-ms 120
   run_tao_bench_scenario startup 50 "${STARTUP_REPORT}" --bridge-notes 1000
   run_tao_bench_scenario graph-walk 100 "${GRAPH_WALK_REPORT}" --vault-root "${FIXTURE_VAULT}" --db-path "${DB_PATH}" --graph-root "${SAMPLE_NOTE}" --graph-depth 2 --graph-limit 200

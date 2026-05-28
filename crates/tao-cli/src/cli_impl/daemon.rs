@@ -139,7 +139,6 @@ pub(crate) fn resolve_command_vault_paths(
             BaseCommands::List(args) => args.resolve()?,
             BaseCommands::View(args) => args.resolve()?,
             BaseCommands::Schema(args) => args.resolve()?,
-            BaseCommands::Validate(args) => args.resolve()?,
         },
         Commands::Graph { command } => match command {
             GraphCommands::Links(args) => args.resolve()?,
@@ -165,6 +164,7 @@ pub(crate) fn resolve_command_vault_paths(
         Commands::Task { command } => match command {
             TaskCommands::List(args) => args.resolve()?,
         },
+        Commands::Validate(args) => args.resolve()?,
         Commands::Search(args) => args.resolve()?,
         Commands::Query(args) => args.resolve()?,
         Commands::Vault { command } => match command {
@@ -209,6 +209,7 @@ pub(crate) fn daemon_execution_policy(command: &Commands) -> DaemonExecutionPoli
         Commands::Task { command } => match command {
             TaskCommands::List(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
         },
+        Commands::Validate(_) => DaemonExecutionPolicy::ObservationalFresh,
         Commands::Search(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Query(_) => DaemonExecutionPolicy::CachedReadWithRefresh,
         Commands::Vault { command } => match command {
@@ -289,6 +290,14 @@ pub(crate) fn maybe_refresh_daemon_state(
                     )
                     .map_err(|source| anyhow!("daemon initial reconcile failed: {source}"))?;
                 return Ok(Some("drift"));
+            }
+            if refresh.search_index_stale {
+                SearchCorpusService
+                    .rebuild(connection, resolved.case_policy)
+                    .map_err(|source| {
+                        anyhow!("daemon initial search corpus rebuild failed: {source}")
+                    })?;
+                return Ok(Some("search_corpus_stale"));
             }
             Ok(None)
         })?;

@@ -19,9 +19,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
     BaseDiagnosticSeverity, BaseDocument, BaseTableQueryPlanner, BaseViewRegistry,
-    TableQueryPlanRequest, decode_base_config_json, validate_base_config_json,
+    TableQueryPlanRequest, decode_base_config_json, validate_base_config_json, validate_base_yaml,
 };
 use tao_sdk_bridge::{BridgeEnvelope, BridgeKernel};
+use tao_sdk_properties::{FrontMatterStatus, extract_front_matter};
 use tao_sdk_search::{
     LogicalPlanBuilder, LogicalQueryPlanRequest, PhysicalPlanBuilder, PhysicalPlanOptimizer,
     SearchQueryProjectedItem, SearchQueryProjection, SearchQueryRequest, SearchQueryService,
@@ -30,18 +31,20 @@ use tao_sdk_search::{
 };
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
-    BaseValidationService, CURRENT_LINK_RESOLUTION_VERSION, FullIndexService,
-    GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
-    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScanMode, ReconciliationScannerService,
-    SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, SearchKind,
-    VaultSearchRequest, VaultSearchService, WatcherStatus, ensure_runtime_paths,
+    CURRENT_LINK_RESOLUTION_VERSION, FullIndexService, GraphScopedInboundRequest,
+    GraphWalkDirection, GraphWalkRequest, HealthSnapshotService, LINK_RESOLUTION_VERSION_STATE_KEY,
+    ReconciliationScanMode, ReconciliationScannerService, SdkConfigInspectionService,
+    SdkConfigLoader, SdkConfigOverrides, SearchCorpusService, SearchKind, VaultSearchRequest,
+    VaultSearchService, WatcherStatus, ensure_runtime_paths,
 };
 use tao_sdk_storage::{
     BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,
     SearchIndexRecord, SearchIndexRepository, TasksRepository, preflight_migrations,
     run_migrations,
 };
-use tao_sdk_vault::{CasePolicy, PathCanonicalizationService, validate_relative_vault_path};
+use tao_sdk_vault::{
+    CasePolicy, PathCanonicalizationService, VaultScanService, validate_relative_vault_path,
+};
 use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
 
 mod args;
@@ -205,6 +208,7 @@ fn dispatch_with_runtime(command: Commands, runtime: &mut RuntimeMode) -> Result
         Commands::Graph { command } => commands::graph::dispatch(command, runtime),
         Commands::Meta { command } => commands::meta::dispatch(command, runtime),
         Commands::Task { command } => commands::task::dispatch(command, runtime),
+        Commands::Validate(args) => commands::validate::dispatch(args, runtime),
         Commands::Search(args) => commands::search::dispatch(args, runtime),
         Commands::Query(args) => commands::query::dispatch(args, runtime),
         Commands::Vault { command } => commands::vault::dispatch(command, runtime),

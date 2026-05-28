@@ -172,6 +172,47 @@ ORDER BY p.key ASC
         .collect()
     }
 
+    /// List all properties with joined file paths.
+    pub fn list_all_with_paths(
+        connection: &Connection,
+    ) -> Result<Vec<PropertyWithPath>, PropertiesRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  p.property_id,
+  p.file_id,
+  f.normalized_path AS file_path,
+  p.key,
+  p.value_type,
+  p.value_json,
+  p.updated_at
+FROM properties p
+JOIN files f ON f.file_id = p.file_id
+ORDER BY f.normalized_path ASC, p.key ASC
+"#,
+            )
+            .map_err(|source| PropertiesRepositoryError::Sql {
+                operation: "prepare_list_all_with_paths",
+                source,
+            })?;
+
+        let rows = statement
+            .query_map([], row_to_property_with_path)
+            .map_err(|source| PropertiesRepositoryError::Sql {
+                operation: "list_all_with_paths",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| PropertiesRepositoryError::Sql {
+                operation: "list_all_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// List properties by key across files with joined file paths.
     pub fn list_by_key_with_paths(
         connection: &Connection,

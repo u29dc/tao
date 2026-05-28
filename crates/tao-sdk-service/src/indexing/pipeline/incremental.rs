@@ -483,6 +483,11 @@ impl IncrementalIndexService {
         }
 
         insert_links_batch(&transaction, &pending_link_records)?;
+        let search_corpus = crate::SearchCorpusService
+            .rebuild(&transaction, case_policy)
+            .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                source: Box::new(source),
+            })?;
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -514,6 +519,8 @@ impl IncrementalIndexService {
             "links_reindexed": links_reindexed,
             "properties_reindexed": properties_reindexed,
             "bases_reindexed": bases_reindexed,
+            "search_segments_total": search_corpus.search_segments_total,
+            "search_aliases_total": search_corpus.search_aliases_total,
             "completed_unix_ms": now_unix_ms,
         }))
         .map_err(|source| FullIndexError::SerializeStateSummary {
@@ -669,6 +676,11 @@ impl StaleCleanupService {
                 }
             })?;
         }
+        crate::SearchCorpusService
+            .rebuild(&transaction, case_policy)
+            .map_err(|source| StaleCleanupError::RebuildSearchCorpus {
+                source: Box::new(source),
+            })?;
 
         let summary_json = serde_json::to_string(&json!({
             "mode": "stale_cleanup",
