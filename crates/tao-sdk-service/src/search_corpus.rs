@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tao_sdk_bases::{BaseCoercionMode, BaseTableQueryPlanner, BaseViewRegistry};
 use tao_sdk_core::note_title_from_path;
@@ -101,7 +101,8 @@ impl SearchCorpusService {
 
         let search_index_stale = schema_version != Some(SEARCH_CORPUS_SCHEMA_VERSION)
             || recorded_source_fingerprint.as_deref() != Some(source_fingerprint.as_str())
-            || (files_total > 0 && search_segments_total == 0);
+            || (files_total > 0 && search_segments_total == 0)
+            || (files_total > 0 && search_aliases_total == 0);
 
         Ok(SearchCorpusStatus {
             search_segments_total,
@@ -114,8 +115,37 @@ impl SearchCorpusService {
         })
     }
 
-    /// Rebuild the derived search corpus from canonical index tables.
-    pub fn rebuild(
+    /// Rebuild the derived search corpus from canonical index tables atomically.
+    pub fn rebuild_atomic(
+        &self,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+    ) -> Result<SearchCorpusRebuildResult, SearchCorpusError> {
+        let transaction =
+            connection
+                .transaction()
+                .map_err(|source| SearchCorpusError::BeginTransaction {
+                    source: Box::new(source),
+                })?;
+        let result = self.rebuild_on_connection(&transaction, case_policy)?;
+        transaction
+            .commit()
+            .map_err(|source| SearchCorpusError::CommitTransaction {
+                source: Box::new(source),
+            })?;
+        Ok(result)
+    }
+
+    /// Rebuild the derived search corpus inside an existing index transaction.
+    pub fn rebuild_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        case_policy: CasePolicy,
+    ) -> Result<SearchCorpusRebuildResult, SearchCorpusError> {
+        self.rebuild_on_connection(transaction, case_policy)
+    }
+
+    fn rebuild_on_connection(
         &self,
         connection: &Connection,
         case_policy: CasePolicy,
@@ -972,6 +1002,20 @@ fn current_unix_ms_raw() -> Result<u128, SearchCorpusError> {
 /// Unified search corpus errors.
 #[derive(Debug, Error)]
 pub enum SearchCorpusError {
+    /// Starting an atomic rebuild transaction failed.
+    #[error("failed to begin search corpus rebuild transaction: {source}")]
+    BeginTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
+    /// Committing an atomic rebuild transaction failed.
+    #[error("failed to commit search corpus rebuild transaction: {source}")]
+    CommitTransaction {
+        /// SQLite error.
+        #[source]
+        source: Box<rusqlite::Error>,
+    },
     /// SQL operation failed.
     #[error("search corpus sql operation '{operation}' failed: {source}")]
     Sql {

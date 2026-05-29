@@ -106,7 +106,9 @@ pub(crate) fn resolve_vault_paths(
         db_path: db_path_override.map(PathBuf::from),
         ..SdkConfigOverrides::default()
     })
-    .map_err(|source| anyhow!("resolve sdk config failed: {source}"))?;
+    .map_err(|source| {
+        CliContractError::blocked_prerequisite(format!("resolve sdk config failed: {source}"))
+    })?;
 
     Ok(ResolvedVaultPathArgs {
         vault_root: config.vault_root.to_string_lossy().to_string(),
@@ -149,19 +151,30 @@ pub(crate) fn decode_base_document(config_json: &str) -> Result<BaseDocument> {
 pub(crate) fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Result<Connection> {
     let vault_root = Path::new(&args.vault_root);
     if !vault_root.exists() {
-        return Err(anyhow!("vault root does not exist: {}", args.vault_root));
+        return Err(CliContractError::blocked_prerequisite(format!(
+            "vault root does not exist: {}",
+            args.vault_root
+        ))
+        .into());
     }
     if !vault_root.is_dir() {
-        return Err(anyhow!(
+        return Err(CliContractError::blocked_prerequisite(format!(
             "vault root is not a directory: {}",
             args.vault_root
-        ));
+        ))
+        .into());
     }
 
     ensure_runtime_paths_for_args(args)?;
-    let mut connection = Connection::open(&args.db_path)
-        .with_context(|| format!("open sqlite database '{}'", args.db_path))?;
-    run_migrations(&mut connection).map_err(|source| anyhow!("run migrations failed: {source}"))?;
+    let mut connection = Connection::open(&args.db_path).map_err(|source| {
+        CliContractError::blocked_prerequisite(format!(
+            "open sqlite database '{}': {source}",
+            args.db_path
+        ))
+    })?;
+    run_migrations(&mut connection).map_err(|source| {
+        CliContractError::blocked_prerequisite(format!("run migrations failed: {source}"))
+    })?;
     Ok(connection)
 }
 
@@ -175,7 +188,10 @@ pub(crate) fn ensure_runtime_paths_for_args(args: &ResolvedVaultPathArgs) -> Res
         feature_flags: Vec::new(),
         read_only: args.read_only,
     })
-    .map_err(|source| anyhow!("prepare runtime paths failed: {source}"))
+    .map_err(|source| {
+        CliContractError::blocked_prerequisite(format!("prepare runtime paths failed: {source}"))
+            .into()
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,14 +204,6 @@ pub(crate) struct IndexTotals {
     pub(crate) bases_total: u64,
     pub(crate) search_segments_total: u64,
     pub(crate) search_aliases_total: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct IndexRefreshStatus {
-    pub(crate) drift_paths: u64,
-    pub(crate) rebuild_reason: Option<&'static str>,
-    pub(crate) search_index_stale: bool,
-    pub(crate) would_rebuild_search_index: bool,
 }
 
 pub(crate) fn query_index_totals(connection: &Connection) -> Result<IndexTotals> {
@@ -236,86 +244,4 @@ pub(crate) fn query_index_totals(connection: &Connection) -> Result<IndexTotals>
         search_segments_total,
         search_aliases_total,
     })
-}
-
-pub(crate) fn query_index_refresh_status(
-    vault_root: &Path,
-    connection: &Connection,
-    case_policy: CasePolicy,
-) -> Result<IndexRefreshStatus> {
-    query_index_refresh_status_with_mode(
-        vault_root,
-        connection,
-        case_policy,
-        ReconciliationScanMode::MetadataOnly,
-    )
-}
-
-pub(crate) fn query_index_refresh_status_with_mode(
-    vault_root: &Path,
-    connection: &Connection,
-    case_policy: CasePolicy,
-    scan_mode: ReconciliationScanMode,
-) -> Result<IndexRefreshStatus> {
-    let drift = ReconciliationScannerService::default()
-        .scan_with_mode(vault_root, connection, case_policy, scan_mode)
-        .map_err(|source| anyhow!("scan index drift failed: {source}"))?;
-    let inconsistent_paths = count_inconsistent_file_rows(vault_root, connection, case_policy)?;
-    let search_status = SearchCorpusService
-        .status(connection)
-        .map_err(|source| anyhow!("inspect search corpus status failed: {source}"))?;
-    let rebuild_reason = if index_requires_full_rebuild(connection)? {
-        Some("link_resolution_version_mismatch")
-    } else if inconsistent_paths > 0 {
-        Some("file_path_mismatch")
-    } else {
-        None
-    };
-    Ok(IndexRefreshStatus {
-        drift_paths: if rebuild_reason.is_some() {
-            drift.drift_paths.max(inconsistent_paths).max(1)
-        } else {
-            drift.drift_paths
-        },
-        rebuild_reason,
-        search_index_stale: search_status.search_index_stale,
-        would_rebuild_search_index: search_status.would_rebuild_search_index,
-    })
-}
-
-pub(crate) fn index_requires_full_rebuild(connection: &Connection) -> Result<bool> {
-    let Some(record) =
-        IndexStateRepository::get_by_key(connection, LINK_RESOLUTION_VERSION_STATE_KEY)
-            .map_err(|source| anyhow!("read link resolution version failed: {source}"))?
-    else {
-        return Ok(true);
-    };
-
-    let stored_version = serde_json::from_str::<u32>(&record.value_json).unwrap_or_default();
-    Ok(stored_version != CURRENT_LINK_RESOLUTION_VERSION)
-}
-
-pub(crate) fn count_inconsistent_file_rows(
-    vault_root: &Path,
-    connection: &Connection,
-    case_policy: CasePolicy,
-) -> Result<u64> {
-    let canonicalizer = PathCanonicalizationService::new(vault_root, case_policy)
-        .map_err(|source| anyhow!("create vault canonicalizer failed: {source}"))?;
-    let files = FilesRepository::list_all(connection)
-        .map_err(|source| anyhow!("list indexed files failed: {source}"))?;
-
-    let mut mismatches = 0_u64;
-    for file in files {
-        let absolute = Path::new(&file.absolute_path);
-        let Ok(canonical) = canonicalizer.canonicalize(absolute) else {
-            mismatches = mismatches.saturating_add(1);
-            continue;
-        };
-        if canonical.normalized != file.normalized_path {
-            mismatches = mismatches.saturating_add(1);
-        }
-    }
-
-    Ok(mismatches)
 }

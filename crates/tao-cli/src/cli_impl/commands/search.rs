@@ -17,14 +17,6 @@ pub(crate) fn handle(args: SearchArgs, runtime: &mut RuntimeMode) -> Result<Comm
         .map(ToString::to_string);
     let include_pii = args.include_pii && !args.no_pii;
     let result = with_connection(runtime, &resolved, |connection| {
-        let search_status = SearchCorpusService
-            .status(connection)
-            .map_err(|source| anyhow!("search corpus status failed: {source}"))?;
-        if search_status.search_index_stale {
-            SearchCorpusService
-                .rebuild(connection, resolved.case_policy)
-                .map_err(|source| anyhow!("search corpus rebuild failed: {source}"))?;
-        }
         Ok(VaultSearchService.search(
             connection,
             VaultSearchRequest {
@@ -40,6 +32,7 @@ pub(crate) fn handle(args: SearchArgs, runtime: &mut RuntimeMode) -> Result<Comm
                 include_content: args.include_content,
                 include_pii,
             },
+            resolved.case_policy,
         )?)
     })
     .map_err(|source| anyhow!("search failed: {source}"))?;

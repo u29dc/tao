@@ -6,11 +6,14 @@ pub(crate) fn load_cli_health_snapshot(
 ) -> Result<(tao_sdk_service::HealthSnapshot, CliRuntimeState)> {
     let runtime_state = runtime_state_for_resolved(resolved, runtime);
     let index_lag = with_connection(runtime, resolved, |connection| {
-        let refresh = query_index_refresh_status(
-            Path::new(&resolved.vault_root),
-            connection,
-            resolved.case_policy,
-        )?;
+        let refresh = IndexRefreshService
+            .inspect(
+                Path::new(&resolved.vault_root),
+                connection,
+                resolved.case_policy,
+                ReconciliationScanMode::MetadataOnly,
+            )
+            .map_err(|source| anyhow!("inspect index refresh status failed: {source}"))?;
         Ok(refresh.drift_paths)
     })?;
     let watcher_status = watcher_status_for_runtime_state(&runtime_state);

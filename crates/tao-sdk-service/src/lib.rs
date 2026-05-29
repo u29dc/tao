@@ -7,6 +7,7 @@ mod graph;
 mod health;
 #[cfg(test)]
 mod import_export;
+mod index_refresh;
 mod indexing;
 mod ingest;
 #[cfg(test)]
@@ -14,7 +15,6 @@ mod note_crud;
 mod property_query;
 #[cfg(test)]
 mod property_update;
-mod reconcile;
 mod search;
 mod search_corpus;
 mod tracing_hooks;
@@ -29,6 +29,7 @@ pub use config::{
 pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
 pub use graph::*;
 pub use health::*;
+pub use index_refresh::*;
 pub use indexing::{
     CURRENT_LINK_RESOLUTION_VERSION, CheckpointedIndexError, CheckpointedIndexResult,
     CheckpointedIndexService, CoalescedBatchIndexResult, CoalescedBatchIndexService,
@@ -45,7 +46,6 @@ pub(crate) use note_crud::*;
 pub use property_query::*;
 #[cfg(test)]
 pub(crate) use property_update::*;
-pub use reconcile::*;
 pub use search::*;
 pub use search_corpus::*;
 pub use tracing_hooks::ServiceTraceContext;

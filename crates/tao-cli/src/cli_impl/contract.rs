@@ -105,6 +105,21 @@ impl<T: Serialize> JsonEnvelope<T> {
 }
 
 impl CliContractError {
+    pub(crate) fn failure(
+        code: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<Option<String>>,
+        details: Option<JsonValue>,
+    ) -> Self {
+        Self {
+            exit_kind: ExitKind::Failure,
+            code,
+            message: message.into(),
+            hint: hint.into(),
+            details,
+        }
+    }
+
     pub(crate) fn blocked(
         code: &'static str,
         message: impl Into<String>,
@@ -118,6 +133,57 @@ impl CliContractError {
             hint: hint.into(),
             details,
         }
+    }
+
+    pub(crate) fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::failure(
+            "invalid_argument",
+            message,
+            Some("check command arguments and retry".to_string()),
+            None,
+        )
+    }
+
+    pub(crate) fn blocked_prerequisite(message: impl Into<String>) -> Self {
+        Self::blocked(
+            "blocked_prerequisite",
+            message,
+            Some("fix the vault or database configuration and retry".to_string()),
+            None,
+        )
+    }
+
+    pub(crate) fn daemon_unavailable(message: impl Into<String>) -> Self {
+        Self::blocked(
+            "daemon_unavailable",
+            message,
+            Some(
+                "daemon auto-start failed; check socket path permissions or override --daemon-socket"
+                    .to_string(),
+            ),
+            None,
+        )
+    }
+
+    pub(crate) fn query_parse_error(message: impl Into<String>) -> Self {
+        Self::failure(
+            "query_parse_error",
+            message,
+            Some("fix query expression syntax and retry".to_string()),
+            None,
+        )
+    }
+
+    pub(crate) fn query_type_mismatch(message: impl Into<String>) -> Self {
+        Self::failure(
+            "query_type_mismatch",
+            message,
+            Some(
+                "compare fields with same-type literals, or use `contains` for text casting"
+                    .to_string(),
+            ),
+            None,
+        )
     }
 }
 
@@ -305,59 +371,11 @@ pub(crate) fn classify_cli_error(error: &anyhow::Error) -> ClassifiedCliError {
     }
 
     let message = error.to_string();
-    let (exit_kind, code, hint) = if message.contains("parse --where failed")
-        || message.contains("parse --sort failed")
-    {
-        (
-            ExitKind::Failure,
-            "query_parse_error",
-            Some("fix query expression syntax and retry".to_string()),
-        )
-    } else if message.contains("type mismatch for ordered comparison")
-        || message.contains("type mismatch for string comparison")
-    {
-        (
-            ExitKind::Failure,
-            "query_type_mismatch",
-            Some(
-                "compare fields with same-type literals, or use `contains` for text casting"
-                    .to_string(),
-            ),
-        )
-    } else if message.contains("connect daemon socket") {
-        (
-            ExitKind::Blocked,
-            "daemon_unavailable",
-            Some("daemon auto-start failed; check socket path permissions or override --daemon-socket".to_string()),
-        )
-    } else if message.contains("resolve sdk config failed")
-        || message.contains("vault root does not exist")
-        || message.contains("vault root is not a directory")
-        || message.contains("prepare runtime paths failed")
-        || message.contains("open sqlite database")
-    {
-        (
-            ExitKind::Blocked,
-            "blocked_prerequisite",
-            Some("fix the vault or database configuration and retry".to_string()),
-        )
-    } else if message.contains("unsupported query scope")
-        || message.contains("requires --view-name")
-        || message.contains("unknown tool")
-        || message.contains("must not")
-    {
-        (
-            ExitKind::Failure,
-            "invalid_argument",
-            Some("check command arguments and retry".to_string()),
-        )
-    } else {
-        (
-            ExitKind::Failure,
-            "command_failed",
-            Some("inspect message and rerun with corrected inputs".to_string()),
-        )
-    };
+    let (exit_kind, code, hint) = (
+        ExitKind::Failure,
+        "command_failed",
+        Some("inspect message and rerun with corrected inputs".to_string()),
+    );
 
     ClassifiedCliError {
         exit_kind,

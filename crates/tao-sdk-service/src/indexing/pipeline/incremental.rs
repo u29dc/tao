@@ -36,6 +36,8 @@ pub struct CoalescedBatchIndexResult {
     pub properties_reindexed: u64,
     /// Number of bases reindexed.
     pub bases_reindexed: u64,
+    /// Whether the derived search corpus was rebuilt after coalesced batches.
+    pub search_segments_rebuilt: bool,
 }
 
 /// Incremental indexing service for targeted path updates.
@@ -53,7 +55,14 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
-        self.apply_changes_internal(vault_root, connection, changed_paths, case_policy, true)
+        self.apply_changes_internal(
+            vault_root,
+            connection,
+            changed_paths,
+            case_policy,
+            true,
+            true,
+        )
     }
 
     /// Apply incremental indexing updates and always rebuild derived rows for provided paths.
@@ -64,9 +73,17 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
-        self.apply_changes_internal(vault_root, connection, changed_paths, case_policy, false)
+        self.apply_changes_internal(
+            vault_root,
+            connection,
+            changed_paths,
+            case_policy,
+            false,
+            true,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_changes_internal(
         &self,
         vault_root: &Path,
@@ -74,6 +91,7 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
         prefilter_unchanged: bool,
+        rebuild_search_corpus: bool,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
         let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
             .map_err(|source| FullIndexError::CreateFingerprintService {
@@ -483,11 +501,28 @@ impl IncrementalIndexService {
         }
 
         insert_links_batch(&transaction, &pending_link_records)?;
-        let search_corpus = crate::SearchCorpusService
-            .rebuild(&transaction, case_policy)
-            .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                source: Box::new(source),
-            })?;
+        let (search_segments_total, search_aliases_total) = if rebuild_search_corpus {
+            let search_corpus = crate::SearchCorpusService
+                .rebuild_in_transaction(&transaction, case_policy)
+                .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                    source: Box::new(source),
+                })?;
+            (
+                search_corpus.search_segments_total,
+                search_corpus.search_aliases_total,
+            )
+        } else {
+            let search_status =
+                crate::SearchCorpusService
+                    .status(&transaction)
+                    .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                        source: Box::new(source),
+                    })?;
+            (
+                search_status.search_segments_total,
+                search_status.search_aliases_total,
+            )
+        };
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -519,8 +554,8 @@ impl IncrementalIndexService {
             "links_reindexed": links_reindexed,
             "properties_reindexed": properties_reindexed,
             "bases_reindexed": bases_reindexed,
-            "search_segments_total": search_corpus.search_segments_total,
-            "search_aliases_total": search_corpus.search_aliases_total,
+            "search_segments_total": search_segments_total,
+            "search_aliases_total": search_aliases_total,
             "completed_unix_ms": now_unix_ms,
         }))
         .map_err(|source| FullIndexError::SerializeStateSummary {
@@ -592,15 +627,28 @@ impl CoalescedBatchIndexService {
         let mut bases_reindexed = 0_u64;
 
         for batch in unique_paths.chunks(max_batch_size) {
-            let batch_result =
-                self.incremental
-                    .apply_changes(vault_root, connection, batch, case_policy)?;
+            let batch_result = self.incremental.apply_changes_internal(
+                vault_root,
+                connection,
+                batch,
+                case_policy,
+                true,
+                false,
+            )?;
             batches_applied += 1;
             upserted_files += batch_result.upserted_files;
             removed_files += batch_result.removed_files;
             links_reindexed += batch_result.links_reindexed;
             properties_reindexed += batch_result.properties_reindexed;
             bases_reindexed += batch_result.bases_reindexed;
+        }
+        let search_segments_rebuilt = batches_applied > 0;
+        if search_segments_rebuilt {
+            crate::SearchCorpusService
+                .rebuild_atomic(connection, case_policy)
+                .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                    source: Box::new(source),
+                })?;
         }
 
         Ok(CoalescedBatchIndexResult {
@@ -612,6 +660,7 @@ impl CoalescedBatchIndexService {
             links_reindexed,
             properties_reindexed,
             bases_reindexed,
+            search_segments_rebuilt,
         })
     }
 }
@@ -677,7 +726,7 @@ impl StaleCleanupService {
             })?;
         }
         crate::SearchCorpusService
-            .rebuild(&transaction, case_policy)
+            .rebuild_in_transaction(&transaction, case_policy)
             .map_err(|source| StaleCleanupError::RebuildSearchCorpus {
                 source: Box::new(source),
             })?;

@@ -266,40 +266,19 @@ pub(crate) fn maybe_refresh_daemon_state(
 
     if first_observation {
         let refreshed = with_connection(runtime, &resolved, |connection| {
-            let refresh = query_index_refresh_status(
-                Path::new(&resolved.vault_root),
-                connection,
-                resolved.case_policy,
-            )?;
-            if let Some(reason) = refresh.rebuild_reason {
-                FullIndexService::default()
-                    .rebuild(
-                        Path::new(&resolved.vault_root),
-                        connection,
-                        resolved.case_policy,
-                    )
-                    .map_err(|source| anyhow!("daemon initial full rebuild failed: {source}"))?;
-                return Ok(Some(reason));
+            let outcome = IndexRefreshService
+                .refresh(
+                    Path::new(&resolved.vault_root),
+                    connection,
+                    resolved.case_policy,
+                    IndexRefreshOptions::default(),
+                )
+                .map_err(|source| anyhow!("daemon initial index refresh failed: {source}"))?;
+            if matches!(outcome.mode, IndexRefreshMode::Current) {
+                Ok(None)
+            } else {
+                Ok(Some(outcome.reason.unwrap_or(outcome.mode.label())))
             }
-            if refresh.drift_paths > 0 {
-                WatchReconcileService::default()
-                    .reconcile_once(
-                        Path::new(&resolved.vault_root),
-                        connection,
-                        resolved.case_policy,
-                    )
-                    .map_err(|source| anyhow!("daemon initial reconcile failed: {source}"))?;
-                return Ok(Some("drift"));
-            }
-            if refresh.search_index_stale {
-                SearchCorpusService
-                    .rebuild(connection, resolved.case_policy)
-                    .map_err(|source| {
-                        anyhow!("daemon initial search corpus rebuild failed: {source}")
-                    })?;
-                return Ok(Some("search_corpus_stale"));
-            }
-            Ok(None)
         })?;
         if let RuntimeMode::Daemon(cache) = runtime {
             cache
@@ -709,6 +688,11 @@ pub(crate) fn daemon_socket_state_label(_socket: &str) -> &'static str {
 
 pub(crate) fn daemon_socket_is_unavailable(error: &anyhow::Error) -> bool {
     for source in error.chain() {
+        if let Some(contract_error) = source.downcast_ref::<CliContractError>()
+            && contract_error.code == "daemon_unavailable"
+        {
+            return true;
+        }
         if let Some(io_error) = source.downcast_ref::<std::io::Error>()
             && matches!(
                 io_error.kind(),
@@ -737,11 +721,11 @@ pub(crate) fn wait_for_daemon_startup(socket: &str, timeout_ms: u64) -> Result<(
             return Ok(());
         }
         if start.elapsed() >= timeout {
-            return Err(anyhow!(
+            return Err(CliContractError::daemon_unavailable(format!(
                 "daemon startup timed out after {}ms for socket '{}'",
-                timeout_ms,
-                socket
-            ));
+                timeout_ms, socket
+            ))
+            .into());
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -759,8 +743,12 @@ pub(crate) fn daemon_request(socket: &str, request: &DaemonRequest) -> Result<Da
 
     #[cfg(unix)]
     {
-        let mut stream = UnixStream::connect(socket)
-            .with_context(|| format!("connect daemon socket '{}'", socket))?;
+        let mut stream = UnixStream::connect(socket).map_err(|source| {
+            CliContractError::daemon_unavailable(format!(
+                "connect daemon socket '{}': {source}",
+                socket
+            ))
+        })?;
         let timeout = Some(Duration::from_millis(DAEMON_IO_TIMEOUT_MS));
         stream
             .set_read_timeout(timeout)
@@ -1044,10 +1032,11 @@ fn harden_daemon_socket_parent(parent: &Path) -> Result<()> {
         .permissions()
         .mode();
     if hardened_mode & 0o077 != 0 {
-        return Err(anyhow!(
+        return Err(CliContractError::blocked_prerequisite(format!(
             "daemon socket parent '{}' must not be group/world accessible",
             parent.display()
-        ));
+        ))
+        .into());
     }
     Ok(())
 }

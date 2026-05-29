@@ -1032,6 +1032,12 @@ fn coalesced_batch_apply_deduplicates_events_and_respects_batch_size() {
     assert_eq!(result.unique_paths, 2);
     assert_eq!(result.batches_applied, 2);
     assert_eq!(result.upserted_files, 2);
+    assert!(result.search_segments_rebuilt);
+
+    let corpus = crate::SearchCorpusService
+        .status(&connection)
+        .expect("inspect search corpus");
+    assert!(!corpus.search_index_stale);
 }
 
 #[test]

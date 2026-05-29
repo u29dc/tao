@@ -24,8 +24,7 @@ use super::{
     BaseValidationError, BaseValidationService, GraphComponentMode, GraphScopedInboundRequest,
     HealthSnapshotService, MarkdownIngestPipeline, NoteCrudError, NoteCrudService,
     PropertyQueryRequest, PropertyQueryService, PropertyQuerySort, PropertyUpdateService,
-    ReconcileService, SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService,
-    WatcherStatus,
+    SdkTransactionCoordinator, ServiceTraceContext, StorageWriteService, WatcherStatus,
 };
 
 fn file_record(
@@ -879,99 +878,6 @@ fn note_crud_service_rolls_back_rename_when_metadata_update_fails() {
         .expect("get file row")
         .expect("file row exists");
     assert_eq!(file_record.normalized_path, "notes/a.md");
-}
-
-#[test]
-fn reconcile_service_is_idempotent_across_repeated_runs() {
-    let temp = tempdir().expect("tempdir");
-    fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
-    fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
-    fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
-
-    let mut connection = Connection::open_in_memory().expect("open db");
-    run_migrations(&mut connection).expect("run migrations");
-
-    let service = ReconcileService;
-    let first = service
-        .reconcile_vault(temp.path(), &mut connection, CasePolicy::Sensitive)
-        .expect("first reconcile");
-    assert_eq!(first.scanned_files, 2);
-    assert_eq!(first.inserted_files, 2);
-    assert_eq!(first.updated_files, 0);
-    assert_eq!(first.removed_files, 0);
-    assert_eq!(first.unchanged_files, 0);
-
-    let second = service
-        .reconcile_vault(temp.path(), &mut connection, CasePolicy::Sensitive)
-        .expect("second reconcile");
-    assert_eq!(second.scanned_files, 2);
-    assert_eq!(second.inserted_files, 0);
-    assert_eq!(second.updated_files, 0);
-    assert_eq!(second.removed_files, 0);
-    assert_eq!(second.unchanged_files, 2);
-}
-
-#[test]
-fn reconcile_service_updates_changed_files_and_removes_stale_rows() {
-    let temp = tempdir().expect("tempdir");
-    fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
-    fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
-    fs::write(temp.path().join("notes/b.md"), "# B").expect("write b");
-
-    let mut connection = Connection::open_in_memory().expect("open db");
-    run_migrations(&mut connection).expect("run migrations");
-
-    let service = ReconcileService;
-    service
-        .reconcile_vault(temp.path(), &mut connection, CasePolicy::Sensitive)
-        .expect("seed reconcile");
-
-    fs::remove_file(temp.path().join("notes/a.md")).expect("remove a");
-    fs::write(temp.path().join("notes/b.md"), "# B changed").expect("update b");
-    fs::write(temp.path().join("notes/c.md"), "# C").expect("write c");
-
-    let result = service
-        .reconcile_vault(temp.path(), &mut connection, CasePolicy::Sensitive)
-        .expect("reconcile drift");
-    assert_eq!(result.scanned_files, 2);
-    assert_eq!(result.inserted_files, 1);
-    assert_eq!(result.updated_files, 1);
-    assert_eq!(result.removed_files, 1);
-    assert_eq!(result.unchanged_files, 0);
-
-    let indexed = FilesRepository::list_all(&connection).expect("list indexed files");
-    let indexed_paths: Vec<String> = indexed
-        .iter()
-        .map(|record| record.normalized_path.clone())
-        .collect();
-    assert_eq!(
-        indexed_paths,
-        vec!["notes/b.md".to_string(), "notes/c.md".to_string()]
-    );
-}
-
-#[test]
-fn reconcile_service_trace_context_wrapper_executes_operation() {
-    let temp = tempdir().expect("tempdir");
-    fs::create_dir_all(temp.path().join("notes")).expect("create notes dir");
-    fs::write(temp.path().join("notes/a.md"), "# A").expect("write a");
-
-    let mut connection = Connection::open_in_memory().expect("open db");
-    run_migrations(&mut connection).expect("run migrations");
-
-    let service = ReconcileService;
-    let trace_context = ServiceTraceContext::with_correlation("reconcile", "cid-reconcile-1");
-    let result = service
-        .reconcile_vault_with_trace_context(
-            &trace_context,
-            temp.path(),
-            &mut connection,
-            CasePolicy::Sensitive,
-        )
-        .expect("traced reconcile");
-
-    assert_eq!(result.scanned_files, 1);
-    assert_eq!(trace_context.correlation_id(), "cid-reconcile-1");
 }
 
 #[test]

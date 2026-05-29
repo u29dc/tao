@@ -14,6 +14,7 @@ use tao_sdk_storage::{
     FilesRepository, PropertiesRepository, SearchAliasRepository, SearchSegmentMatch,
     SearchSegmentQuery, SearchSegmentRepository,
 };
+use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
 use crate::{BacklinkGraphService, GraphWalkDirection, GraphWalkEdgeType, GraphWalkRequest};
@@ -395,8 +396,30 @@ pub struct SearchTimelineEntry {
 pub struct VaultSearchService;
 
 impl VaultSearchService {
-    /// Execute one graph-aware vault search over indexed state.
+    /// Execute one graph-aware vault search over indexed state, repairing stale search corpus state.
     pub fn search(
+        &self,
+        connection: &mut Connection,
+        request: VaultSearchRequest,
+        case_policy: CasePolicy,
+    ) -> Result<VaultSearchResult, VaultSearchError> {
+        let search_status = crate::SearchCorpusService
+            .status(connection)
+            .map_err(|source| VaultSearchError::SearchCorpus {
+                source: Box::new(source),
+            })?;
+        if search_status.search_index_stale {
+            crate::SearchCorpusService
+                .rebuild_atomic(connection, case_policy)
+                .map_err(|source| VaultSearchError::SearchCorpus {
+                    source: Box::new(source),
+                })?;
+        }
+        self.search_current(connection, request)
+    }
+
+    /// Execute one graph-aware vault search over already-fresh indexed state.
+    pub fn search_current(
         &self,
         connection: &Connection,
         request: VaultSearchRequest,
@@ -1934,6 +1957,13 @@ pub enum VaultSearchError {
         /// Source error.
         #[source]
         source: tao_sdk_storage::SearchAliasRepositoryError,
+    },
+    /// Search corpus freshness check or repair failed.
+    #[error("search corpus refresh failed: {source}")]
+    SearchCorpus {
+        /// Source error.
+        #[source]
+        source: Box<crate::SearchCorpusError>,
     },
     /// Stored search segment payload was invalid.
     #[error("search segment '{segment_id}' payload is invalid: {source}")]

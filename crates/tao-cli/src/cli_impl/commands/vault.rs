@@ -47,20 +47,26 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
             let resolved = args.resolve()?;
             let vault_root = Path::new(&resolved.vault_root);
             if !vault_root.exists() {
-                return Err(anyhow!(
+                return Err(CliContractError::blocked_prerequisite(format!(
                     "vault root does not exist: {}",
                     resolved.vault_root
-                ));
+                ))
+                .into());
             }
             if !vault_root.is_dir() {
-                return Err(anyhow!(
+                return Err(CliContractError::blocked_prerequisite(format!(
                     "vault root is not a directory: {}",
                     resolved.vault_root
-                ));
+                ))
+                .into());
             }
 
-            let connection = Connection::open(&resolved.db_path)
-                .with_context(|| format!("open sqlite database '{}'", resolved.db_path))?;
+            let connection = Connection::open(&resolved.db_path).map_err(|source| {
+                CliContractError::blocked_prerequisite(format!(
+                    "open sqlite database '{}': {source}",
+                    resolved.db_path
+                ))
+            })?;
             let report = preflight_migrations(&connection)
                 .map_err(|source| anyhow!("migration preflight failed: {source}"))?;
             Ok(CommandResult {
@@ -84,12 +90,14 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 .with_context(|| {
                     format!("open sqlite database '{}' read-only", resolved.db_path)
                 })?;
-                let refresh = query_index_refresh_status_with_mode(
-                    Path::new(&resolved.vault_root),
-                    &connection,
-                    resolved.case_policy,
-                    ReconciliationScanMode::VerifyContentHashes,
-                )?;
+                let refresh = IndexRefreshService
+                    .inspect(
+                        Path::new(&resolved.vault_root),
+                        &connection,
+                        resolved.case_policy,
+                        ReconciliationScanMode::VerifyContentHashes,
+                    )
+                    .map_err(|source| anyhow!("inspect index refresh status failed: {source}"))?;
                 let totals = query_index_totals(&connection)
                     .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
                 let mode = if refresh.rebuild_reason.is_some() {
@@ -135,64 +143,33 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 totals,
                 search_segments_rebuilt,
             ) = with_connection(runtime, &resolved, |connection| {
-                let refresh = query_index_refresh_status_with_mode(
-                    Path::new(&resolved.vault_root),
-                    connection,
-                    resolved.case_policy,
-                    ReconciliationScanMode::VerifyContentHashes,
-                )?;
-
-                if let Some(reason) = refresh.rebuild_reason {
-                    let rebuild = FullIndexService::default()
-                        .rebuild(
-                            Path::new(&resolved.vault_root),
-                            connection,
-                            resolved.case_policy,
-                        )
-                        .map_err(|source| anyhow!("vault reindex full rebuild failed: {source}"))?;
-                    let totals = query_index_totals(connection)
-                        .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
-                    return Ok((
-                        "full_rebuild",
-                        Some(reason.to_string()),
-                        refresh.drift_paths,
-                        1_u64,
-                        rebuild.indexed_files,
-                        0_u64,
-                        totals,
-                        true,
-                    ));
-                }
-
-                let reconcile = ReconciliationScannerService::default()
-                    .scan_and_repair_with_mode(
+                let outcome = IndexRefreshService
+                    .refresh(
                         Path::new(&resolved.vault_root),
                         connection,
                         resolved.case_policy,
-                        128,
-                        ReconciliationScanMode::VerifyContentHashes,
+                        IndexRefreshOptions {
+                            scan_mode: ReconciliationScanMode::VerifyContentHashes,
+                            max_batch_size: 128,
+                        },
                     )
                     .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
-                let mut search_segments_rebuilt = reconcile.drift_paths > 0;
-                if refresh.search_index_stale {
-                    SearchCorpusService
-                        .rebuild(connection, resolved.case_policy)
-                        .map_err(|source| {
-                            anyhow!("vault reindex search corpus rebuild failed: {source}")
-                        })?;
-                    search_segments_rebuilt = true;
-                }
                 let totals = query_index_totals(connection)
                     .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
+                let mode = if matches!(outcome.mode, IndexRefreshMode::FullRebuild) {
+                    "full_rebuild"
+                } else {
+                    "reconcile"
+                };
                 Ok((
-                    "reconcile",
-                    None,
-                    reconcile.drift_paths,
-                    reconcile.batches_applied,
-                    reconcile.upserted_files,
-                    reconcile.removed_files,
+                    mode,
+                    outcome.reason.map(str::to_string),
+                    outcome.drift_paths,
+                    outcome.batches_applied,
+                    outcome.upserted_files,
+                    outcome.removed_files,
                     totals,
-                    search_segments_rebuilt,
+                    outcome.search_segments_rebuilt,
                 ))
             })?;
             Ok(CommandResult {

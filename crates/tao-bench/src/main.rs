@@ -15,6 +15,7 @@ use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
     BacklinkGraphService, GraphWalkRequest, SearchKind, VaultSearchRequest, VaultSearchService,
 };
+use tao_sdk_vault::CasePolicy;
 use tempfile::{TempDir, tempdir};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -216,7 +217,7 @@ fn run_search_benchmark(args: &Args) -> Result<()> {
         bail!("query text must not be empty");
     }
 
-    let connection =
+    let mut connection =
         Connection::open(&db_path).with_context(|| format!("open sqlite {}", db_path.display()))?;
     let service = VaultSearchService;
     let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
@@ -224,7 +225,7 @@ fn run_search_benchmark(args: &Args) -> Result<()> {
     for _ in 0..args.iterations {
         let start = Instant::now();
         let result = service
-            .search(&connection, request.clone())
+            .search(&mut connection, request.clone(), CasePolicy::Sensitive)
             .context("vault search sample failed")?;
         samples.push(elapsed_ms(start));
         candidates_total = candidates_total.saturating_add(u64::try_from(result.candidates.len())?);

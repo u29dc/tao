@@ -31,16 +31,16 @@ use tao_sdk_search::{
 };
 use tao_sdk_service::{
     BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
-    CURRENT_LINK_RESOLUTION_VERSION, FullIndexService, GraphScopedInboundRequest,
-    GraphWalkDirection, GraphWalkRequest, HealthSnapshotService, LINK_RESOLUTION_VERSION_STATE_KEY,
-    ReconciliationScanMode, ReconciliationScannerService, SdkConfigInspectionService,
-    SdkConfigLoader, SdkConfigOverrides, SearchCorpusService, SearchKind, VaultSearchRequest,
-    VaultSearchService, WatcherStatus, ensure_runtime_paths,
+    GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
+    IndexRefreshMode, IndexRefreshOptions, IndexRefreshService, ReconciliationScanMode,
+    SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, SearchKind,
+    VaultSearchRequest, VaultSearchService, WatcherStatus, ensure_runtime_paths,
 };
+#[cfg(test)]
+use tao_sdk_service::{CURRENT_LINK_RESOLUTION_VERSION, LINK_RESOLUTION_VERSION_STATE_KEY};
 use tao_sdk_storage::{
-    BasesRepository, FilesRepository, IndexStateRepository, LinksRepository, PropertiesRepository,
-    SearchIndexRecord, SearchIndexRepository, TasksRepository, preflight_migrations,
-    run_migrations,
+    BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, SearchIndexRecord,
+    SearchIndexRepository, TasksRepository, preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::{
     CasePolicy, PathCanonicalizationService, VaultScanService, validate_relative_vault_path,

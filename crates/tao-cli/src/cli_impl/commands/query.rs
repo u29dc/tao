@@ -3,10 +3,13 @@ use super::super::*;
 pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     let from = args.from.trim();
     let limit = args.limit.max(1);
-    let where_expr = parse_where_expression_opt(args.where_clause.as_deref())
-        .map_err(|source| anyhow!("parse --where failed: {source}"))?;
-    let sort_keys = parse_sort_keys(args.sort.as_deref())
-        .map_err(|source| anyhow!("parse --sort failed: {source}"))?;
+    let where_expr =
+        parse_where_expression_opt(args.where_clause.as_deref()).map_err(|source| {
+            CliContractError::query_parse_error(format!("parse --where failed: {source}"))
+        })?;
+    let sort_keys = parse_sort_keys(args.sort.as_deref()).map_err(|source| {
+        CliContractError::query_parse_error(format!("parse --sort failed: {source}"))
+    })?;
     if from.eq_ignore_ascii_case("docs") {
         let columns = parse_query_docs_columns(args.select.as_deref())?;
         let projection = query_docs_projection(&columns);
@@ -24,12 +27,11 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
                 offset: u64::from(args.offset),
                 execute: !args.explain || args.execute,
             })
-            .map_err(|source| anyhow!("build logical query plan failed: {source}"))?;
-        let physical_plan = PhysicalPlanOptimizer.optimize(
-            PhysicalPlanBuilder
-                .build(&logical_plan)
-                .map_err(|source| anyhow!("build physical query plan failed: {source}"))?,
-        );
+            .map_err(|source| query_planning_error("build logical query plan failed", source))?;
+        let physical_plan =
+            PhysicalPlanOptimizer.optimize(PhysicalPlanBuilder.build(&logical_plan).map_err(
+                |source| query_planning_error("build physical query plan failed", source),
+            )?);
         if args.explain && !args.execute {
             return Ok(CommandResult {
                 command: "query.run".to_string(),
@@ -186,10 +188,9 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
     }
 
     if let Some(base_id_or_path) = from.strip_prefix("base:") {
-        let view_name = args
-            .view_name
-            .clone()
-            .ok_or_else(|| anyhow!("query base scope requires --view-name"))?;
+        let view_name = args.view_name.clone().ok_or_else(|| {
+            CliContractError::invalid_argument("query base scope requires --view-name")
+        })?;
         let logical_plan = LogicalPlanBuilder
             .build(LogicalQueryPlanRequest {
                 from: from.to_string(),
@@ -201,12 +202,11 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
                 offset: u64::from(args.offset),
                 execute: !args.explain || args.execute,
             })
-            .map_err(|source| anyhow!("build logical query plan failed: {source}"))?;
-        let physical_plan = PhysicalPlanOptimizer.optimize(
-            PhysicalPlanBuilder
-                .build(&logical_plan)
-                .map_err(|source| anyhow!("build physical query plan failed: {source}"))?,
-        );
+            .map_err(|source| query_planning_error("build logical query plan failed", source))?;
+        let physical_plan =
+            PhysicalPlanOptimizer.optimize(PhysicalPlanBuilder.build(&logical_plan).map_err(
+                |source| query_planning_error("build physical query plan failed", source),
+            )?);
         if args.explain && !args.execute {
             return Ok(CommandResult {
                 command: "query.run".to_string(),
@@ -526,10 +526,22 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
         return Ok(retag_result(result, "query.run", "query run completed"));
     }
 
-    Err(anyhow!(
+    Err(CliContractError::invalid_argument(format!(
         "unsupported query scope '{}'; supported scopes: docs, graph, task, meta:tags, meta:aliases, meta:properties, base:<id-or-path>",
         from
     ))
+    .into())
+}
+
+fn query_planning_error(context: &'static str, source: impl std::fmt::Display) -> anyhow::Error {
+    let message = format!("{context}: {source}");
+    if message.contains("type mismatch for ordered comparison")
+        || message.contains("type mismatch for string comparison")
+    {
+        CliContractError::query_type_mismatch(message).into()
+    } else {
+        CliContractError::invalid_argument(message).into()
+    }
 }
 
 pub(in crate::cli_impl) fn dispatch(

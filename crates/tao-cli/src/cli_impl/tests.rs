@@ -9,14 +9,15 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::{
-    CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CommandResult, Commands,
-    DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs, DaemonStopAllArgs, DocCommands,
-    ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, QueryArgs, RuntimeCache, RuntimeMode, SearchArgs,
-    VaultCommands, VaultPathArgs, daemon_execution_policy, derive_daemon_socket_for_vault,
-    dispatch, dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon,
-    maybe_refresh_daemon_state, maybe_render_streaming_output, prepare_daemon_socket_path,
-    read_bounded_bytes, registry, render_error_output, render_output, resolve_command_vault_paths,
-    resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key, update_daemon_command_cache,
+    CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CliContractError,
+    CommandResult, Commands, DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs,
+    DaemonStopAllArgs, DocCommands, ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, QueryArgs,
+    RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs, classify_cli_error,
+    daemon_execution_policy, derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime,
+    handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
+    maybe_render_streaming_output, prepare_daemon_socket_path, read_bounded_bytes, registry,
+    render_error_output, render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli,
+    run_from_args, runtime_cache_key, update_daemon_command_cache,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
 use rusqlite::Connection;
@@ -1044,6 +1045,25 @@ fn json_error_envelope_uses_stable_query_parse_error_code() {
 }
 
 #[test]
+fn typed_cli_contract_error_classification_does_not_depend_on_message_text() {
+    let error = anyhow::Error::new(CliContractError::failure(
+        "stable_custom_code",
+        "wording without classifier keywords",
+        Some("stable hint".to_string()),
+        None,
+    ));
+
+    let classified = classify_cli_error(&error);
+
+    assert_eq!(classified.exit_kind, ExitKind::Failure);
+    assert_eq!(classified.error.code, "stable_custom_code");
+    assert_eq!(
+        classified.error.message,
+        "wording without classifier keywords"
+    );
+}
+
+#[test]
 fn runtime_json_failures_return_exit_code_one() {
     let result = run_from_args(
         ["tao", "tools", "missing.tool"]
@@ -1496,6 +1516,76 @@ fn search_rebuilds_missing_unified_corpus_before_querying() {
             .query_row("SELECT COUNT(*) FROM search_aliases", [], |row| row.get(0))
             .expect("count rebuilt aliases");
         assert!(rebuilt_segments > 0);
+        assert!(rebuilt_aliases > 0);
+    });
+}
+
+#[test]
+fn search_rebuilds_corpus_when_aliases_are_missing_but_segments_remain() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let db_path = vault_root.join(".tao/index.sqlite");
+        let connection = Connection::open(&db_path).expect("open fixture db");
+        let segments_before: u64 = connection
+            .query_row("SELECT COUNT(*) FROM search_segments", [], |row| row.get(0))
+            .expect("count segments before");
+        assert!(segments_before > 0);
+        connection
+            .execute("DELETE FROM search_aliases", [])
+            .expect("clear aliases");
+
+        let dry_run = Cli::parse_from([
+            "tao",
+            "vault",
+            "reindex",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--dry-run",
+        ]);
+        let output = render_output(
+            dry_run.json,
+            &dispatch(dry_run.command).expect("dispatch dry-run reindex"),
+        )
+        .expect("render dry-run");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse dry-run");
+        assert_eq!(
+            envelope
+                .get("data")
+                .and_then(|data| data.get("search_index_stale"))
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let cli = Cli::parse_from([
+            "tao",
+            "search",
+            "jordan hart",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--limit",
+            "10",
+        ]);
+        let output = render_output(cli.json, &dispatch(cli.command).expect("dispatch search"))
+            .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let first_candidate = envelope
+            .get("data")
+            .and_then(|data| data.get("candidates"))
+            .and_then(JsonValue::as_array)
+            .and_then(|items| items.first())
+            .expect("first candidate");
+        assert_eq!(
+            first_candidate.get("path").and_then(JsonValue::as_str),
+            Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+        );
+
+        let rebuilt_aliases: u64 = connection
+            .query_row("SELECT COUNT(*) FROM search_aliases", [], |row| row.get(0))
+            .expect("count rebuilt aliases");
         assert!(rebuilt_aliases > 0);
     });
 }

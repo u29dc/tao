@@ -158,7 +158,7 @@ impl FullIndexService {
         upsert_bases_batch(&transaction, &base_records)?;
         upsert_search_index_batch(&transaction, &search_records)?;
         let search_corpus = crate::SearchCorpusService
-            .rebuild(&transaction, case_policy)
+            .rebuild_in_transaction(&transaction, case_policy)
             .map_err(|source| FullIndexError::RebuildSearchCorpus {
                 source: Box::new(source),
             })?;
