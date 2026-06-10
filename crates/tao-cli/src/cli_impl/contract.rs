@@ -54,6 +54,12 @@ pub(crate) enum ExitKind {
     Blocked = 2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFormat {
+    Json,
+    Toon,
+}
+
 #[derive(Debug)]
 pub(crate) struct ClassifiedCliError {
     pub(crate) exit_kind: ExitKind,
@@ -233,7 +239,7 @@ pub(crate) fn emit_clap_output(output: ClapOutput) {
 
 pub(crate) fn handle_parse_error(
     error: clap::Error,
-    json_output: bool,
+    output_format: OutputFormat,
     raw_args: &[OsString],
 ) -> RunResult {
     match error.kind() {
@@ -251,17 +257,23 @@ pub(crate) fn handle_parse_error(
                 _ => help_output_for_missing_subcommand(raw_args).unwrap_or(ClapOutput::RootHelp),
             }),
         },
-        _ if json_output => {
+        _ => {
             let classified = classify_parse_error(&error);
-            let rendered = render_error_output_for_tool("tao", Duration::ZERO, &classified)
-                .unwrap_or_else(|render_source| {
-                    fallback_json_error(
-                        "tao",
-                        Duration::ZERO,
-                        &classified.error,
-                        &render_source.to_string(),
-                    )
-                });
+            let rendered = render_error_output_for_tool_with_format(
+                "tao",
+                Duration::ZERO,
+                &classified,
+                output_format,
+            )
+            .unwrap_or_else(|render_source| {
+                fallback_render_error(
+                    "tao",
+                    Duration::ZERO,
+                    &classified.error,
+                    &render_source.to_string(),
+                    output_format,
+                )
+            });
             RunResult {
                 exit_kind: classified.exit_kind,
                 stdout: Some(rendered),
@@ -269,12 +281,6 @@ pub(crate) fn handle_parse_error(
                 clap_output: None,
             }
         }
-        _ => RunResult {
-            exit_kind: ExitKind::Failure,
-            stdout: None,
-            stderr: Some(error.to_string()),
-            clap_output: None,
-        },
     }
 }
 
@@ -308,6 +314,15 @@ pub(crate) fn render_error_output_for_tool(
     elapsed: Duration,
     classified: &ClassifiedCliError,
 ) -> Result<String> {
+    render_error_output_for_tool_with_format(tool, elapsed, classified, OutputFormat::Json)
+}
+
+pub(crate) fn render_error_output_for_tool_with_format(
+    tool: &str,
+    elapsed: Duration,
+    classified: &ClassifiedCliError,
+    output_format: OutputFormat,
+) -> Result<String> {
     let envelope = JsonEnvelope::<JsonValue>::failure(
         JsonError {
             code: classified.error.code.clone(),
@@ -317,16 +332,17 @@ pub(crate) fn render_error_output_for_tool(
         },
         error_meta(tool, elapsed),
     );
-    serde_json::to_string(&envelope).context("serialize json error envelope")
+    render_envelope(&envelope, output_format).context("serialize error envelope")
 }
 
-pub(crate) fn fallback_json_error(
+pub(crate) fn fallback_render_error(
     tool: &str,
     elapsed: Duration,
     classified_error: &JsonError,
     render_message: &str,
+    output_format: OutputFormat,
 ) -> String {
-    serde_json::json!({
+    let fallback = serde_json::json!({
         "ok": false,
         "error": {
             "code": "render_failed",
@@ -337,8 +353,14 @@ pub(crate) fn fallback_json_error(
             },
         },
         "meta": error_meta(tool, elapsed),
-    })
-    .to_string()
+    });
+
+    match output_format {
+        OutputFormat::Json => fallback.to_string(),
+        OutputFormat::Toon => {
+            toon_format::encode_default(&fallback).unwrap_or_else(|_| fallback.to_string())
+        }
+    }
 }
 
 pub(crate) fn classify_parse_error(error: &clap::Error) -> ClassifiedCliError {
@@ -521,12 +543,32 @@ pub(crate) fn render_output_with_elapsed(
     elapsed: Duration,
 ) -> Result<String> {
     if json {
-        Ok(serde_json::to_string(&JsonEnvelope::success(
-            result.args.clone(),
-            success_meta(&result.command, elapsed, &result.args),
-        ))?)
+        render_output_with_format(OutputFormat::Json, result, elapsed)
     } else {
         Ok(result.summary.clone())
+    }
+}
+
+pub(crate) fn render_output_with_format(
+    output_format: OutputFormat,
+    result: &CommandResult,
+    elapsed: Duration,
+) -> Result<String> {
+    render_envelope(
+        &JsonEnvelope::success(
+            result.args.clone(),
+            success_meta(&result.command, elapsed, &result.args),
+        ),
+        output_format,
+    )
+}
+
+fn render_envelope<T: Serialize>(envelope: &T, output_format: OutputFormat) -> Result<String> {
+    match output_format {
+        OutputFormat::Json => serde_json::to_string(envelope).context("serialize json envelope"),
+        OutputFormat::Toon => {
+            toon_format::encode_default(envelope).context("serialize toon envelope")
+        }
     }
 }
 

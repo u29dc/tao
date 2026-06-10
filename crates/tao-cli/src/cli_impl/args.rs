@@ -6,6 +6,9 @@ pub(crate) struct Cli {
     /// JSON envelope output is the canonical public interface.
     #[arg(skip = true)]
     pub(crate) json: bool,
+    /// Emit Toon instead of the default JSON envelope.
+    #[arg(long, global = true, default_value_t = false)]
+    pub(crate) toon: bool,
     /// Stream JSON envelope serialization for supported large read commands.
     #[arg(long, global = true, default_value_t = false, hide = true)]
     pub(crate) json_stream: bool,

@@ -28,7 +28,7 @@ pub enum BaseCoercionMode {
 pub struct BaseCoercionError {
     pub code: String,
     pub field_type: BaseFieldType,
-    pub value: JsonValue,
+    pub value: Box<JsonValue>,
     pub message: String,
 }
 
@@ -63,7 +63,7 @@ pub fn coerce_json_value(
         Err(message) => Err(BaseCoercionError {
             code: "bases.coercion.invalid_value".to_string(),
             field_type,
-            value: value.clone(),
+            value: Box::new(value.clone()),
             message,
         }),
     }

@@ -99,10 +99,18 @@ pub(crate) fn maybe_forward_to_daemon(cli: &Cli) -> Result<Option<String>> {
                     .unwrap_or_else(|| "daemon returned unknown failure".to_string());
                 return Err(anyhow!(message));
             }
-            return response
+            let output = response
                 .output
-                .map(Some)
-                .ok_or_else(|| anyhow!("daemon execute response missing output payload"));
+                .ok_or_else(|| anyhow!("daemon execute response missing output payload"))?;
+            if cli.toon {
+                let envelope: JsonValue =
+                    serde_json::from_str(&output).context("parse daemon json envelope")?;
+                return Ok(Some(
+                    toon_format::encode_default(&envelope)
+                        .context("encode daemon envelope as toon")?,
+                ));
+            }
+            return Ok(Some(output));
         }
     }
 }

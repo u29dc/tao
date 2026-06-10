@@ -12,12 +12,12 @@ use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CliContractError,
     CommandResult, Commands, DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs,
     DaemonStopAllArgs, DocCommands, ExitKind, HealthArgs, LINK_RESOLUTION_VERSION_STATE_KEY,
-    QueryArgs, RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs,
+    OutputFormat, QueryArgs, RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs,
     classify_cli_error, daemon_execution_policy, derive_daemon_socket_for_vault, dispatch,
     dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
     maybe_render_streaming_output, prepare_daemon_socket_path, read_bounded_bytes, registry,
-    render_error_output, render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli,
-    run_from_args, runtime_cache_key, update_daemon_command_cache,
+    render_error_output, render_output, render_output_with_format, resolve_command_vault_paths,
+    resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key, update_daemon_command_cache,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
 use rusqlite::Connection;
@@ -48,6 +48,7 @@ fn cli_help_contains_grouped_command_names() {
     assert!(rendered.contains("tools"));
     assert!(rendered.contains("health"));
     assert!(rendered.contains("config"));
+    assert!(rendered.contains("--toon"));
     assert!(!rendered.contains("--allow-writes"));
     assert!(!rendered.contains("--text"));
     assert!(!rendered.contains("note"));
@@ -176,6 +177,50 @@ fn validate_missing_path_uses_json_usage_error() {
     assert_eq!(result.exit_kind, ExitKind::Failure);
     let stdout = result.stdout.expect("json stdout");
     let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse output");
+    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
+    assert_eq!(
+        envelope
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(JsonValue::as_str),
+        Some("invalid_argument")
+    );
+}
+
+#[test]
+fn run_from_args_supports_toon_tools_output() {
+    let result = run_from_args(
+        ["tao", "--toon", "tools"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+    );
+
+    assert_eq!(result.exit_kind, ExitKind::Success);
+    let stdout = result.stdout.expect("toon stdout");
+    let envelope: JsonValue = toon_format::decode_default(&stdout).expect("parse toon output");
+    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(true));
+    assert_eq!(
+        envelope
+            .get("data")
+            .and_then(|data| data.get("defaultOutputFormat"))
+            .and_then(JsonValue::as_str),
+        Some("json")
+    );
+}
+
+#[test]
+fn toon_parse_errors_use_toon_error_envelope() {
+    let result = run_from_args(
+        ["tao", "--toon", "validate"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+    );
+
+    assert_eq!(result.exit_kind, ExitKind::Failure);
+    let stdout = result.stdout.expect("toon stdout");
+    let envelope: JsonValue = toon_format::decode_default(&stdout).expect("parse toon output");
     assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
     assert_eq!(
         envelope
@@ -512,6 +557,23 @@ fn json_output_is_one_envelope_object() {
                 .is_some_and(|envelope| !envelope.contains_key("error"))
         );
     });
+}
+
+#[test]
+fn toon_output_decodes_to_matching_envelope() {
+    let cli = Cli::parse_from(["tao", "tools"]);
+    let result = dispatch(cli.command).expect("dispatch tools");
+    let json_output =
+        render_output_with_format(OutputFormat::Json, &result, std::time::Duration::ZERO)
+            .expect("render json output");
+    let toon_output =
+        render_output_with_format(OutputFormat::Toon, &result, std::time::Duration::ZERO)
+            .expect("render toon output");
+
+    let json_value: JsonValue = serde_json::from_str(&json_output).expect("parse json");
+    let toon_value: JsonValue = toon_format::decode_default(&toon_output).expect("parse toon");
+
+    assert_eq!(json_value, toon_value);
 }
 
 #[test]
@@ -1188,11 +1250,43 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
             .and_then(JsonValue::as_str),
         Some(env!("CARGO_PKG_VERSION"))
     );
+    assert_eq!(
+        envelope
+            .get("data")
+            .and_then(|data| data.get("defaultOutputFormat"))
+            .and_then(JsonValue::as_str),
+        Some("json")
+    );
+    assert_eq!(
+        envelope
+            .get("data")
+            .and_then(|data| data.get("outputFormats")),
+        Some(&serde_json::json!(["json", "toon"]))
+    );
+    let global_flags = envelope
+        .get("data")
+        .and_then(|data| data.get("globalFlags"))
+        .and_then(JsonValue::as_array)
+        .expect("global flags");
+    assert!(
+        global_flags
+            .iter()
+            .any(|flag| { flag.get("name").and_then(JsonValue::as_str) == Some("--toon") })
+    );
+    assert!(
+        global_flags
+            .iter()
+            .all(|flag| { flag.get("name").and_then(JsonValue::as_str) != Some("--text") })
+    );
 
     let tools_entry = registry::tool_detail("tools").expect("tools registry entry");
     assert!(
         tools_entry.output_fields.contains(&"version"),
         "tools registry outputFields should advertise version"
+    );
+    assert!(
+        tools_entry.output_fields.contains(&"outputFormats"),
+        "tools registry outputFields should advertise outputFormats"
     );
 
     let query_tool = envelope

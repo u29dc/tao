@@ -11,12 +11,16 @@ pub(crate) fn handle(args: ToolsArgs) -> Result<CommandResult> {
         })?;
         serde_json::json!({
             "version": version,
+            "outputFormats": ["json", "toon"],
+            "defaultOutputFormat": "json",
             "tool": tool,
             "globalFlags": registry::global_flags(),
         })
     } else {
         serde_json::json!({
             "version": version,
+            "outputFormats": ["json", "toon"],
+            "defaultOutputFormat": "json",
             "tools": registry::public_tools_catalog(),
             "globalFlags": registry::global_flags(),
         })

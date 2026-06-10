@@ -428,7 +428,10 @@ const PARAM_SOCKET_DIR: ToolParameter = ToolParameter {
     description: "Directory used to discover managed daemon sockets.",
 };
 
-const GLOBAL_FLAGS: &[GlobalFlag] = &[];
+const GLOBAL_FLAGS: &[GlobalFlag] = &[GlobalFlag {
+    name: "--toon",
+    description: "Emit Toon instead of the default JSON envelope.",
+}];
 
 const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
@@ -1013,11 +1016,18 @@ const TOOLS: &[ToolDefinition] = &[
     },
     ToolDefinition {
         name: "tools",
-        command: "tao tools [name]",
+        command: "tao tools [name] [--toon]",
         category: "system",
         description: "Return the public tool registry catalog or one tool definition.",
         parameters: &[PARAM_TOOL_NAME],
-        output_fields: &["version", "tools", "tool", "globalFlags"],
+        output_fields: &[
+            "version",
+            "outputFormats",
+            "defaultOutputFormat",
+            "tools",
+            "tool",
+            "globalFlags",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: true,

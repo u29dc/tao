@@ -162,7 +162,7 @@ pub struct BridgeError {
     /// Optional remediation hint.
     pub hint: Option<String>,
     /// Machine-readable context values.
-    pub context: JsonMap<String, JsonValue>,
+    pub context: Box<JsonMap<String, JsonValue>>,
 }
 
 impl BridgeError {
@@ -172,7 +172,7 @@ impl BridgeError {
             code: code.into(),
             message: message.into(),
             hint: None,
-            context: JsonMap::new(),
+            context: Box::default(),
         }
     }
 

@@ -83,14 +83,19 @@ pub fn run() -> i32 {
 }
 
 fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
-    let json_output = true;
+    let parse_output_format = output_format_from_raw_args(&raw_args);
     let cli = match Cli::try_parse_from(raw_args.clone()) {
         Ok(cli) => cli,
-        Err(error) => return handle_parse_error(error, json_output, &raw_args),
+        Err(error) => return handle_parse_error(error, parse_output_format, &raw_args),
     };
 
     let started_at = Instant::now();
     let tool = tool_name_for_command(&cli.command);
+    let output_format = if cli.toon {
+        OutputFormat::Toon
+    } else {
+        OutputFormat::Json
+    };
     let run = || -> Result<String> {
         if let Some(output) = maybe_forward_to_daemon(&cli)? {
             return Ok(output);
@@ -102,7 +107,7 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
         }
 
         let result = dispatch(cli.command.clone())?;
-        render_output_with_elapsed(cli.json, &result, started_at.elapsed())
+        render_output_with_format(output_format, &result, started_at.elapsed())
     };
 
     match run() {
@@ -115,16 +120,21 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
         Err(source) => {
             let classified = classify_cli_error(&source);
             if cli.json {
-                let rendered =
-                    render_error_output_for_tool(&tool, started_at.elapsed(), &classified)
-                        .unwrap_or_else(|render_source| {
-                            fallback_json_error(
-                                &tool,
-                                started_at.elapsed(),
-                                &classified.error,
-                                &render_source.to_string(),
-                            )
-                        });
+                let rendered = render_error_output_for_tool_with_format(
+                    &tool,
+                    started_at.elapsed(),
+                    &classified,
+                    output_format,
+                )
+                .unwrap_or_else(|render_source| {
+                    fallback_render_error(
+                        &tool,
+                        started_at.elapsed(),
+                        &classified.error,
+                        &render_source.to_string(),
+                        output_format,
+                    )
+                });
                 RunResult {
                     exit_kind: classified.exit_kind,
                     stdout: Some(rendered),
@@ -140,6 +150,17 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
                 }
             }
         }
+    }
+}
+
+fn output_format_from_raw_args(raw_args: &[OsString]) -> OutputFormat {
+    if raw_args
+        .iter()
+        .any(|arg| arg.to_str().is_some_and(|value| value == "--toon"))
+    {
+        OutputFormat::Toon
+    } else {
+        OutputFormat::Json
     }
 }
 

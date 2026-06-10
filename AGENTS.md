@@ -33,7 +33,7 @@
 | Core engine | Rust 2024 workspace | `unsafe_code = "forbid"` at workspace level, strict clippy |
 | Storage | SQLite via `rusqlite` | schema and migrations owned by `tao-sdk-storage` |
 | Vault FS | `tao-sdk-vault` | canonical path safety, NFC normalization, case-policy matching |
-| CLI | `clap` + JSON envelopes | default JSON output, optional daemon forwarding |
+| CLI | `clap` + JSON/Toon envelopes | default JSON output, optional `--toon`, optional daemon forwarding |
 | Native bridge | `tao-sdk-bridge` | internal Rust adapter shared by CLI warm-runtime flows and bridge benchmarks |
 | Tooling | Bun + Husky + Biome | JS tooling only; core product/runtime is Rust |
 | Benchmarks | `tao-bench` + `hyperfine` | timestamped reports under [`.benchmarks/reports/`](.benchmarks/reports/) |
@@ -76,7 +76,8 @@
 
 - `README.md` and `CLAUDE.md` are symlink mirrors of [`AGENTS.md`](AGENTS.md); edit the root file only
 - Non-interactive CLI commands emit one JSON envelope to stdout by default; bare `tao` and help/version flows use native clap output.
-- `--json-stream` is a narrow projected JSON envelope path: it only applies to `query --from docs` without `--where` or `--sort`
+- `--toon` emits the normal public CLI envelope as Toon instead of default JSON.
+- `--json-stream` is a narrow projected JSON envelope path: it only applies to `query --from docs` without `--where` or `--sort`, and remains JSON-only.
 - `query --from graph` without `--path` maps to the unresolved-link window; with `--path` it returns outgoing and backlink panels
 - Public vault-content operations are read-only. `doc write`, `task set-state`, global `--allow-writes`, and public `--text` output are not part of the CLI surface.
 - Internal state writes for `vault open`, `vault reindex`, daemon/cache/index maintenance, watch reconciliation, search-corpus repair, and health synchronization remain allowed; `vault reindex --dry-run` inspects planned index work.
