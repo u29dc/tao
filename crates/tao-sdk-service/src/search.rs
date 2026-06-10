@@ -11,8 +11,8 @@ use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tao_sdk_core::note_title_from_path;
 use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_storage::{
-    FilesRepository, PropertiesRepository, SearchAliasRepository, SearchSegmentMatch,
-    SearchSegmentQuery, SearchSegmentRepository,
+    FilesRepository, PropertiesRepository, SearchAliasRepository, SearchSegmentCandidate,
+    SearchSegmentMatch, SearchSegmentQuery, SearchSegmentRepository,
 };
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
@@ -648,6 +648,13 @@ struct PendingFileMatch {
     score: i64,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSegmentMatch {
+    segment: SearchSegmentCandidate,
+    matched_in: Vec<String>,
+    score: i64,
+}
+
 fn validate_request(request: &VaultSearchRequest) -> Result<(), VaultSearchError> {
     let has_query = request
         .query
@@ -706,7 +713,7 @@ fn search_indexed_corpus(
     )
     .map_err(|source| VaultSearchError::SearchAliases { source })?;
 
-    let segment_matches = SearchSegmentRepository::query(connection, &segment_query)
+    let segment_candidates = SearchSegmentRepository::query_candidates(connection, &segment_query)
         .map_err(|source| VaultSearchError::SearchSegments { source })?;
 
     let mut total = SearchSegmentRepository::count_distinct_paths(connection, &segment_query)
@@ -748,6 +755,72 @@ fn search_indexed_corpus(
         }
     }
 
+    let mut pending_segments = HashMap::<String, PendingSegmentMatch>::new();
+
+    for segment in segment_candidates {
+        if !path_allowed(&segment.normalized_path, scope, extensions) {
+            continue;
+        }
+        let Some(surface_kind) = kind_for_surface(&segment.surface) else {
+            continue;
+        };
+        let matched_in = matched_in_for_segment_candidate(&segment, needle);
+        let score = indexed_segment_candidate_score(&segment, needle);
+        candidates.add(
+            &segment.normalized_path,
+            surface_kind,
+            score,
+            format!("{}:{}", segment.surface, matched_in.join(",")),
+        );
+        let Some(output_key) = segment_candidate_output_key(&segment) else {
+            continue;
+        };
+        let dedupe_key = format!("{}\0{}", segment.surface, output_key);
+        let row = PendingSegmentMatch {
+            segment,
+            matched_in,
+            score,
+        };
+        match pending_segments.get_mut(&dedupe_key) {
+            Some(existing) if row.score > existing.score => {
+                *existing = row;
+            }
+            Some(_) => {}
+            None => {
+                pending_segments.insert(dedupe_key, row);
+            }
+        }
+    }
+
+    let mut pending_segments = pending_segments.into_values().collect::<Vec<_>>();
+    pending_segments.sort_by(compare_pending_segment);
+    let mut selected_counts = HashMap::<&'static str, usize>::new();
+    let mut selected_segments = Vec::new();
+    let limit_usize = limit as usize;
+    for pending in pending_segments {
+        let Some(bucket) = segment_candidate_output_bucket(&pending.segment) else {
+            continue;
+        };
+        let count = selected_counts.entry(bucket).or_insert(0);
+        if *count >= limit_usize {
+            continue;
+        }
+        *count += 1;
+        selected_segments.push(pending);
+    }
+
+    let selected_ids = selected_segments
+        .iter()
+        .map(|pending| pending.segment.segment_id.clone())
+        .collect::<Vec<_>>();
+    let mut pending_by_segment_id = selected_segments
+        .into_iter()
+        .map(|pending| (pending.segment.segment_id.clone(), pending))
+        .collect::<HashMap<_, _>>();
+    let segment_matches =
+        SearchSegmentRepository::hydrate_by_segment_ids(connection, &selected_ids)
+            .map_err(|source| VaultSearchError::SearchSegments { source })?;
+
     let mut docs = HashMap::<String, SearchDocMatch>::new();
     let mut files = HashMap::<String, PendingFileMatch>::new();
     let mut properties = HashMap::<String, SearchPropertyMatch>::new();
@@ -756,22 +829,12 @@ fn search_indexed_corpus(
     let mut base_rows = HashMap::<String, SearchBaseRowMatch>::new();
 
     for segment in segment_matches {
-        if !path_allowed(&segment.normalized_path, scope, extensions) {
-            continue;
-        }
-        let Some(surface_kind) = kind_for_surface(&segment.surface) else {
+        let Some(pending) = pending_by_segment_id.remove(&segment.segment_id) else {
             continue;
         };
         let payload = segment_payload(&segment)?;
-        let matched_in = matched_in_for_segment(&segment, &payload, needle);
-        let score = indexed_segment_score(&segment, &payload, needle);
-        candidates.add(
-            &segment.normalized_path,
-            surface_kind,
-            score,
-            format!("{}:{}", segment.surface, matched_in.join(",")),
-        );
-
+        let matched_in = pending.matched_in;
+        let score = pending.score;
         match segment.surface.as_str() {
             "docs" => {
                 let path = payload_string(&payload, "path")
@@ -916,7 +979,6 @@ fn search_indexed_corpus(
     graph.sort_by(compare_score_source);
     base_rows.sort_by(compare_score_path);
 
-    let limit_usize = limit as usize;
     docs.truncate(limit_usize);
     files.truncate(limit_usize);
     properties.truncate(limit_usize);
@@ -1364,19 +1426,12 @@ fn segment_payload(segment: &SearchSegmentMatch) -> Result<JsonValue, VaultSearc
     })
 }
 
-fn indexed_segment_score(
-    segment: &SearchSegmentMatch,
-    payload: &JsonValue,
-    needle: &SearchNeedle,
-) -> i64 {
+fn indexed_segment_candidate_score(segment: &SearchSegmentCandidate, needle: &SearchNeedle) -> i64 {
     let mut score = segment.weight + segment.rank_score + field_score(&segment.field);
     score += canonical_entity_path_boost(&segment.normalized_path);
     score += text_match_score(&segment.normalized_path, needle).unwrap_or(0);
-    if let Some(title) = payload_string(payload, "title") {
-        score += text_match_score(&title, needle).unwrap_or(0);
-    }
-    if let Some(path) = payload_string(payload, "path") {
-        score += text_match_score(&path, needle).unwrap_or(0);
+    if segment_label_is_title(segment) {
+        score += text_match_score(&segment.label, needle).unwrap_or(0);
     }
     score
 }
@@ -1393,18 +1448,15 @@ fn field_score(field: &str) -> i64 {
     }
 }
 
-fn matched_in_for_segment(
-    segment: &SearchSegmentMatch,
-    payload: &JsonValue,
+fn matched_in_for_segment_candidate(
+    segment: &SearchSegmentCandidate,
     needle: &SearchNeedle,
 ) -> Vec<String> {
     let mut matched = Vec::new();
     if text_match_score(&segment.normalized_path, needle).is_some() {
         matched.push("path".to_string());
     }
-    if let Some(title) = payload_string(payload, "title")
-        && text_match_score(&title, needle).is_some()
-    {
+    if segment_label_is_title(segment) && text_match_score(&segment.label, needle).is_some() {
         matched.push("title".to_string());
     }
     if matched.is_empty() {
@@ -1425,6 +1477,40 @@ fn matched_in_for_segment(
     matched.sort();
     matched.dedup();
     matched
+}
+
+fn segment_label_is_title(segment: &SearchSegmentCandidate) -> bool {
+    matches!(segment.surface.as_str(), "docs" | "files")
+        || (segment.surface == "bases" && segment.field == "base")
+}
+
+fn segment_candidate_output_key(segment: &SearchSegmentCandidate) -> Option<String> {
+    match segment.surface.as_str() {
+        "docs" | "files" => Some(segment.normalized_path.clone()),
+        "properties" | "tasks" | "graph" => segment
+            .record_id
+            .clone()
+            .or_else(|| Some(segment.segment_id.clone())),
+        "bases" if segment.field == "base_row" => segment
+            .record_id
+            .clone()
+            .or_else(|| Some(segment.segment_id.clone())),
+        "bases" => None,
+        _ => None,
+    }
+}
+
+fn segment_candidate_output_bucket(segment: &SearchSegmentCandidate) -> Option<&'static str> {
+    match segment.surface.as_str() {
+        "docs" => Some("docs"),
+        "files" => Some("files"),
+        "properties" => Some("properties"),
+        "tasks" => Some("tasks"),
+        "graph" => Some("graph"),
+        "bases" if segment.field == "base_row" => Some("base_rows"),
+        "bases" => None,
+        _ => None,
+    }
 }
 
 fn payload_string(payload: &JsonValue, key: &str) -> Option<String> {
@@ -1716,6 +1802,18 @@ fn compare_score_path<T: SearchPathScore>(left: &T, right: &T) -> Ordering {
         .then_with(|| left.path().cmp(right.path()))
 }
 
+fn compare_pending_segment(left: &PendingSegmentMatch, right: &PendingSegmentMatch) -> Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| {
+            left.segment
+                .normalized_path
+                .cmp(&right.segment.normalized_path)
+        })
+        .then_with(|| left.segment.segment_id.cmp(&right.segment.segment_id))
+}
+
 fn compare_score_source(left: &SearchGraphMatch, right: &SearchGraphMatch) -> Ordering {
     right
         .score
@@ -1936,13 +2034,6 @@ pub enum VaultSearchError {
         /// Source error.
         #[source]
         source: tao_sdk_storage::FilesRepositoryError,
-    },
-    /// Search index repository failed.
-    #[error("search index query failed: {source}")]
-    SearchIndex {
-        /// Source error.
-        #[source]
-        source: tao_sdk_storage::SearchIndexRepositoryError,
     },
     /// Unified search segment repository failed.
     #[error("search segment query failed: {source}")]

@@ -12,7 +12,6 @@ mod links;
 mod properties;
 mod render_cache;
 mod search_aliases;
-mod search_index;
 mod search_segments;
 mod tasks;
 mod transaction;
@@ -38,12 +37,9 @@ pub use render_cache::{
 pub use search_aliases::{
     SearchAliasInput, SearchAliasMatch, SearchAliasRepository, SearchAliasRepositoryError,
 };
-pub use search_index::{
-    SearchIndexRecord, SearchIndexRecordInput, SearchIndexRepository, SearchIndexRepositoryError,
-};
 pub use search_segments::{
-    SearchSegmentInput, SearchSegmentMatch, SearchSegmentQuery, SearchSegmentRepository,
-    SearchSegmentRepositoryError,
+    SearchSegmentCandidate, SearchSegmentInput, SearchSegmentMatch, SearchSegmentQuery,
+    SearchSegmentRepository, SearchSegmentRepositoryError,
 };
 pub use tasks::{TaskRecord, TaskRecordInput, TaskWithPath, TasksRepository, TasksRepositoryError};
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
@@ -81,6 +77,10 @@ pub const MIGRATION_0007_SQL: &str =
 pub const MIGRATION_0008_ID: &str = "0008_search_segments";
 /// Unified search segment and alias schema SQL payload.
 pub const MIGRATION_0008_SQL: &str = include_str!("../migrations/0008_search_segments.sql");
+/// Legacy search index retirement migration identifier.
+pub const MIGRATION_0009_ID: &str = "0009_drop_search_index";
+/// Legacy search index retirement SQL payload.
+pub const MIGRATION_0009_SQL: &str = include_str!("../migrations/0009_drop_search_index.sql");
 
 const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -99,7 +99,7 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-const MIGRATIONS: [Migration; 8] = [
+const MIGRATIONS: [Migration; 9] = [
     Migration {
         id: MIGRATION_0001_ID,
         sql: MIGRATION_0001_SQL,
@@ -131,6 +131,10 @@ const MIGRATIONS: [Migration; 8] = [
     Migration {
         id: MIGRATION_0008_ID,
         sql: MIGRATION_0008_SQL,
+    },
+    Migration {
+        id: MIGRATION_0009_ID,
+        sql: MIGRATION_0009_SQL,
     },
 ];
 
@@ -551,8 +555,8 @@ mod tests {
     use super::{
         MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
         MIGRATION_0005_ID, MIGRATION_0006_ID, MIGRATION_0007_ID, MIGRATION_0008_ID,
-        MigrationRunnerError, apply_initial_schema, known_migrations, migration_checksum,
-        preflight_migrations, run_migrations,
+        MIGRATION_0009_ID, MigrationRunnerError, apply_initial_schema, known_migrations,
+        migration_checksum, preflight_migrations, run_migrations,
     };
 
     #[test]
@@ -577,7 +581,6 @@ mod tests {
             "bases",
             "render_cache",
             "index_state",
-            "search_index",
             "tasks",
             "search_segments",
             "search_segments_fts",
@@ -628,7 +631,8 @@ mod tests {
                 MIGRATION_0005_ID.to_string(),
                 MIGRATION_0006_ID.to_string(),
                 MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string()
+                MIGRATION_0008_ID.to_string(),
+                MIGRATION_0009_ID.to_string()
             ]
         );
         assert!(report.skipped.is_empty());
@@ -743,7 +747,8 @@ mod tests {
                 MIGRATION_0005_ID.to_string(),
                 MIGRATION_0006_ID.to_string(),
                 MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string()
+                MIGRATION_0008_ID.to_string(),
+                MIGRATION_0009_ID.to_string()
             ]
         );
         assert!(first.skipped.is_empty());
@@ -758,7 +763,8 @@ mod tests {
                 MIGRATION_0005_ID.to_string(),
                 MIGRATION_0006_ID.to_string(),
                 MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string()
+                MIGRATION_0008_ID.to_string(),
+                MIGRATION_0009_ID.to_string()
             ]
         );
     }

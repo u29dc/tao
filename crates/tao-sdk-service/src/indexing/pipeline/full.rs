@@ -66,7 +66,6 @@ impl FullIndexService {
         let mut file_id_by_path = HashMap::with_capacity(prepared_entries.len());
         let mut markdown_docs = Vec::new();
         let mut base_records = Vec::new();
-        let mut search_records = Vec::new();
 
         for prepared in prepared_entries {
             file_id_by_path.insert(
@@ -80,15 +79,11 @@ impl FullIndexService {
             if let Some(base_record) = prepared.base_record {
                 base_records.push(base_record);
             }
-            if let Some(search_record) = prepared.search_record {
-                search_records.push(search_record);
-            }
         }
 
         markdown_docs.sort_by(|left, right| left.source_path.cmp(&right.source_path));
         file_records.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
         base_records.sort_by(|left, right| left.base_id.cmp(&right.base_id));
-        search_records.sort_by(|left, right| left.file_id.cmp(&right.file_id));
 
         let mut property_records = markdown_docs
             .iter()
@@ -143,7 +138,6 @@ impl FullIndexService {
                  DELETE FROM properties;\
                  DELETE FROM bases;\
                  DELETE FROM render_cache;\
-                 DELETE FROM search_index;\
                  DELETE FROM tasks;\
                  DELETE FROM files;",
             )
@@ -156,7 +150,6 @@ impl FullIndexService {
         upsert_tasks_batch(&transaction, &task_records)?;
         insert_links_batch(&transaction, &link_records)?;
         upsert_bases_batch(&transaction, &base_records)?;
-        upsert_search_index_batch(&transaction, &search_records)?;
         let search_corpus = crate::SearchCorpusService
             .rebuild_in_transaction(&transaction, case_policy)
             .map_err(|source| FullIndexError::RebuildSearchCorpus {

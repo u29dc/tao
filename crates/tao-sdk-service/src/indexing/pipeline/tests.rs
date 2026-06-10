@@ -16,7 +16,7 @@ use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CasePolicy, CheckpointedIndexService,
     CoalescedBatchIndexService, ConsistencyIssueKind, FullIndexService, IncrementalIndexService,
     IndexConsistencyChecker, IndexSelfHealService, LINK_RESOLUTION_VERSION_STATE_KEY,
-    ReconciliationScannerService, StaleCleanupService,
+    ReconciliationScannerService, SearchCorpusRefreshMode, StaleCleanupService,
 };
 
 #[test]
@@ -1033,11 +1033,26 @@ fn coalesced_batch_apply_deduplicates_events_and_respects_batch_size() {
     assert_eq!(result.batches_applied, 2);
     assert_eq!(result.upserted_files, 2);
     assert!(result.search_segments_rebuilt);
+    assert_eq!(
+        result.search_corpus_refresh,
+        SearchCorpusRefreshMode::Partial
+    );
 
     let corpus = crate::SearchCorpusService
         .status(&connection)
         .expect("inspect search corpus");
     assert!(!corpus.search_index_stale);
+    let a_record = FilesRepository::get_by_normalized_path(&connection, "notes/a.md")
+        .expect("get changed file")
+        .expect("changed file exists");
+    let changed_doc_segments: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM search_segments WHERE file_id = ?1 AND surface = 'docs' AND body_text LIKE '%changed%'",
+            [&a_record.file_id],
+            |row| row.get(0),
+        )
+        .expect("count changed doc segments");
+    assert_eq!(changed_doc_segments, 1);
 }
 
 #[test]

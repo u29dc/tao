@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::{
     CURRENT_LINK_RESOLUTION_VERSION, FullIndexService, LINK_RESOLUTION_VERSION_STATE_KEY,
-    ReconciliationScanMode, ReconciliationScannerService, SearchCorpusService,
+    ReconciliationScanMode, ReconciliationScannerService, SearchCorpusRefreshMode,
+    SearchCorpusService,
 };
 
 const DEFAULT_MAX_BATCH_SIZE: usize = 128;
@@ -90,6 +91,8 @@ pub struct IndexRefreshOutcome {
     pub removed_files: u64,
     /// Whether the derived search corpus was rebuilt.
     pub search_segments_rebuilt: bool,
+    /// Derived search corpus refresh mode.
+    pub search_corpus_refresh: SearchCorpusRefreshMode,
 }
 
 /// Service-level owner for index freshness policy.
@@ -97,6 +100,31 @@ pub struct IndexRefreshOutcome {
 pub struct IndexRefreshService;
 
 impl IndexRefreshService {
+    /// Inspect cached index health without scanning the vault filesystem.
+    pub fn inspect_cached(
+        &self,
+        connection: &Connection,
+    ) -> Result<IndexRefreshStatus, IndexRefreshError> {
+        let search_status = SearchCorpusService.status(connection).map_err(|source| {
+            IndexRefreshError::SearchCorpus {
+                source: Box::new(source),
+            }
+        })?;
+        let rebuild_reason = if index_requires_full_rebuild(connection)? {
+            Some(REASON_LINK_RESOLUTION_VERSION_MISMATCH)
+        } else {
+            None
+        };
+        let drift_paths = u64::from(rebuild_reason.is_some() || search_status.search_index_stale);
+
+        Ok(IndexRefreshStatus {
+            drift_paths,
+            rebuild_reason,
+            search_index_stale: search_status.search_index_stale,
+            would_rebuild_search_index: search_status.would_rebuild_search_index,
+        })
+    }
+
     /// Inspect index freshness without mutating state.
     pub fn inspect(
         &self,
@@ -160,6 +188,7 @@ impl IndexRefreshService {
                 upserted_files: rebuild.indexed_files,
                 removed_files: 0,
                 search_segments_rebuilt: true,
+                search_corpus_refresh: SearchCorpusRefreshMode::Full,
             });
         }
 
@@ -182,7 +211,9 @@ impl IndexRefreshService {
                 batches_applied: reconcile.batches_applied,
                 upserted_files: reconcile.upserted_files,
                 removed_files: reconcile.removed_files,
-                search_segments_rebuilt: reconcile.drift_paths > 0,
+                search_segments_rebuilt: reconcile.search_corpus_refresh
+                    != SearchCorpusRefreshMode::None,
+                search_corpus_refresh: reconcile.search_corpus_refresh,
             });
         }
 
@@ -200,6 +231,7 @@ impl IndexRefreshService {
                 upserted_files: 0,
                 removed_files: 0,
                 search_segments_rebuilt: true,
+                search_corpus_refresh: SearchCorpusRefreshMode::Full,
             });
         }
 
@@ -211,6 +243,7 @@ impl IndexRefreshService {
             upserted_files: 0,
             removed_files: 0,
             search_segments_rebuilt: false,
+            search_corpus_refresh: SearchCorpusRefreshMode::None,
         })
     }
 }

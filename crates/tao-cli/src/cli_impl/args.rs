@@ -21,7 +21,7 @@ pub(crate) enum Commands {
     /// Return public tool registry metadata.
     Tools(ToolsArgs),
     /// Return machine-oriented runtime readiness.
-    Health(VaultPathArgs),
+    Health(HealthArgs),
     /// Return effective configuration.
     Config {
         #[command(subcommand)]
@@ -198,6 +198,19 @@ pub(crate) struct VaultPathArgs {
     /// Optional sqlite database file path override.
     #[arg(long)]
     pub(crate) db_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub(crate) struct HealthArgs {
+    /// Optional absolute vault root path. Falls back to config/env defaults.
+    #[arg(long)]
+    pub(crate) vault_root: Option<String>,
+    /// Optional sqlite database file path override.
+    #[arg(long)]
+    pub(crate) db_path: Option<String>,
+    /// Scan the vault filesystem to report precise reconciliation drift.
+    #[arg(long, default_value_t = false)]
+    pub(crate) deep: bool,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -623,6 +636,12 @@ pub(crate) struct DaemonStopAllArgs {
 }
 
 impl VaultPathArgs {
+    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
+    }
+}
+
+impl HealthArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }

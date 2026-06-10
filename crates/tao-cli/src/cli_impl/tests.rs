@@ -11,10 +11,10 @@ use std::sync::{Mutex, OnceLock};
 use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CliContractError,
     CommandResult, Commands, DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs,
-    DaemonStopAllArgs, DocCommands, ExitKind, LINK_RESOLUTION_VERSION_STATE_KEY, QueryArgs,
-    RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs, classify_cli_error,
-    daemon_execution_policy, derive_daemon_socket_for_vault, dispatch, dispatch_with_runtime,
-    handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
+    DaemonStopAllArgs, DocCommands, ExitKind, HealthArgs, LINK_RESOLUTION_VERSION_STATE_KEY,
+    QueryArgs, RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs,
+    classify_cli_error, daemon_execution_policy, derive_daemon_socket_for_vault, dispatch,
+    dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
     maybe_render_streaming_output, prepare_daemon_socket_path, read_bounded_bytes, registry,
     render_error_output, render_output, resolve_command_vault_paths, resolve_daemon_socket_for_cli,
     run_from_args, runtime_cache_key, update_daemon_command_cache,
@@ -22,6 +22,7 @@ use super::{
 use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
 use rusqlite::Connection;
 use serde_json::Value as JsonValue;
+use tao_sdk_properties::MAX_FRONT_MATTER_BYTES;
 use tao_sdk_storage::{
     FilesRepository, IndexStateRecordInput, IndexStateRepository, LinkRecordInput, LinksRepository,
 };
@@ -211,6 +212,12 @@ fn validate_markdown_frontmatter_cases() {
             "---\ntitle: Still open\n# Body\n",
         )
         .expect("write unclosed note");
+        let oversized_value = "a".repeat(MAX_FRONT_MATTER_BYTES + 1);
+        fs::write(
+            vault_root.join("notes/oversized.md"),
+            format!("---\ntitle: {oversized_value}\n---\n# Oversized\n"),
+        )
+        .expect("write oversized note");
 
         for path in ["notes/dated.md", "notes/missing.md"] {
             let output = validate_output(&vault_root, path, false);
@@ -268,6 +275,24 @@ fn validate_markdown_frontmatter_cases() {
             .and_then(JsonValue::as_str)
             .expect("unclosed diagnostic message");
         assert!(unclosed_message.contains("front matter fence is not closed"));
+
+        let oversized = validate_output(&vault_root, "notes/oversized.md", false);
+        let oversized_diagnostic = oversized
+            .get("data")
+            .and_then(|data| data.get("diagnostics"))
+            .and_then(JsonValue::as_array)
+            .and_then(|diagnostics| diagnostics.first())
+            .expect("oversized diagnostic");
+        assert_eq!(
+            oversized_diagnostic.get("code").and_then(JsonValue::as_str),
+            Some("frontmatter.too_large")
+        );
+        assert!(
+            oversized_diagnostic
+                .get("message")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|message| message.contains("front matter exceeds"))
+        );
     });
 }
 
@@ -1636,11 +1661,85 @@ fn vault_reindex_dry_run_reports_missing_search_corpus_without_writing() {
                 .and_then(JsonValue::as_bool),
             Some(false)
         );
+        assert_eq!(
+            data.get("search_corpus_refresh")
+                .and_then(JsonValue::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            data.get("scan_mode").and_then(JsonValue::as_str),
+            Some("content_hash")
+        );
 
         let segments_after_dry_run: u64 = connection
             .query_row("SELECT COUNT(*) FROM search_segments", [], |row| row.get(0))
             .expect("count segments after dry-run");
         assert_eq!(segments_after_dry_run, 0);
+    });
+}
+
+#[test]
+fn vault_reindex_reports_partial_search_corpus_refresh_for_note_edit() {
+    with_temp_cwd(|| {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let vault_root = tempdir.path().join("vault");
+        seed_search_fixture(&vault_root);
+        open_and_reindex_fixture(&vault_root);
+
+        let contact_path = vault_root.join("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md");
+        let mut contact = fs::read_to_string(&contact_path).expect("read contact");
+        contact.push_str("\nUnique partial refresh token: heliotrope-reindex-check\n");
+        fs::write(&contact_path, contact).expect("update contact");
+
+        let reindex = Cli::parse_from([
+            "tao",
+            "vault",
+            "reindex",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+        ]);
+        let output = render_output(
+            reindex.json,
+            &dispatch(reindex.command).expect("dispatch reindex"),
+        )
+        .expect("render reindex");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse reindex");
+        let data = envelope.get("data").expect("data");
+        assert_eq!(
+            data.get("search_corpus_refresh")
+                .and_then(JsonValue::as_str),
+            Some("partial")
+        );
+        assert_eq!(
+            data.get("search_segments_rebuilt")
+                .and_then(JsonValue::as_bool),
+            Some(true)
+        );
+
+        let search = Cli::parse_from([
+            "tao",
+            "search",
+            "heliotrope-reindex-check",
+            "--vault-root",
+            vault_root.to_string_lossy().as_ref(),
+            "--limit",
+            "5",
+        ]);
+        let output = render_output(
+            search.json,
+            &dispatch(search.command).expect("dispatch search"),
+        )
+        .expect("render search");
+        let envelope: JsonValue = serde_json::from_str(&output).expect("parse search");
+        let candidates = envelope
+            .get("data")
+            .and_then(|data| data.get("candidates"))
+            .and_then(JsonValue::as_array)
+            .expect("candidates");
+        assert!(candidates.iter().any(|candidate| {
+            candidate.get("path").and_then(JsonValue::as_str)
+                == Some("WORK/013-RELATIONS/013-CON-contacts/jordan_hart.md")
+        }));
     });
 }
 
@@ -4057,7 +4156,7 @@ fn graph_outgoing_normalizes_note_path_input_before_lookup() {
 }
 
 #[test]
-fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
+fn deep_health_reports_index_lag_from_reconciliation_drift() {
     with_temp_cwd(|| {
         let tempdir = tempfile::tempdir().expect("create tempdir");
         let vault_root = tempdir.path().join("vault");
@@ -4088,6 +4187,7 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
             "health",
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
+            "--deep",
         ]);
         let health_output = render_output(
             health.json,
@@ -4110,6 +4210,14 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
                 .and_then(|stats| stats.get("index_lag"))
                 .and_then(JsonValue::as_u64),
             Some(1)
+        );
+        assert_eq!(
+            health_payload
+                .get("data")
+                .and_then(|data| data.get("stats"))
+                .and_then(|stats| stats.get("scan_mode"))
+                .and_then(JsonValue::as_str),
+            Some("deep_metadata")
         );
         assert_eq!(
             health_payload
@@ -4147,7 +4255,14 @@ fn health_and_vault_stats_report_index_lag_from_reconciliation_drift() {
                 .get("data")
                 .and_then(|data| data.get("index_lag"))
                 .and_then(JsonValue::as_u64),
-            Some(1)
+            Some(0)
+        );
+        assert_eq!(
+            stats_payload
+                .get("data")
+                .and_then(|data| data.get("scan_mode"))
+                .and_then(JsonValue::as_str),
+            Some("cached")
         );
         assert_eq!(
             stats_payload
@@ -4231,6 +4346,14 @@ fn health_and_vault_stats_report_stale_link_resolution_version() {
                 .and_then(|stats| stats.get("index_lag"))
                 .and_then(JsonValue::as_u64),
             Some(1)
+        );
+        assert_eq!(
+            health_payload
+                .get("data")
+                .and_then(|data| data.get("stats"))
+                .and_then(|stats| stats.get("scan_mode"))
+                .and_then(JsonValue::as_str),
+            Some("cached")
         );
         assert_eq!(
             health_payload
@@ -4505,6 +4628,7 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
             "health",
             "--vault-root",
             vault_root.to_string_lossy().as_ref(),
+            "--deep",
         ]);
         let health_output = render_output(
             health.json,
@@ -4519,6 +4643,14 @@ fn vault_reindex_performs_full_rebuild_when_file_paths_are_inconsistent() {
                 .and_then(|stats| stats.get("index_lag"))
                 .and_then(JsonValue::as_u64),
             Some(1)
+        );
+        assert_eq!(
+            health_payload
+                .get("data")
+                .and_then(|data| data.get("stats"))
+                .and_then(|stats| stats.get("scan_mode"))
+                .and_then(JsonValue::as_str),
+            Some("deep_metadata")
         );
 
         let reindex_output = render_output(
@@ -4733,9 +4865,10 @@ fn daemon_stop_all_prunes_stale_socket_files() {
 
 #[test]
 fn daemon_execution_policy_routes_diagnostics_reads_and_mutations() {
-    let health = Commands::Health(VaultPathArgs {
+    let health = Commands::Health(HealthArgs {
         vault_root: Some("/tmp".to_string()),
         db_path: None,
+        deep: false,
     });
     assert_eq!(
         daemon_execution_policy(&health),
@@ -5188,9 +5321,10 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
         ]);
         dispatch(reindex.command).expect("reindex vault");
 
-        let health_command = Commands::Health(VaultPathArgs {
+        let health_command = Commands::Health(HealthArgs {
             vault_root: Some(vault_root.to_string_lossy().to_string()),
             db_path: None,
+            deep: true,
         });
         let resolved = resolve_command_vault_paths(&health_command)
             .expect("resolve health command")
@@ -5278,6 +5412,14 @@ fn health_in_daemon_mode_is_observational_and_reports_runtime_state() {
                 .and_then(|stats| stats.get("index_lag"))
                 .and_then(JsonValue::as_u64),
             Some(1)
+        );
+        assert_eq!(
+            second
+                .args
+                .get("stats")
+                .and_then(|stats| stats.get("scan_mode"))
+                .and_then(JsonValue::as_str),
+            Some("deep_metadata")
         );
         assert_eq!(
             second

@@ -14,14 +14,13 @@ use tao_sdk_links::{
 };
 use tao_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
 use tao_sdk_properties::{
-    FrontMatterStatus, PropertyProjectionError, TypedPropertyValue, extract_front_matter,
-    project_typed_properties,
+    FrontMatterStatus, MAX_FRONT_MATTER_DEPTH, PropertyProjectionError, TypedPropertyValue,
+    extract_front_matter, project_typed_properties,
 };
 use tao_sdk_storage::{
     BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
     IndexStateRepository, LinkRecordInput, LinkWithPaths, PropertiesRepository,
-    PropertyRecordInput, SearchIndexRecordInput, SearchIndexRepository, TaskRecordInput,
-    TasksRepository,
+    PropertyRecordInput, TaskRecordInput, TasksRepository,
 };
 use tao_sdk_vault::{
     CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
@@ -53,7 +52,7 @@ pub use errors::{
 pub use full::{FullIndexResult, FullIndexService};
 pub use incremental::{
     CoalescedBatchIndexResult, CoalescedBatchIndexService, IncrementalIndexResult,
-    IncrementalIndexService, StaleCleanupResult, StaleCleanupService,
+    IncrementalIndexService, SearchCorpusRefreshMode, StaleCleanupResult, StaleCleanupService,
 };
 pub use reconcile_scan::{
     ReconciliationScanMode, ReconciliationScanResult, ReconciliationScannerService,
@@ -76,7 +75,6 @@ struct PreparedIndexEntry {
     file_record: FileRecordInput,
     markdown_doc: Option<MarkdownIndexDocument>,
     base_record: Option<BaseRecordInput>,
-    search_record: Option<SearchIndexRecordInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -392,61 +390,6 @@ DO UPDATE SET
     Ok(())
 }
 
-fn upsert_search_index_batch(
-    connection: &Connection,
-    records: &[SearchIndexRecordInput],
-) -> Result<(), FullIndexError> {
-    let mut statement = connection
-        .prepare_cached(
-            r#"
-INSERT INTO search_index (
-  file_id,
-  normalized_path,
-  normalized_path_lc,
-  title_lc,
-  content_lc
-)
-VALUES (?1, ?2, ?3, ?4, ?5)
-ON CONFLICT(file_id)
-DO UPDATE SET
-  normalized_path = excluded.normalized_path,
-  normalized_path_lc = excluded.normalized_path_lc,
-  title_lc = excluded.title_lc,
-  content_lc = excluded.content_lc,
-  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-"#,
-        )
-        .map_err(|source| FullIndexError::ExecuteSql {
-            operation: "prepare_bulk_upsert_search_index",
-            source: Box::new(source),
-        })?;
-
-    for record in records {
-        statement
-            .execute(params![
-                record.file_id,
-                record.normalized_path,
-                record.normalized_path_lc,
-                record.title_lc,
-                record.content_lc
-            ])
-            .map_err(|source| FullIndexError::ExecuteSql {
-                operation: "bulk_upsert_search_index",
-                source: Box::new(source),
-            })?;
-    }
-
-    Ok(())
-}
-
-fn title_from_normalized_path(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| path.to_string())
-}
-
 fn build_property_records(
     file_id: &str,
     source_path: &str,
@@ -730,6 +673,19 @@ fn collect_frontmatter_links(
     path: &str,
     links: &mut Vec<IndexedWikiLink>,
 ) {
+    collect_frontmatter_links_at_depth(value, path, links, 0);
+}
+
+fn collect_frontmatter_links_at_depth(
+    value: &serde_yaml::Value,
+    path: &str,
+    links: &mut Vec<IndexedWikiLink>,
+    depth: usize,
+) {
+    if depth > MAX_FRONT_MATTER_DEPTH {
+        return;
+    }
+
     match value {
         serde_yaml::Value::String(raw) => {
             for link in extract_wikilinks(raw) {
@@ -747,7 +703,7 @@ fn collect_frontmatter_links(
                 } else {
                     format!("{path}[{index}]")
                 };
-                collect_frontmatter_links(item, &nested_path, links);
+                collect_frontmatter_links_at_depth(item, &nested_path, links, depth + 1);
             }
         }
         serde_yaml::Value::Mapping(mapping) => {
@@ -765,11 +721,11 @@ fn collect_frontmatter_links(
                 } else {
                     format!("{path}.{key_label}")
                 };
-                collect_frontmatter_links(nested, &nested_path, links);
+                collect_frontmatter_links_at_depth(nested, &nested_path, links, depth + 1);
             }
         }
         serde_yaml::Value::Tagged(tagged) => {
-            collect_frontmatter_links(&tagged.value, path, links);
+            collect_frontmatter_links_at_depth(&tagged.value, path, links, depth + 1);
         }
         serde_yaml::Value::Null | serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {}
     }
@@ -827,13 +783,6 @@ fn build_prepared_index_entry(
         heading_slugs.sort();
         heading_slugs.dedup();
         let block_ids = extract_block_ids(&parsed.body);
-        let search_record = SearchIndexRecordInput {
-            file_id: file_id.clone(),
-            normalized_path: entry.normalized.clone(),
-            normalized_path_lc: entry.normalized.to_lowercase(),
-            title_lc: title_from_normalized_path(&entry.normalized).to_lowercase(),
-            content_lc: markdown.to_lowercase(),
-        };
         let markdown_doc = MarkdownIndexDocument {
             file_id,
             source_path: entry.normalized.clone(),
@@ -848,7 +797,6 @@ fn build_prepared_index_entry(
             file_record,
             markdown_doc: Some(markdown_doc),
             base_record: None,
-            search_record: Some(search_record),
         });
     }
 
@@ -873,7 +821,6 @@ fn build_prepared_index_entry(
                 file_id,
                 config_json,
             }),
-            search_record: None,
         });
     }
 
@@ -881,7 +828,6 @@ fn build_prepared_index_entry(
         file_record,
         markdown_doc: None,
         base_record: None,
-        search_record: None,
     })
 }
 

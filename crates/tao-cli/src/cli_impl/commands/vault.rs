@@ -25,7 +25,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
         VaultCommands::Stats(args) => {
             let resolved = args.resolve()?;
             let (snapshot, runtime_state) =
-                super::health::load_cli_health_snapshot(&resolved, runtime)
+                super::health::load_cli_health_snapshot(&resolved, runtime, false)
                     .map_err(|source| anyhow!("vault stats failed: {source}"))?;
             Ok(CommandResult {
                 command: "vault.stats".to_string(),
@@ -37,6 +37,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     "db_healthy": snapshot.db_healthy,
                     "db_migrations": snapshot.db_migrations,
                     "index_lag": snapshot.index_lag,
+                    "scan_mode": "cached",
                     "watcher_status": snapshot.watcher_status,
                     "last_index_updated_at": snapshot.last_index_updated_at,
                     "runtime": runtime_state,
@@ -112,6 +113,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                         "mode": mode,
                         "reason": refresh.rebuild_reason.map(|reason| reason.to_string()),
                         "dry_run": true,
+                        "scan_mode": "content_hash",
                         "would_write": true,
                         "indexed_files": totals.indexed_files,
                         "markdown_files": totals.markdown_files,
@@ -126,6 +128,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                             || refresh.rebuild_reason.is_some()
                             || refresh.drift_paths > 0,
                         "search_segments_rebuilt": false,
+                        "search_corpus_refresh": "none",
                         "drift_paths": refresh.drift_paths,
                         "batches_applied": 0_u64,
                         "upserted_files": 0_u64,
@@ -142,6 +145,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 removed_files,
                 totals,
                 search_segments_rebuilt,
+                search_corpus_refresh,
             ) = with_connection(runtime, &resolved, |connection| {
                 let outcome = IndexRefreshService
                     .refresh(
@@ -170,6 +174,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     outcome.removed_files,
                     totals,
                     outcome.search_segments_rebuilt,
+                    outcome.search_corpus_refresh.as_str(),
                 ))
             })?;
             Ok(CommandResult {
@@ -178,6 +183,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 args: serde_json::json!({
                     "mode": mode,
                     "reason": reason,
+                    "scan_mode": "content_hash",
                     "indexed_files": totals.indexed_files,
                     "markdown_files": totals.markdown_files,
                     "links_total": totals.links_total,
@@ -189,6 +195,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     "search_index_stale": false,
                     "would_rebuild_search_index": false,
                     "search_segments_rebuilt": search_segments_rebuilt,
+                    "search_corpus_refresh": search_corpus_refresh,
                     "drift_paths": drift_paths,
                     "batches_applied": batches_applied,
                     "upserted_files": upserted_files,

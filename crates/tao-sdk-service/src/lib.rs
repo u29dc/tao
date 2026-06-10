@@ -38,7 +38,8 @@ pub use indexing::{
     IndexConsistencyError, IndexConsistencyIssue, IndexConsistencyReport, IndexSelfHealError,
     IndexSelfHealResult, IndexSelfHealService, LINK_RESOLUTION_VERSION_STATE_KEY,
     ReconciliationScanError, ReconciliationScanMode, ReconciliationScanResult,
-    ReconciliationScannerService, StaleCleanupError, StaleCleanupResult, StaleCleanupService,
+    ReconciliationScannerService, SearchCorpusRefreshMode, StaleCleanupError, StaleCleanupResult,
+    StaleCleanupService,
 };
 pub use ingest::{IngestedMarkdownNote, MarkdownIngestError, MarkdownIngestPipeline};
 #[cfg(test)]

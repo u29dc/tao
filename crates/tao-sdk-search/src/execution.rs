@@ -52,9 +52,10 @@ pub fn execute_projected_query(
             r#"
 WITH matches AS (
   SELECT 1
-  FROM search_index si
-  JOIN search_index_fts ON search_index_fts.rowid = si.rowid
-  WHERE search_index_fts MATCH ?1
+  FROM search_segments s
+  JOIN search_segments_fts ON search_segments_fts.rowid = s.rowid
+  WHERE s.surface = 'docs'
+    AND search_segments_fts MATCH ?1
 )
 SELECT COUNT(*) FROM matches
 "#,
@@ -69,15 +70,16 @@ SELECT COUNT(*) FROM matches
             r#"
 WITH matches AS (
   SELECT
-    si.file_id,
-    COALESCE(si.normalized_path, si.normalized_path_lc) AS normalized_path,
-    si.updated_at AS indexed_at,
-    si.title_lc,
-    si.normalized_path_lc,
-    si.content_lc
-  FROM search_index si
-  JOIN search_index_fts ON search_index_fts.rowid = si.rowid
-  WHERE search_index_fts MATCH ?1
+    s.file_id,
+    s.normalized_path,
+    s.updated_at AS indexed_at,
+    LOWER(s.title_text) AS title_lc,
+    s.normalized_path_lc,
+    LOWER(s.body_text) AS content_lc
+  FROM search_segments s
+  JOIN search_segments_fts ON search_segments_fts.rowid = s.rowid
+  WHERE s.surface = 'docs'
+    AND search_segments_fts MATCH ?1
 ),
 scored AS (
   SELECT

@@ -25,6 +25,8 @@ pub struct ReconciliationScanResult {
     pub properties_reindexed: u64,
     /// Number of bases rebuilt by repair batches.
     pub bases_reindexed: u64,
+    /// Derived search corpus refresh mode applied by repair batches.
+    pub search_corpus_refresh: SearchCorpusRefreshMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +119,7 @@ impl ReconciliationScannerService {
             links_reindexed: 0,
             properties_reindexed: 0,
             bases_reindexed: 0,
+            search_corpus_refresh: SearchCorpusRefreshMode::None,
         })
     }
 
@@ -170,6 +173,7 @@ impl ReconciliationScannerService {
                 links_reindexed: 0,
                 properties_reindexed: 0,
                 bases_reindexed: 0,
+                search_corpus_refresh: SearchCorpusRefreshMode::None,
             });
         }
 
@@ -199,6 +203,7 @@ impl ReconciliationScannerService {
             links_reindexed: batch_result.links_reindexed,
             properties_reindexed: batch_result.properties_reindexed,
             bases_reindexed: batch_result.bases_reindexed,
+            search_corpus_refresh: batch_result.search_corpus_refresh,
         })
     }
 }

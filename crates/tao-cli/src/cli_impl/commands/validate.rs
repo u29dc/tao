@@ -103,14 +103,14 @@ fn validate_markdown_file(absolute: &Path, normalized: &str, totals: &mut Valida
         FrontMatterStatus::Missing | FrontMatterStatus::Parsed { .. } => {
             totals.valid = totals.valid.saturating_add(1);
         }
-        FrontMatterStatus::Malformed { error } => {
+        FrontMatterStatus::Malformed { code, error } => {
             totals.invalid = totals.invalid.saturating_add(1);
             let location = markdown_diagnostic_location(&markdown, &error);
             totals.diagnostics.push(diagnostic(
                 normalized,
                 "markdown",
                 "error",
-                "frontmatter.yaml_parse_failed",
+                code.as_validation_code(),
                 error,
                 location,
                 None,

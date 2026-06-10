@@ -5,6 +5,11 @@ use std::collections::{BTreeMap, HashSet};
 use serde_yaml::Value;
 use thiserror::Error;
 
+/// Maximum accepted front matter YAML payload size.
+pub const MAX_FRONT_MATTER_BYTES: usize = 128 * 1024;
+/// Maximum accepted nested YAML depth for front matter.
+pub const MAX_FRONT_MATTER_DEPTH: usize = 64;
+
 /// Front matter extraction result from markdown content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrontMatterExtraction {
@@ -24,7 +29,38 @@ pub enum FrontMatterStatus {
     /// Front matter parsed successfully.
     Parsed { value: Value },
     /// Front matter existed but could not be parsed.
-    Malformed { error: String },
+    Malformed {
+        /// Stable machine-readable error code.
+        code: FrontMatterErrorCode,
+        /// Human-readable diagnostic message.
+        error: String,
+    },
+}
+
+/// Stable front matter parse error codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontMatterErrorCode {
+    /// Opening front matter fence was not closed.
+    UnclosedFence,
+    /// YAML payload exceeded the configured byte limit.
+    TooLarge,
+    /// YAML payload exceeded the configured depth limit.
+    TooDeep,
+    /// YAML parser reported malformed content.
+    YamlParseFailed,
+}
+
+impl FrontMatterErrorCode {
+    /// Return the stable validation diagnostic code for this error.
+    #[must_use]
+    pub const fn as_validation_code(self) -> &'static str {
+        match self {
+            Self::UnclosedFence | Self::YamlParseFailed | Self::TooDeep => {
+                "frontmatter.yaml_parse_failed"
+            }
+            Self::TooLarge => "frontmatter.too_large",
+        }
+    }
 }
 
 struct MarkdownLine<'a> {
@@ -77,28 +113,35 @@ pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
     }
 
     let mut raw_lines = Vec::new();
+    let mut raw_bytes = 0usize;
     let mut cursor = opening_fence.next_start;
     while let Some(line) = next_markdown_line(markdown, cursor) {
         if line.content == "---" {
             let raw = raw_lines.join("\n");
             let body = markdown[line.next_start..].to_string();
 
-            return match serde_yaml::from_str::<Value>(&raw) {
-                Ok(value) => FrontMatterExtraction {
-                    raw: Some(raw),
-                    body,
-                    status: FrontMatterStatus::Parsed { value },
-                },
-                Err(source) => FrontMatterExtraction {
-                    raw: Some(raw),
-                    body,
-                    status: FrontMatterStatus::Malformed {
-                        error: FrontMatterError::YamlParse { source }.to_string(),
-                    },
+            return parse_front_matter_yaml(raw, body);
+        }
+
+        let separator_bytes = usize::from(!raw_lines.is_empty());
+        let next_raw_bytes = raw_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(line.content.len());
+        if next_raw_bytes > MAX_FRONT_MATTER_BYTES {
+            return FrontMatterExtraction {
+                raw: None,
+                body: markdown.to_string(),
+                status: FrontMatterStatus::Malformed {
+                    code: FrontMatterErrorCode::TooLarge,
+                    error: FrontMatterError::TooLarge {
+                        bytes: next_raw_bytes,
+                        max_bytes: MAX_FRONT_MATTER_BYTES,
+                    }
+                    .to_string(),
                 },
             };
         }
-
+        raw_bytes = next_raw_bytes;
         raw_lines.push(line.content);
         cursor = line.next_start;
     }
@@ -107,9 +150,65 @@ pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
         raw: Some(raw_lines.join("\n")),
         body: markdown.to_string(),
         status: FrontMatterStatus::Malformed {
+            code: FrontMatterErrorCode::UnclosedFence,
             error: FrontMatterError::UnclosedFence.to_string(),
         },
     }
+}
+
+fn parse_front_matter_yaml(raw: String, body: String) -> FrontMatterExtraction {
+    match serde_yaml::from_str::<Value>(&raw) {
+        Ok(value) if yaml_exceeds_max_depth(&value, MAX_FRONT_MATTER_DEPTH) => {
+            FrontMatterExtraction {
+                raw: Some(raw),
+                body,
+                status: FrontMatterStatus::Malformed {
+                    code: FrontMatterErrorCode::TooDeep,
+                    error: FrontMatterError::TooDeep {
+                        max_depth: MAX_FRONT_MATTER_DEPTH,
+                    }
+                    .to_string(),
+                },
+            }
+        }
+        Ok(value) => FrontMatterExtraction {
+            raw: Some(raw),
+            body,
+            status: FrontMatterStatus::Parsed { value },
+        },
+        Err(source) => FrontMatterExtraction {
+            raw: Some(raw),
+            body,
+            status: FrontMatterStatus::Malformed {
+                code: FrontMatterErrorCode::YamlParseFailed,
+                error: FrontMatterError::YamlParse { source }.to_string(),
+            },
+        },
+    }
+}
+
+fn yaml_exceeds_max_depth(root: &Value, max_depth: usize) -> bool {
+    let mut stack = vec![(root, 0usize)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > max_depth {
+            return true;
+        }
+        let next_depth = depth.saturating_add(1);
+        match value {
+            Value::Sequence(items) => {
+                stack.extend(items.iter().map(|item| (item, next_depth)));
+            }
+            Value::Mapping(mapping) => {
+                for (key, nested) in mapping {
+                    stack.push((key, next_depth));
+                    stack.push((nested, next_depth));
+                }
+            }
+            Value::Tagged(tagged) => stack.push((&tagged.value, next_depth)),
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    false
 }
 
 /// Normalized typed property pair.
@@ -348,6 +447,20 @@ pub enum FrontMatterError {
     /// Opening front matter fence was not closed.
     #[error("front matter fence is not closed")]
     UnclosedFence,
+    /// Front matter YAML exceeded the configured byte limit.
+    #[error("front matter exceeds {max_bytes} byte limit ({bytes} bytes)")]
+    TooLarge {
+        /// Observed YAML byte count at rejection time.
+        bytes: usize,
+        /// Maximum allowed YAML byte count.
+        max_bytes: usize,
+    },
+    /// Front matter YAML exceeded the configured nesting depth limit.
+    #[error("front matter exceeds {max_depth} level depth limit")]
+    TooDeep {
+        /// Maximum allowed YAML depth.
+        max_depth: usize,
+    },
     /// YAML parser reported malformed content.
     #[error("yaml parse failed: {source}")]
     YamlParse {
@@ -362,7 +475,8 @@ mod tests {
     use serde_yaml::Value;
 
     use super::{
-        FrontMatterStatus, PropertyProjectionError, TypedPropertyValue, extract_front_matter,
+        FrontMatterErrorCode, FrontMatterStatus, MAX_FRONT_MATTER_BYTES, MAX_FRONT_MATTER_DEPTH,
+        PropertyProjectionError, TypedPropertyValue, extract_front_matter,
         project_typed_properties,
     };
 
@@ -409,13 +523,65 @@ mod tests {
         let extraction = extract_front_matter(markdown);
 
         match extraction.status {
-            FrontMatterStatus::Malformed { error } => {
+            FrontMatterStatus::Malformed { error, .. } => {
                 assert!(error.contains("yaml parse failed"));
             }
             other => panic!("expected malformed status, got {other:?}"),
         }
 
         assert_eq!(extraction.body, "# Body");
+    }
+
+    #[test]
+    fn extract_rejects_oversized_front_matter_without_raw_allocation() {
+        let oversized_value = "a".repeat(MAX_FRONT_MATTER_BYTES + 1);
+        let markdown = format!("---\ntitle: {oversized_value}\n---\n# Body");
+        let extraction = extract_front_matter(&markdown);
+
+        match extraction.status {
+            FrontMatterStatus::Malformed { code, error } => {
+                assert_eq!(code, FrontMatterErrorCode::TooLarge);
+                assert!(error.contains("front matter exceeds"));
+            }
+            other => panic!("expected oversized malformed status, got {other:?}"),
+        }
+        assert_eq!(extraction.raw, None);
+        assert_eq!(extraction.body, markdown);
+    }
+
+    #[test]
+    fn extract_accepts_front_matter_at_size_limit() {
+        let prefix = "title: ";
+        let value = "a".repeat(MAX_FRONT_MATTER_BYTES - prefix.len());
+        let markdown = format!("---\n{prefix}{value}\n---\n# Body");
+        let extraction = extract_front_matter(&markdown);
+
+        assert!(matches!(
+            extraction.status,
+            FrontMatterStatus::Parsed { .. }
+        ));
+    }
+
+    #[test]
+    fn extract_rejects_deeply_nested_front_matter() {
+        let mut yaml = "value: ".to_string();
+        for _ in 0..=MAX_FRONT_MATTER_DEPTH + 1 {
+            yaml.push('[');
+        }
+        yaml.push_str("leaf");
+        for _ in 0..=MAX_FRONT_MATTER_DEPTH + 1 {
+            yaml.push(']');
+        }
+        let markdown = format!("---\n{yaml}\n---\n# Body");
+        let extraction = extract_front_matter(&markdown);
+
+        match extraction.status {
+            FrontMatterStatus::Malformed { code, error } => {
+                assert_eq!(code, FrontMatterErrorCode::TooDeep);
+                assert!(error.contains("depth limit"));
+            }
+            other => panic!("expected depth malformed status, got {other:?}"),
+        }
     }
 
     #[test]

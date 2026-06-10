@@ -452,112 +452,31 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
             let resolved = args.resolve()?;
             let from = normalize_relative_note_path_arg(&args.from, "--from")?;
             let to = normalize_relative_note_path_arg(&args.to, "--to")?;
-            let (found, explored_nodes, path) = with_connection(runtime, &resolved, |connection| {
-                let Some(from_file) = FilesRepository::get_by_normalized_path(connection, &from)? else {
-                    return Ok((false, 0_u32, Vec::<String>::new()));
-                };
-                let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &to)? else {
-                    return Ok((false, 0_u32, Vec::<String>::new()));
-                };
-
-                if from_file.file_id == to_file.file_id {
-                    return Ok((true, 1_u32, vec![from_file.normalized_path]));
-                }
-
-                let file_rows = FilesRepository::list_all(connection)?;
-                let mut path_by_file_id = HashMap::<String, String>::new();
-                for row in file_rows {
-                    if row.is_markdown {
-                        path_by_file_id.insert(row.file_id, row.normalized_path);
-                    }
-                }
-
-                let pairs = LinksRepository::list_resolved_pairs(connection)?;
-                let mut adjacency = HashMap::<String, Vec<String>>::new();
-                for pair in pairs {
-                    adjacency
-                        .entry(pair.source_file_id.clone())
-                        .or_default()
-                        .push(pair.target_file_id.clone());
-                    adjacency
-                        .entry(pair.target_file_id)
-                        .or_default()
-                        .push(pair.source_file_id);
-                }
-                for neighbors in adjacency.values_mut() {
-                    neighbors.sort();
-                    neighbors.dedup();
-                }
-
-                let from_id = from_file.file_id;
-                let to_id = to_file.file_id;
-                let mut queue = VecDeque::<String>::from([from_id.clone()]);
-                let mut depth_by_id = HashMap::<String, u32>::new();
-                let mut parent_by_id = HashMap::<String, String>::new();
-                depth_by_id.insert(from_id.clone(), 0);
-                let mut explored_nodes: u32 = 1;
-
-                while let Some(current) = queue.pop_front() {
-                    if current == to_id {
-                        break;
-                    }
-                    let current_depth = *depth_by_id.get(&current).unwrap_or(&0);
-                    if current_depth >= args.max_depth {
-                        continue;
-                    }
-                    if let Some(neighbors) = adjacency.get(&current) {
-                        for next in neighbors {
-                            if depth_by_id.contains_key(next) {
-                                continue;
-                            }
-                            explored_nodes = explored_nodes.saturating_add(1);
-                            if explored_nodes > args.max_nodes {
-                                return Err(anyhow!(
-                                    "graph path aborted after exploring {} nodes; increase --max-nodes",
-                                    args.max_nodes
-                                ));
-                            }
-                            depth_by_id.insert(next.clone(), current_depth + 1);
-                            parent_by_id.insert(next.clone(), current.clone());
-                            queue.push_back(next.clone());
-                        }
-                    }
-                }
-
-                if !depth_by_id.contains_key(&to_id) {
-                    return Ok((false, explored_nodes, Vec::<String>::new()));
-                }
-
-                let mut path_ids = vec![to_id.clone()];
-                let mut cursor = to_id;
-                while let Some(parent) = parent_by_id.get(&cursor).cloned() {
-                    path_ids.push(parent.clone());
-                    if parent == from_id {
-                        break;
-                    }
-                    cursor = parent;
-                }
-                path_ids.reverse();
-                let path = path_ids
-                    .into_iter()
-                    .filter_map(|file_id| path_by_file_id.get(&file_id).cloned())
-                    .collect::<Vec<_>>();
-                Ok((true, explored_nodes, path))
+            let path_result = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.shortest_path(
+                    connection,
+                    &GraphPathRequest {
+                        from_path: from.clone(),
+                        to_path: to.clone(),
+                        max_depth: args.max_depth,
+                        max_nodes: args.max_nodes,
+                    },
+                )?)
             })
             .map_err(|source| anyhow!("graph path failed: {source}"))?;
-            let edge_count = path.len().saturating_sub(1);
+            let edge_count = path_result.path.len().saturating_sub(1);
             Ok(CommandResult {
                 command: "graph.path".to_string(),
                 summary: "graph path completed".to_string(),
                 args: serde_json::json!({
                     "from": from,
                     "to": to,
-                    "found": found,
+                    "found": path_result.found,
                     "max_depth": args.max_depth,
                     "max_nodes": args.max_nodes,
-                    "explored_nodes": explored_nodes,
+                    "explored_nodes": path_result.explored_nodes,
                     "edge_count": edge_count,
-                    "path": path,
+                    "path": path_result.path,
                 }),
             })
         }

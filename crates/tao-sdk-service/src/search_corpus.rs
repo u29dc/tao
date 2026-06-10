@@ -1,6 +1,7 @@
 //! Derived unified search corpus built from canonical index tables.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 
 use rusqlite::{Connection, Transaction};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -9,8 +10,8 @@ use tao_sdk_core::note_title_from_path;
 use tao_sdk_storage::{
     BasesRepository, FileRecord, FilesRepository, IndexStateRecordInput, IndexStateRepository,
     LinkWithPaths, LinksRepository, PropertiesRepository, PropertyWithPath, SearchAliasInput,
-    SearchAliasRepository, SearchIndexRecord, SearchIndexRepository, SearchSegmentInput,
-    SearchSegmentRepository, TaskWithPath, TasksRepository,
+    SearchAliasRepository, SearchSegmentInput, SearchSegmentRepository, TaskWithPath,
+    TasksRepository,
 };
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
@@ -145,6 +146,38 @@ impl SearchCorpusService {
         self.rebuild_on_connection(transaction, case_policy)
     }
 
+    /// Refresh derived search corpus rows for selected file ids atomically.
+    pub fn refresh_files_atomic(
+        &self,
+        connection: &mut Connection,
+        file_ids: &[String],
+        case_policy: CasePolicy,
+    ) -> Result<SearchCorpusRebuildResult, SearchCorpusError> {
+        let transaction =
+            connection
+                .transaction()
+                .map_err(|source| SearchCorpusError::BeginTransaction {
+                    source: Box::new(source),
+                })?;
+        let result = self.refresh_files_on_connection(&transaction, file_ids, case_policy)?;
+        transaction
+            .commit()
+            .map_err(|source| SearchCorpusError::CommitTransaction {
+                source: Box::new(source),
+            })?;
+        Ok(result)
+    }
+
+    /// Refresh derived search corpus rows for selected file ids inside an existing transaction.
+    pub fn refresh_files_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        file_ids: &[String],
+        case_policy: CasePolicy,
+    ) -> Result<SearchCorpusRebuildResult, SearchCorpusError> {
+        self.refresh_files_on_connection(transaction, file_ids, case_policy)
+    }
+
     fn rebuild_on_connection(
         &self,
         connection: &Connection,
@@ -155,11 +188,6 @@ impl SearchCorpusService {
             FilesRepository::list_all(connection).map_err(|source| SearchCorpusError::Files {
                 source: Box::new(source),
             })?;
-        let docs = SearchIndexRepository::list_all(connection).map_err(|source| {
-            SearchCorpusError::SearchIndex {
-                source: Box::new(source),
-            }
-        })?;
         let properties =
             PropertiesRepository::list_all_with_paths(connection).map_err(|source| {
                 SearchCorpusError::Properties {
@@ -194,9 +222,9 @@ impl SearchCorpusService {
         let mut builder = SearchCorpusBuilder::default();
         for file in &files {
             builder.add_file(file)?;
-        }
-        for doc in &docs {
-            builder.add_doc(doc)?;
+            if file.is_markdown {
+                builder.add_doc_file(file)?;
+            }
         }
         for property in &properties {
             builder.add_property(property)?;
@@ -233,45 +261,164 @@ impl SearchCorpusService {
             }
         })?;
 
-        let now_unix_ms = current_unix_ms_raw()?;
-        IndexStateRepository::upsert(
-            connection,
-            &IndexStateRecordInput {
-                key: SEARCH_CORPUS_SCHEMA_VERSION_STATE_KEY.to_string(),
-                value_json: SEARCH_CORPUS_SCHEMA_VERSION.to_string(),
-            },
-        )
-        .map_err(|source| SearchCorpusError::IndexState {
-            source: Box::new(source),
-        })?;
-        IndexStateRepository::upsert(
-            connection,
-            &IndexStateRecordInput {
-                key: SEARCH_CORPUS_SOURCE_FINGERPRINT_STATE_KEY.to_string(),
-                value_json: serde_json::to_string(&source_fingerprint).map_err(|source| {
-                    SearchCorpusError::Serialize {
-                        source: Box::new(source),
-                    }
-                })?,
-            },
-        )
-        .map_err(|source| SearchCorpusError::IndexState {
-            source: Box::new(source),
-        })?;
-        IndexStateRepository::upsert(
-            connection,
-            &IndexStateRecordInput {
-                key: SEARCH_CORPUS_BUILT_AT_STATE_KEY.to_string(),
-                value_json: now_unix_ms.to_string(),
-            },
-        )
-        .map_err(|source| SearchCorpusError::IndexState {
-            source: Box::new(source),
-        })?;
+        record_search_corpus_state(connection, &source_fingerprint)?;
 
         Ok(SearchCorpusRebuildResult {
             search_segments_total: builder.segments.len() as u64,
             search_aliases_total: builder.aliases.len() as u64,
+            source_fingerprint,
+        })
+    }
+
+    fn refresh_files_on_connection(
+        &self,
+        connection: &Connection,
+        file_ids: &[String],
+        case_policy: CasePolicy,
+    ) -> Result<SearchCorpusRebuildResult, SearchCorpusError> {
+        let file_ids = file_ids
+            .iter()
+            .filter(|file_id| !file_id.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if file_ids.is_empty() {
+            let source_fingerprint = source_fingerprint(connection)?;
+            record_search_corpus_state(connection, &source_fingerprint)?;
+            let search_segments_total =
+                SearchSegmentRepository::count(connection).map_err(|source| {
+                    SearchCorpusError::SearchSegments {
+                        source: Box::new(source),
+                    }
+                })?;
+            let search_aliases_total =
+                SearchAliasRepository::count(connection).map_err(|source| {
+                    SearchCorpusError::SearchAliases {
+                        source: Box::new(source),
+                    }
+                })?;
+            return Ok(SearchCorpusRebuildResult {
+                search_segments_total,
+                search_aliases_total,
+                source_fingerprint,
+            });
+        }
+
+        for file_id in &file_ids {
+            SearchAliasRepository::delete_by_file_id(connection, file_id).map_err(|source| {
+                SearchCorpusError::SearchAliases {
+                    source: Box::new(source),
+                }
+            })?;
+            SearchSegmentRepository::delete_by_file_id(connection, file_id).map_err(|source| {
+                SearchCorpusError::SearchSegments {
+                    source: Box::new(source),
+                }
+            })?;
+        }
+
+        let files = FilesRepository::list_by_ids(connection, &file_ids).map_err(|source| {
+            SearchCorpusError::Files {
+                source: Box::new(source),
+            }
+        })?;
+        let file_by_id = files
+            .iter()
+            .map(|file| (file.file_id.clone(), file.clone()))
+            .collect::<HashMap<_, _>>();
+        let file_by_path = files
+            .iter()
+            .map(|file| (file.normalized_path.clone(), file.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut properties = Vec::new();
+        for file_id in &file_ids {
+            properties.extend(
+                PropertiesRepository::list_for_file_with_path(connection, file_id).map_err(
+                    |source| SearchCorpusError::Properties {
+                        source: Box::new(source),
+                    },
+                )?,
+            );
+        }
+        let tasks = TasksRepository::list_for_file_ids_with_paths(connection, &file_ids).map_err(
+            |source| SearchCorpusError::Tasks {
+                source: Box::new(source),
+            },
+        )?;
+        let mut link_by_id = BTreeMap::<String, LinkWithPaths>::new();
+        for link in
+            LinksRepository::list_outgoing_for_sources_with_paths(connection, &file_ids, true)
+                .map_err(|source| SearchCorpusError::Links {
+                    source: Box::new(source),
+                })?
+        {
+            link_by_id.insert(link.link_id.clone(), link);
+        }
+        for link in LinksRepository::list_incoming_for_targets_with_paths(connection, &file_ids)
+            .map_err(|source| SearchCorpusError::Links {
+                source: Box::new(source),
+            })?
+        {
+            link_by_id.insert(link.link_id.clone(), link);
+        }
+        let bases = BasesRepository::list_with_paths(connection).map_err(|source| {
+            SearchCorpusError::Bases {
+                source: Box::new(source),
+            }
+        })?;
+
+        let mut builder = SearchCorpusBuilder::default();
+        for file in &files {
+            builder.add_file(file)?;
+            if file.is_markdown {
+                builder.add_doc_file(file)?;
+            }
+        }
+        for property in &properties {
+            builder.add_property(property)?;
+        }
+        for task in &tasks {
+            builder.add_task(task)?;
+        }
+        for link in link_by_id.values() {
+            builder.add_link(link, &file_by_id)?;
+        }
+        for base in &bases {
+            if file_by_id.contains_key(&base.file_id) {
+                builder.add_base_definition(base)?;
+            }
+            builder.add_base_rows(connection, base, &file_by_path, case_policy)?;
+        }
+
+        SearchSegmentRepository::insert_many(connection, &builder.segments).map_err(|source| {
+            SearchCorpusError::SearchSegments {
+                source: Box::new(source),
+            }
+        })?;
+        SearchAliasRepository::insert_many(connection, &builder.aliases).map_err(|source| {
+            SearchCorpusError::SearchAliases {
+                source: Box::new(source),
+            }
+        })?;
+
+        let source_fingerprint = source_fingerprint(connection)?;
+        record_search_corpus_state(connection, &source_fingerprint)?;
+        let search_segments_total =
+            SearchSegmentRepository::count(connection).map_err(|source| {
+                SearchCorpusError::SearchSegments {
+                    source: Box::new(source),
+                }
+            })?;
+        let search_aliases_total = SearchAliasRepository::count(connection).map_err(|source| {
+            SearchCorpusError::SearchAliases {
+                source: Box::new(source),
+            }
+        })?;
+
+        Ok(SearchCorpusRebuildResult {
+            search_segments_total,
+            search_aliases_total,
             source_fingerprint,
         })
     }
@@ -326,41 +473,53 @@ impl SearchCorpusBuilder {
         Ok(())
     }
 
-    fn add_doc(&mut self, doc: &SearchIndexRecord) -> Result<(), SearchCorpusError> {
-        let title = note_title_from_path(&doc.normalized_path);
-        let extension = extension_for_path(&doc.normalized_path);
+    fn add_doc_file(&mut self, file: &FileRecord) -> Result<(), SearchCorpusError> {
+        let content_lc = fs::read_to_string(&file.absolute_path)
+            .map_err(|source| SearchCorpusError::ReadFile {
+                path: file.absolute_path.clone(),
+                source,
+            })?
+            .to_lowercase();
+        let title = note_title_from_path(&file.normalized_path);
+        let extension = extension_for_path(&file.normalized_path);
         let payload = json!({
-            "file_id": doc.file_id,
-            "path": doc.normalized_path,
+            "file_id": file.file_id,
+            "path": file.normalized_path,
             "title": title,
-            "indexed_at": doc.updated_at,
+            "indexed_at": file.indexed_at,
         });
-        let suffixes = long_token_suffixes(&doc.content_lc);
+        let suffixes = long_token_suffixes(&content_lc);
         let body_text = if suffixes.is_empty() {
-            doc.content_lc.clone()
+            content_lc
         } else {
-            format!("{} {}", doc.content_lc, suffixes)
+            format!("{content_lc} {suffixes}")
         };
         self.push_segment(SearchSegmentDraft {
             surface: "docs",
-            file_id: &doc.file_id,
-            path: &doc.normalized_path,
+            file_id: &file.file_id,
+            path: &file.normalized_path,
             extension: &extension,
             field: "document",
-            record_id: Some(&doc.file_id),
+            record_id: Some(&file.file_id),
             label: &title,
             weight: DOC_SEGMENT_WEIGHT,
             payload,
-            path_text: path_search_text(&doc.normalized_path),
+            path_text: path_search_text(&file.normalized_path),
             title_text: search_text_with_variants(&title),
-            alias_text: alias_search_text(&doc.normalized_path, &title),
+            alias_text: alias_search_text(&file.normalized_path, &title),
             body_text,
             property_text: String::new(),
             task_text: String::new(),
             link_text: String::new(),
             base_text: String::new(),
         })?;
-        self.add_path_aliases("docs", &doc.file_id, &doc.normalized_path, &extension, 170);
+        self.add_path_aliases(
+            "docs",
+            &file.file_id,
+            &file.normalized_path,
+            &extension,
+            170,
+        );
         Ok(())
     }
 
@@ -769,7 +928,6 @@ fn source_fingerprint(connection: &Connection) -> Result<String, SearchCorpusErr
     let mut parts = Vec::new();
     for (table, timestamp_column) in [
         ("files", "indexed_at"),
-        ("search_index", "updated_at"),
         ("properties", "updated_at"),
         ("tasks", "updated_at"),
         ("links", "created_at"),
@@ -801,6 +959,48 @@ fn scalar_count(connection: &Connection, table: &'static str) -> Result<u64, Sea
             operation: "scalar_count",
             source: Box::new(source),
         })
+}
+
+fn record_search_corpus_state(
+    connection: &Connection,
+    source_fingerprint: &str,
+) -> Result<(), SearchCorpusError> {
+    let now_unix_ms = current_unix_ms_raw()?;
+    IndexStateRepository::upsert(
+        connection,
+        &IndexStateRecordInput {
+            key: SEARCH_CORPUS_SCHEMA_VERSION_STATE_KEY.to_string(),
+            value_json: SEARCH_CORPUS_SCHEMA_VERSION.to_string(),
+        },
+    )
+    .map_err(|source| SearchCorpusError::IndexState {
+        source: Box::new(source),
+    })?;
+    IndexStateRepository::upsert(
+        connection,
+        &IndexStateRecordInput {
+            key: SEARCH_CORPUS_SOURCE_FINGERPRINT_STATE_KEY.to_string(),
+            value_json: serde_json::to_string(source_fingerprint).map_err(|source| {
+                SearchCorpusError::Serialize {
+                    source: Box::new(source),
+                }
+            })?,
+        },
+    )
+    .map_err(|source| SearchCorpusError::IndexState {
+        source: Box::new(source),
+    })?;
+    IndexStateRepository::upsert(
+        connection,
+        &IndexStateRecordInput {
+            key: SEARCH_CORPUS_BUILT_AT_STATE_KEY.to_string(),
+            value_json: now_unix_ms.to_string(),
+        },
+    )
+    .map_err(|source| SearchCorpusError::IndexState {
+        source: Box::new(source),
+    })?;
+    Ok(())
 }
 
 fn path_search_text(path: &str) -> String {
@@ -1032,12 +1232,14 @@ pub enum SearchCorpusError {
         #[source]
         source: Box<tao_sdk_storage::FilesRepositoryError>,
     },
-    /// Legacy document search index repository failed.
-    #[error("failed to read document search index for search corpus: {source}")]
-    SearchIndex {
-        /// Source error.
+    /// Markdown document content read failed while building doc segments.
+    #[error("failed to read markdown document '{path}' for search corpus: {source}")]
+    ReadFile {
+        /// Absolute path that failed.
+        path: String,
+        /// Source IO error.
         #[source]
-        source: Box<tao_sdk_storage::SearchIndexRepositoryError>,
+        source: std::io::Error,
     },
     /// Properties repository failed.
     #[error("failed to read properties for search corpus: {source}")]

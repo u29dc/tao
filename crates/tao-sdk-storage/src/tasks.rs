@@ -259,6 +259,55 @@ ORDER BY file_path ASC, line_number ASC
         .collect()
     }
 
+    /// List task rows for selected file ids with file paths in deterministic order.
+    pub fn list_for_file_ids_with_paths(
+        connection: &Connection,
+        file_ids: &[String],
+    ) -> Result<Vec<TaskWithPath>, TasksRepositoryError> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; file_ids.len()].join(", ");
+        let sql = format!(
+            r#"
+SELECT
+  task_id,
+  file_id,
+  file_path,
+  line_number,
+  state,
+  text,
+  updated_at
+FROM tasks
+WHERE file_id IN ({placeholders})
+ORDER BY file_path ASC, line_number ASC
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| TasksRepositoryError::Sql {
+                    operation: "prepare_list_for_file_ids_with_paths",
+                    source,
+                })?;
+
+        let rows = statement
+            .query_map(params_from_iter(file_ids.iter()), row_to_task_with_path)
+            .map_err(|source| TasksRepositoryError::Sql {
+                operation: "list_for_file_ids_with_paths",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| TasksRepositoryError::Sql {
+                operation: "list_for_file_ids_with_paths_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// Count task rows for one optional filter set.
     pub fn count_with_paths(
         connection: &Connection,
@@ -428,6 +477,12 @@ mod tests {
             .expect("get by file and line")
             .expect("task exists");
         assert_eq!(fetched.state, "open");
+
+        let listed_for_file =
+            TasksRepository::list_for_file_ids_with_paths(&connection, &[String::from("f1")])
+                .expect("list for file ids");
+        assert_eq!(listed_for_file.len(), 1);
+        assert_eq!(listed_for_file[0].task_id, "t1");
 
         let listed = TasksRepository::list_with_paths(&connection, None, Some("ship"), None, 10, 0)
             .expect("list with filters");

@@ -169,6 +169,12 @@ const PARAM_DRY_RUN: ToolParameter = ToolParameter {
     required: false,
     description: "Validate the operation and return the intended action without writing state.",
 };
+const PARAM_DEEP: ToolParameter = ToolParameter {
+    name: "deep",
+    type_name: "boolean",
+    required: false,
+    description: "Scan the vault filesystem to report precise reconciliation drift.",
+};
 const PARAM_RECURSIVE: ToolParameter = ToolParameter {
     name: "recursive",
     type_name: "boolean",
@@ -815,8 +821,8 @@ const TOOLS: &[ToolDefinition] = &[
         name: "health",
         command: "tao health",
         category: "system",
-        description: "Return a fresh observational vault health snapshot with actionable checks and runtime state.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH],
+        description: "Return a fast vault health snapshot with actionable checks and runtime state.",
+        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_DEEP],
         output_fields: &[
             "status",
             "checks",
@@ -1148,6 +1154,7 @@ const TOOLS: &[ToolDefinition] = &[
             "mode",
             "reason",
             "dry_run",
+            "scan_mode",
             "would_write",
             "indexed_files",
             "markdown_files",
@@ -1160,6 +1167,7 @@ const TOOLS: &[ToolDefinition] = &[
             "search_index_stale",
             "would_rebuild_search_index",
             "search_segments_rebuilt",
+            "search_corpus_refresh",
             "drift_paths",
             "batches_applied",
             "upserted_files",
@@ -1184,6 +1192,7 @@ const TOOLS: &[ToolDefinition] = &[
             "db_healthy",
             "db_migrations",
             "index_lag",
+            "scan_mode",
             "watcher_status",
             "last_index_updated_at",
             "runtime",

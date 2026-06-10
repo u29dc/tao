@@ -73,6 +73,33 @@ pub struct SearchSegmentMatch {
     pub rank_score: i64,
 }
 
+/// Lightweight indexed segment candidate returned before payload hydration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchSegmentCandidate {
+    /// Stable segment identifier.
+    pub segment_id: String,
+    /// Search surface label.
+    pub surface: String,
+    /// Owning file identifier.
+    pub file_id: String,
+    /// Owning normalized path.
+    pub normalized_path: String,
+    /// File extension.
+    pub extension: String,
+    /// Field label.
+    pub field: String,
+    /// Optional source record identifier.
+    pub record_id: Option<String>,
+    /// Human label.
+    pub label: String,
+    /// Static ranking weight.
+    pub weight: i64,
+    /// Updated timestamp.
+    pub updated_at: String,
+    /// FTS rank score converted to larger-is-better integer.
+    pub rank_score: i64,
+}
+
 /// Query payload for unified search segment matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSegmentQuery {
@@ -205,6 +232,46 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?
         connection: &Connection,
         query: &SearchSegmentQuery,
     ) -> Result<Vec<SearchSegmentMatch>, SearchSegmentRepositoryError> {
+        let candidates = Self::query_candidates(connection, query)?;
+        let segment_ids = candidates
+            .iter()
+            .map(|candidate| candidate.segment_id.clone())
+            .collect::<Vec<_>>();
+        let order_by_id = segment_ids
+            .iter()
+            .enumerate()
+            .map(|(index, segment_id)| (segment_id.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut rank_by_id = candidates
+            .into_iter()
+            .map(|candidate| (candidate.segment_id, candidate.rank_score))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut hydrated = Self::hydrate_by_segment_ids(connection, &segment_ids)?;
+        for segment in &mut hydrated {
+            if let Some(rank_score) = rank_by_id.remove(&segment.segment_id) {
+                segment.rank_score = rank_score;
+            }
+        }
+        hydrated.sort_by(|left, right| {
+            order_by_id
+                .get(&left.segment_id)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(
+                    &order_by_id
+                        .get(&right.segment_id)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                )
+        });
+        Ok(hydrated)
+    }
+
+    /// Query indexed search segments through FTS5 without hydrating payload JSON.
+    pub fn query_candidates(
+        connection: &Connection,
+        query: &SearchSegmentQuery,
+    ) -> Result<Vec<SearchSegmentCandidate>, SearchSegmentRepositoryError> {
         let mut clauses = vec!["search_segments_fts MATCH ?".to_string()];
         let mut params = vec![Value::Text(query.fts_query.clone())];
 
@@ -244,7 +311,6 @@ SELECT
   s.record_id,
   s.label,
   s.weight,
-  s.payload_json,
   s.updated_at,
   CAST((0 - bm25(search_segments_fts, 5.0, 6.0, 7.0, 0.8, 3.0, 2.0, 1.5, 2.5)) * 1000000 AS INTEGER) AS rank_score
 FROM search_segments_fts
@@ -261,19 +327,116 @@ LIMIT ?
             connection
                 .prepare(&sql)
                 .map_err(|source| SearchSegmentRepositoryError::Sql {
-                    operation: "prepare_query",
+                    operation: "prepare_query_candidates",
                     source,
                 })?;
         let rows = statement
-            .query_map(params_from_iter(params.iter()), row_to_segment_match)
+            .query_map(params_from_iter(params.iter()), row_to_segment_candidate)
             .map_err(|source| SearchSegmentRepositoryError::Sql {
-                operation: "query",
+                operation: "query_candidates",
                 source,
             })?;
 
         rows.map(|row| {
             row.map_err(|source| SearchSegmentRepositoryError::Sql {
-                operation: "query_row",
+                operation: "query_candidates_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// Hydrate full segment rows by segment ids.
+    pub fn hydrate_by_segment_ids(
+        connection: &Connection,
+        segment_ids: &[String],
+    ) -> Result<Vec<SearchSegmentMatch>, SearchSegmentRepositoryError> {
+        if segment_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; segment_ids.len()].join(", ");
+        let sql = format!(
+            r#"
+SELECT
+  segment_id,
+  surface,
+  file_id,
+  normalized_path,
+  extension,
+  field,
+  record_id,
+  label,
+  weight,
+  payload_json,
+  updated_at,
+  0 AS rank_score
+FROM search_segments
+WHERE segment_id IN ({placeholders})
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| SearchSegmentRepositoryError::Sql {
+                    operation: "prepare_hydrate_by_segment_ids",
+                    source,
+                })?;
+        let rows = statement
+            .query_map(params_from_iter(segment_ids.iter()), row_to_segment_match)
+            .map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "hydrate_by_segment_ids",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "hydrate_by_segment_ids_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
+    /// List all materialized document search segments in deterministic path order.
+    pub fn list_docs(
+        connection: &Connection,
+    ) -> Result<Vec<SearchSegmentMatch>, SearchSegmentRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  segment_id,
+  surface,
+  file_id,
+  normalized_path,
+  extension,
+  field,
+  record_id,
+  label,
+  weight,
+  payload_json,
+  updated_at,
+  0 AS rank_score
+FROM search_segments
+WHERE surface = 'docs'
+ORDER BY normalized_path ASC
+"#,
+            )
+            .map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "prepare_list_docs",
+                source,
+            })?;
+        let rows = statement
+            .query_map([], row_to_segment_match)
+            .map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "list_docs",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "list_docs_row",
                 source,
             })
         })
@@ -516,6 +679,22 @@ fn row_to_segment_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchSegme
     })
 }
 
+fn row_to_segment_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchSegmentCandidate> {
+    Ok(SearchSegmentCandidate {
+        segment_id: row.get("segment_id")?,
+        surface: row.get("surface")?,
+        file_id: row.get("file_id")?,
+        normalized_path: row.get("normalized_path")?,
+        extension: row.get("extension")?,
+        field: row.get("field")?,
+        record_id: row.get("record_id")?,
+        label: row.get("label")?,
+        weight: row.get("weight")?,
+        updated_at: row.get("updated_at")?,
+        rank_score: row.get("rank_score")?,
+    })
+}
+
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -624,6 +803,26 @@ mod tests {
         )
         .expect("query updated token");
         assert_eq!(replacement.len(), 1);
+        let candidates = SearchSegmentRepository::query_candidates(
+            &connection,
+            &SearchSegmentQuery {
+                fts_query: "\"replacement\"*".to_string(),
+                surfaces: Vec::new(),
+                scope: None,
+                extensions: Vec::new(),
+                limit: 10,
+            },
+        )
+        .expect("query lightweight candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].segment_id, "segment-1");
+        let hydrated = SearchSegmentRepository::hydrate_by_segment_ids(
+            &connection,
+            &[candidates[0].segment_id.clone()],
+        )
+        .expect("hydrate selected candidate");
+        assert_eq!(hydrated.len(), 1);
+        assert_eq!(hydrated[0].payload_json, "{}");
 
         connection
             .execute("DELETE FROM files WHERE file_id = ?1", params!["file-1"])

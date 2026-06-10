@@ -153,23 +153,51 @@ pub(crate) fn query_docs_row(item: SearchQueryProjectedItem) -> serde_json::Map<
     map
 }
 
-pub(crate) fn query_docs_row_from_search_index(
-    row: SearchIndexRecord,
+pub(crate) fn query_docs_row_from_segment(
+    row: SearchSegmentMatch,
 ) -> serde_json::Map<String, JsonValue> {
+    let payload = serde_json::from_str::<JsonValue>(&row.payload_json).unwrap_or(JsonValue::Null);
     let mut map = serde_json::Map::with_capacity(5);
     map.insert(
         QueryDocsColumn::FileId.key().to_string(),
-        JsonValue::String(row.file_id),
+        JsonValue::String(
+            payload
+                .get("file_id")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(&row.file_id)
+                .to_string(),
+        ),
     );
     map.insert(
         QueryDocsColumn::Path.key().to_string(),
-        JsonValue::String(row.normalized_path.clone()),
+        JsonValue::String(
+            payload
+                .get("path")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(&row.normalized_path)
+                .to_string(),
+        ),
     );
     map.insert(
         QueryDocsColumn::Title.key().to_string(),
-        JsonValue::String(tao_sdk_search::derive_title_from_path(&row.normalized_path)),
+        JsonValue::String(
+            payload
+                .get("title")
+                .and_then(JsonValue::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| tao_sdk_search::derive_title_from_path(&row.normalized_path)),
+        ),
     );
-    map.insert("indexed_at".to_string(), JsonValue::String(row.updated_at));
+    map.insert(
+        "indexed_at".to_string(),
+        JsonValue::String(
+            payload
+                .get("indexed_at")
+                .and_then(JsonValue::as_str)
+                .unwrap_or(&row.updated_at)
+                .to_string(),
+        ),
+    );
     map.insert(
         QueryDocsColumn::MatchedIn.key().to_string(),
         JsonValue::Array(Vec::new()),
@@ -373,9 +401,9 @@ pub(crate) fn collect_docs_rows_for_where_only(
 ) -> Result<(u64, Vec<JsonValue>)> {
     with_connection(runtime, resolved, |connection| {
         if query.trim().is_empty() {
-            let batch_rows = SearchIndexRepository::list_all(connection)?
+            let batch_rows = SearchSegmentRepository::list_docs(connection)?
                 .into_iter()
-                .map(query_docs_row_from_search_index)
+                .map(query_docs_row_from_segment)
                 .collect::<Vec<_>>();
             let filtered = apply_where_filter(batch_rows, Some(where_expr))
                 .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;

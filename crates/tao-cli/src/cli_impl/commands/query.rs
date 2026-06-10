@@ -92,9 +92,9 @@ pub(crate) fn handle(args: QueryArgs, runtime: &mut RuntimeMode) -> Result<Comma
                     QueryPostFilterAccumulator::new(args.offset, limit, &sort_keys);
                 with_connection(runtime, &resolved, |connection| {
                     if query.trim().is_empty() {
-                        let batch_rows = SearchIndexRepository::list_all(connection)?
+                        let batch_rows = SearchSegmentRepository::list_docs(connection)?
                             .into_iter()
-                            .map(query_docs_row_from_search_index)
+                            .map(query_docs_row_from_segment)
                             .collect::<Vec<_>>();
                         let filtered = apply_post_filter_batch(batch_rows, where_expr.as_ref())?;
                         accumulator.push_batch(filtered);

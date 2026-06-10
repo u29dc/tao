@@ -30,7 +30,7 @@ use tao_sdk_search::{
     parse_where_expression_opt,
 };
 use tao_sdk_service::{
-    BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService,
+    BacklinkGraphService, BaseTableExecutionOptions, BaseTableExecutorService, GraphPathRequest,
     GraphScopedInboundRequest, GraphWalkDirection, GraphWalkRequest, HealthSnapshotService,
     IndexRefreshMode, IndexRefreshOptions, IndexRefreshService, ReconciliationScanMode,
     SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, SearchKind,
@@ -39,8 +39,8 @@ use tao_sdk_service::{
 #[cfg(test)]
 use tao_sdk_service::{CURRENT_LINK_RESOLUTION_VERSION, LINK_RESOLUTION_VERSION_STATE_KEY};
 use tao_sdk_storage::{
-    BasesRepository, FilesRepository, LinksRepository, PropertiesRepository, SearchIndexRecord,
-    SearchIndexRepository, TasksRepository, preflight_migrations, run_migrations,
+    BasesRepository, PropertiesRepository, SearchSegmentMatch, SearchSegmentRepository,
+    TasksRepository, preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::{
     CasePolicy, PathCanonicalizationService, VaultScanService, validate_relative_vault_path,

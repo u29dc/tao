@@ -15,6 +15,14 @@ pub struct IncrementalIndexResult {
     pub properties_reindexed: u64,
     /// Number of bases reindexed.
     pub bases_reindexed: u64,
+    /// Derived search corpus refresh mode applied by this run.
+    pub search_corpus_refresh: SearchCorpusRefreshMode,
+    /// File ids that require a deferred search corpus refresh.
+    #[doc(hidden)]
+    pub search_corpus_refresh_file_ids: Vec<String>,
+    /// Whether deferred refresh must rebuild the full search corpus.
+    #[doc(hidden)]
+    pub requires_full_search_corpus_refresh: bool,
 }
 
 /// Result payload for coalesced batch indexing workflow.
@@ -38,6 +46,31 @@ pub struct CoalescedBatchIndexResult {
     pub bases_reindexed: u64,
     /// Whether the derived search corpus was rebuilt after coalesced batches.
     pub search_segments_rebuilt: bool,
+    /// Derived search corpus refresh mode applied after coalesced batches.
+    pub search_corpus_refresh: SearchCorpusRefreshMode,
+}
+
+/// Derived search corpus refresh mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchCorpusRefreshMode {
+    /// No derived corpus rows were refreshed.
+    None,
+    /// Only impacted file rows were refreshed.
+    Partial,
+    /// The full derived corpus was rebuilt.
+    Full,
+}
+
+impl SearchCorpusRefreshMode {
+    /// Return the stable JSON label for this refresh mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Partial => "partial",
+            Self::Full => "full",
+        }
+    }
 }
 
 /// Incremental indexing service for targeted path updates.
@@ -112,6 +145,17 @@ impl IncrementalIndexService {
         let mut bases_reindexed = 0_u64;
         let mut pending_link_records = Vec::<LinkRecordInput>::new();
         let mut changed_markdown_paths = std::collections::BTreeSet::<String>::new();
+        let mut search_corpus_refresh_file_ids = std::collections::BTreeSet::<String>::new();
+        let mut requires_full_search_corpus_refresh = if rebuild_search_corpus {
+            crate::SearchCorpusService
+                .status(&transaction)
+                .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                    source: Box::new(source),
+                })?
+                .search_index_stale
+        } else {
+            false
+        };
         let mut has_new_files = false;
         let mut removed_file_ids = Vec::<String>::new();
         let resolution_case_policy = link_case_policy(case_policy);
@@ -205,11 +249,23 @@ impl IncrementalIndexService {
                     })?;
                 if existing.is_none() {
                     has_new_files = true;
+                    requires_full_search_corpus_refresh = true;
                 }
                 let file_id = existing
                     .map(|record| record.file_id)
                     .unwrap_or_else(|| deterministic_id("file", &normalized));
                 file_id_by_path.insert(normalized.clone(), file_id.clone());
+                search_corpus_refresh_file_ids.insert(file_id.clone());
+
+                for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
+                    &transaction,
+                    &file_id,
+                )
+                .map_err(|source| FullIndexError::InsertLink {
+                    source: Box::new(source),
+                })? {
+                    add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
+                }
 
                 FilesRepository::upsert(
                     &transaction,
@@ -257,12 +313,6 @@ impl IncrementalIndexService {
                         operation: "delete_bases_for_file",
                         source: Box::new(source),
                     })?;
-                SearchIndexRepository::delete_by_file_id(&transaction, &file_id).map_err(
-                    |source| FullIndexError::UpsertSearchIndex {
-                        source: Box::new(source),
-                    },
-                )?;
-
                 if normalized.ends_with(".md") {
                     let markdown = fs::read_to_string(&absolute).map_err(|source| {
                         FullIndexError::ReadFile {
@@ -292,19 +342,6 @@ impl IncrementalIndexService {
                         })?;
                     }
 
-                    SearchIndexRepository::upsert(
-                        &transaction,
-                        &SearchIndexRecordInput {
-                            file_id: file_id.clone(),
-                            normalized_path: normalized.clone(),
-                            normalized_path_lc: normalized.to_lowercase(),
-                            title_lc: title_from_normalized_path(&normalized).to_lowercase(),
-                            content_lc: markdown.to_lowercase(),
-                        },
-                    )
-                    .map_err(|source| FullIndexError::UpsertSearchIndex {
-                        source: Box::new(source),
-                    })?;
                     for task in build_task_records(&file_id, &normalized, &markdown) {
                         TasksRepository::upsert(&transaction, &task).map_err(|source| {
                             FullIndexError::UpsertTask {
@@ -349,8 +386,13 @@ impl IncrementalIndexService {
                         &parsed.body,
                     );
                     links_reindexed += link_records.len() as u64;
+                    add_link_input_corpus_file_ids(
+                        &mut search_corpus_refresh_file_ids,
+                        &link_records,
+                    );
                     pending_link_records.extend(link_records);
                 } else if normalized.ends_with(".base") {
+                    requires_full_search_corpus_refresh = true;
                     let raw = fs::read_to_string(&absolute).map_err(|source| {
                         FullIndexError::ReadFile {
                             path: absolute.clone(),
@@ -381,6 +423,16 @@ impl IncrementalIndexService {
 
                 upserted_files += 1;
             } else if let Some(existing) = existing {
+                search_corpus_refresh_file_ids.insert(existing.file_id.clone());
+                for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
+                    &transaction,
+                    &existing.file_id,
+                )
+                .map_err(|source| FullIndexError::InsertLink {
+                    source: Box::new(source),
+                })? {
+                    add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
+                }
                 removed_file_ids.push(existing.file_id.clone());
                 FilesRepository::delete_by_id(&transaction, &existing.file_id).map_err(
                     |source| FullIndexError::UpsertFileMetadata {
@@ -455,6 +507,16 @@ impl IncrementalIndexService {
                 continue;
             };
             let absolute = vault_root.join(&source_path);
+            search_corpus_refresh_file_ids.insert(source_record.file_id.clone());
+            for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
+                &transaction,
+                &source_record.file_id,
+            )
+            .map_err(|source| FullIndexError::InsertLink {
+                source: Box::new(source),
+            })? {
+                add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
+            }
             let markdown =
                 fs::read_to_string(&absolute).map_err(|source| FullIndexError::ReadFile {
                     path: absolute.clone(),
@@ -497,32 +559,54 @@ impl IncrementalIndexService {
                 &parsed.body,
             );
             links_reindexed += link_records.len() as u64;
+            add_link_input_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link_records);
             pending_link_records.extend(link_records);
         }
 
         insert_links_batch(&transaction, &pending_link_records)?;
-        let (search_segments_total, search_aliases_total) = if rebuild_search_corpus {
-            let search_corpus = crate::SearchCorpusService
-                .rebuild_in_transaction(&transaction, case_policy)
-                .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                    source: Box::new(source),
-                })?;
-            (
-                search_corpus.search_segments_total,
-                search_corpus.search_aliases_total,
-            )
-        } else {
-            let search_status =
-                crate::SearchCorpusService
-                    .status(&transaction)
+        let search_corpus_refresh_file_ids = search_corpus_refresh_file_ids
+            .into_iter()
+            .collect::<Vec<_>>();
+        let (search_segments_total, search_aliases_total, search_corpus_refresh) =
+            if rebuild_search_corpus && requires_full_search_corpus_refresh {
+                let search_corpus = crate::SearchCorpusService
+                    .rebuild_in_transaction(&transaction, case_policy)
                     .map_err(|source| FullIndexError::RebuildSearchCorpus {
                         source: Box::new(source),
                     })?;
-            (
-                search_status.search_segments_total,
-                search_status.search_aliases_total,
-            )
-        };
+                (
+                    search_corpus.search_segments_total,
+                    search_corpus.search_aliases_total,
+                    SearchCorpusRefreshMode::Full,
+                )
+            } else if rebuild_search_corpus && !search_corpus_refresh_file_ids.is_empty() {
+                let search_corpus = crate::SearchCorpusService
+                    .refresh_files_in_transaction(
+                        &transaction,
+                        &search_corpus_refresh_file_ids,
+                        case_policy,
+                    )
+                    .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                        source: Box::new(source),
+                    })?;
+                (
+                    search_corpus.search_segments_total,
+                    search_corpus.search_aliases_total,
+                    SearchCorpusRefreshMode::Partial,
+                )
+            } else {
+                let search_status =
+                    crate::SearchCorpusService
+                        .status(&transaction)
+                        .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                            source: Box::new(source),
+                        })?;
+                (
+                    search_status.search_segments_total,
+                    search_status.search_aliases_total,
+                    SearchCorpusRefreshMode::None,
+                )
+            };
 
         let now_unix_ms = current_unix_ms()?;
         IndexStateRepository::upsert(
@@ -556,6 +640,7 @@ impl IncrementalIndexService {
             "bases_reindexed": bases_reindexed,
             "search_segments_total": search_segments_total,
             "search_aliases_total": search_aliases_total,
+            "search_corpus_refresh": search_corpus_refresh.as_str(),
             "completed_unix_ms": now_unix_ms,
         }))
         .map_err(|source| FullIndexError::SerializeStateSummary {
@@ -586,6 +671,9 @@ impl IncrementalIndexService {
             links_reindexed,
             properties_reindexed,
             bases_reindexed,
+            search_corpus_refresh,
+            search_corpus_refresh_file_ids,
+            requires_full_search_corpus_refresh,
         })
     }
 }
@@ -625,6 +713,13 @@ impl CoalescedBatchIndexService {
         let mut links_reindexed = 0_u64;
         let mut properties_reindexed = 0_u64;
         let mut bases_reindexed = 0_u64;
+        let mut requires_full_search_corpus_refresh = crate::SearchCorpusService
+            .status(connection)
+            .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                source: Box::new(source),
+            })?
+            .search_index_stale;
+        let mut search_corpus_refresh_file_ids = std::collections::BTreeSet::<String>::new();
 
         for batch in unique_paths.chunks(max_batch_size) {
             let batch_result = self.incremental.apply_changes_internal(
@@ -641,15 +736,30 @@ impl CoalescedBatchIndexService {
             links_reindexed += batch_result.links_reindexed;
             properties_reindexed += batch_result.properties_reindexed;
             bases_reindexed += batch_result.bases_reindexed;
+            requires_full_search_corpus_refresh |= batch_result.requires_full_search_corpus_refresh;
+            search_corpus_refresh_file_ids.extend(batch_result.search_corpus_refresh_file_ids);
         }
-        let search_segments_rebuilt = batches_applied > 0;
-        if search_segments_rebuilt {
+        let search_corpus_refresh_file_ids = search_corpus_refresh_file_ids
+            .into_iter()
+            .collect::<Vec<_>>();
+        let search_corpus_refresh = if batches_applied > 0 && requires_full_search_corpus_refresh {
             crate::SearchCorpusService
                 .rebuild_atomic(connection, case_policy)
                 .map_err(|source| FullIndexError::RebuildSearchCorpus {
                     source: Box::new(source),
                 })?;
-        }
+            SearchCorpusRefreshMode::Full
+        } else if !search_corpus_refresh_file_ids.is_empty() {
+            crate::SearchCorpusService
+                .refresh_files_atomic(connection, &search_corpus_refresh_file_ids, case_policy)
+                .map_err(|source| FullIndexError::RebuildSearchCorpus {
+                    source: Box::new(source),
+                })?;
+            SearchCorpusRefreshMode::Partial
+        } else {
+            SearchCorpusRefreshMode::None
+        };
+        let search_segments_rebuilt = search_corpus_refresh != SearchCorpusRefreshMode::None;
 
         Ok(CoalescedBatchIndexResult {
             input_events: changed_paths.len() as u64,
@@ -661,7 +771,30 @@ impl CoalescedBatchIndexService {
             properties_reindexed,
             bases_reindexed,
             search_segments_rebuilt,
+            search_corpus_refresh,
         })
+    }
+}
+
+fn add_link_with_paths_corpus_file_ids(
+    file_ids: &mut std::collections::BTreeSet<String>,
+    link: &LinkWithPaths,
+) {
+    file_ids.insert(link.source_file_id.clone());
+    if let Some(file_id) = &link.resolved_file_id {
+        file_ids.insert(file_id.clone());
+    }
+}
+
+fn add_link_input_corpus_file_ids(
+    file_ids: &mut std::collections::BTreeSet<String>,
+    links: &[LinkRecordInput],
+) {
+    for link in links {
+        file_ids.insert(link.source_file_id.clone());
+        if let Some(file_id) = &link.resolved_file_id {
+            file_ids.insert(file_id.clone());
+        }
     }
 }
 

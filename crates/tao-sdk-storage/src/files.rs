@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use thiserror::Error;
 
 /// Persisted row model for `files` table.
@@ -283,6 +283,57 @@ ORDER BY normalized_path ASC
         .collect()
     }
 
+    /// List file rows by file ids in deterministic normalized-path order.
+    pub fn list_by_ids(
+        connection: &Connection,
+        file_ids: &[String],
+    ) -> Result<Vec<FileRecord>, FilesRepositoryError> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; file_ids.len()].join(", ");
+        let sql = format!(
+            r#"
+SELECT
+  file_id,
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown,
+  indexed_at
+FROM files
+WHERE file_id IN ({placeholders})
+ORDER BY normalized_path ASC
+"#
+        );
+        let mut statement =
+            connection
+                .prepare(&sql)
+                .map_err(|source| FilesRepositoryError::Sql {
+                    operation: "prepare_list_by_ids",
+                    source,
+                })?;
+
+        let rows = statement
+            .query_map(params_from_iter(file_ids.iter()), row_to_file_record)
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "list_by_ids",
+                source,
+            })?;
+
+        rows.map(|row| {
+            row.map_err(|source| FilesRepositoryError::Sql {
+                operation: "list_by_ids_row",
+                source,
+            })
+        })
+        .collect()
+    }
+
     /// List lightweight file metadata rows in deterministic reconcile order.
     pub fn list_reconcile(
         connection: &Connection,
@@ -484,6 +535,10 @@ mod tests {
 
         let listed = FilesRepository::list_all(&connection).expect("list all");
         assert_eq!(listed.len(), 1);
+
+        let by_ids =
+            FilesRepository::list_by_ids(&connection, &[String::from("f1")]).expect("list by ids");
+        assert_eq!(by_ids, vec![fetched]);
 
         let deleted = FilesRepository::delete_by_id(&connection, "f1").expect("delete by id");
         assert!(deleted);

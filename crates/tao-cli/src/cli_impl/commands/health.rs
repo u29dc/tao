@@ -3,17 +3,24 @@ use super::super::*;
 pub(crate) fn load_cli_health_snapshot(
     resolved: &ResolvedVaultPathArgs,
     runtime: &mut RuntimeMode,
+    deep: bool,
 ) -> Result<(tao_sdk_service::HealthSnapshot, CliRuntimeState)> {
     let runtime_state = runtime_state_for_resolved(resolved, runtime);
     let index_lag = with_connection(runtime, resolved, |connection| {
-        let refresh = IndexRefreshService
-            .inspect(
-                Path::new(&resolved.vault_root),
-                connection,
-                resolved.case_policy,
-                ReconciliationScanMode::MetadataOnly,
-            )
-            .map_err(|source| anyhow!("inspect index refresh status failed: {source}"))?;
+        let refresh = if deep {
+            IndexRefreshService
+                .inspect(
+                    Path::new(&resolved.vault_root),
+                    connection,
+                    resolved.case_policy,
+                    ReconciliationScanMode::MetadataOnly,
+                )
+                .map_err(|source| anyhow!("inspect index refresh status failed: {source}"))?
+        } else {
+            IndexRefreshService
+                .inspect_cached(connection)
+                .map_err(|source| anyhow!("inspect cached index refresh status failed: {source}"))?
+        };
         Ok(refresh.drift_paths)
     })?;
     let watcher_status = watcher_status_for_runtime_state(&runtime_state);
@@ -28,7 +35,7 @@ pub(crate) fn load_cli_health_snapshot(
     Ok((snapshot, runtime_state))
 }
 
-pub(crate) fn handle(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
+pub(crate) fn handle(args: HealthArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     let resolved = args.resolve().map_err(|source| {
         health_blocked_error(
             source.to_string(),
@@ -45,8 +52,8 @@ pub(crate) fn handle(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<C
         )
     })?;
 
-    let (snapshot, runtime_state) =
-        load_cli_health_snapshot(&resolved, runtime).map_err(|source| {
+    let (snapshot, runtime_state) = load_cli_health_snapshot(&resolved, runtime, args.deep)
+        .map_err(|source| {
             health_blocked_error(
                 source.to_string(),
                 "run `tao vault open --vault-root <path>` and verify the database path is writable",
@@ -112,6 +119,7 @@ pub(crate) fn handle(args: VaultPathArgs, runtime: &mut RuntimeMode) -> Result<C
                 "db_healthy": snapshot.db_healthy,
                 "db_migrations": snapshot.db_migrations,
                 "index_lag": snapshot.index_lag,
+                "scan_mode": if args.deep { "deep_metadata" } else { "cached" },
                 "watcher_status": snapshot.watcher_status,
                 "last_index_updated_at": snapshot.last_index_updated_at,
             },
@@ -150,7 +158,7 @@ pub(crate) fn health_blocked_error(
 }
 
 pub(in crate::cli_impl) fn dispatch(
-    args: VaultPathArgs,
+    args: HealthArgs,
     runtime: &mut RuntimeMode,
 ) -> Result<CommandResult> {
     handle(args, runtime)

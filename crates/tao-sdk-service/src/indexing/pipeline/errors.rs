@@ -156,13 +156,6 @@ pub enum FullIndexError {
         #[source]
         source: Box<tao_sdk_storage::BasesRepositoryError>,
     },
-    /// Upserting search index rows failed.
-    #[error("failed to upsert search index rows during indexing: {source}")]
-    UpsertSearchIndex {
-        /// Repository error.
-        #[source]
-        source: Box<tao_sdk_storage::SearchIndexRepositoryError>,
-    },
     /// Rebuilding derived search corpus failed.
     #[error("failed to rebuild derived search corpus during indexing: {source}")]
     RebuildSearchCorpus {

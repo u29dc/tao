@@ -190,6 +190,30 @@ pub struct GraphWalkRequest {
     pub include_folders: bool,
 }
 
+/// Input request for bounded shortest-path traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPathRequest {
+    /// Source note path.
+    pub from_path: String,
+    /// Target note path.
+    pub to_path: String,
+    /// Maximum traversal depth.
+    pub max_depth: u32,
+    /// Maximum discovered nodes before aborting.
+    pub max_nodes: u32,
+}
+
+/// Result from bounded shortest-path traversal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPathResult {
+    /// Whether a path was found.
+    pub found: bool,
+    /// Number of discovered nodes.
+    pub explored_nodes: u32,
+    /// Ordered path from source to target when found.
+    pub path: Vec<String>,
+}
+
 /// Link graph query service for outgoing, backlink, and unresolved edges.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BacklinkGraphService;
@@ -409,6 +433,149 @@ impl BacklinkGraphService {
         Ok((total, items))
     }
 
+    /// Find a bounded undirected shortest path using frontier SQL lookups.
+    pub fn shortest_path(
+        &self,
+        connection: &Connection,
+        request: &GraphPathRequest,
+    ) -> Result<GraphPathResult, LinkGraphServiceError> {
+        if request.max_nodes == 0 {
+            return Err(LinkGraphServiceError::TraversalLimit { max_nodes: 0 });
+        }
+
+        let Some(from_file) =
+            FilesRepository::get_by_normalized_path(connection, &request.from_path)
+                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(GraphPathResult {
+                found: false,
+                explored_nodes: 0,
+                path: Vec::new(),
+            });
+        };
+        let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &request.to_path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(GraphPathResult {
+                found: false,
+                explored_nodes: 0,
+                path: Vec::new(),
+            });
+        };
+
+        if from_file.file_id == to_file.file_id {
+            return Ok(GraphPathResult {
+                found: true,
+                explored_nodes: 1,
+                path: vec![from_file.normalized_path],
+            });
+        }
+
+        let from_id = from_file.file_id;
+        let to_id = to_file.file_id;
+        let mut path_by_id = HashMap::<String, String>::new();
+        path_by_id.insert(from_id.clone(), from_file.normalized_path);
+        path_by_id.insert(to_id.clone(), to_file.normalized_path);
+
+        let mut frontier = vec![from_id.clone()];
+        let mut depth_by_id = HashMap::<String, u32>::new();
+        let mut parent_by_id = HashMap::<String, String>::new();
+        depth_by_id.insert(from_id.clone(), 0);
+        let mut explored_nodes = 1_u32;
+
+        for depth in 0..request.max_depth {
+            if frontier.is_empty() || depth_by_id.contains_key(&to_id) {
+                break;
+            }
+
+            let outgoing =
+                LinksRepository::list_outgoing_for_sources_with_paths(connection, &frontier, false)
+                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+            let incoming =
+                LinksRepository::list_incoming_for_targets_with_paths(connection, &frontier)
+                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+            let mut next_frontier = Vec::<String>::new();
+            let next_depth = depth + 1;
+
+            for edge in outgoing {
+                let Some(target_id) = edge.resolved_file_id else {
+                    continue;
+                };
+                if depth_by_id.contains_key(&target_id) {
+                    continue;
+                }
+                explored_nodes = explored_nodes.saturating_add(1);
+                if explored_nodes > request.max_nodes {
+                    return Err(LinkGraphServiceError::TraversalLimit {
+                        max_nodes: request.max_nodes,
+                    });
+                }
+                path_by_id.insert(edge.source_file_id.clone(), edge.source_path);
+                if let Some(path) = edge.resolved_path {
+                    path_by_id.insert(target_id.clone(), path);
+                }
+                depth_by_id.insert(target_id.clone(), next_depth);
+                parent_by_id.insert(target_id.clone(), edge.source_file_id);
+                next_frontier.push(target_id);
+            }
+
+            for edge in incoming {
+                let source_id = edge.source_file_id;
+                if depth_by_id.contains_key(&source_id) {
+                    continue;
+                }
+                explored_nodes = explored_nodes.saturating_add(1);
+                if explored_nodes > request.max_nodes {
+                    return Err(LinkGraphServiceError::TraversalLimit {
+                        max_nodes: request.max_nodes,
+                    });
+                }
+                if let Some(target_id) = edge.resolved_file_id {
+                    if let Some(path) = edge.resolved_path {
+                        path_by_id.insert(target_id.clone(), path);
+                    }
+                    parent_by_id.insert(source_id.clone(), target_id);
+                }
+                path_by_id.insert(source_id.clone(), edge.source_path);
+                depth_by_id.insert(source_id.clone(), next_depth);
+                next_frontier.push(source_id);
+            }
+
+            next_frontier.sort();
+            next_frontier.dedup();
+            frontier = next_frontier;
+        }
+
+        if !depth_by_id.contains_key(&to_id) {
+            return Ok(GraphPathResult {
+                found: false,
+                explored_nodes,
+                path: Vec::new(),
+            });
+        }
+
+        let mut path_ids = vec![to_id.clone()];
+        let mut cursor = to_id;
+        while let Some(parent) = parent_by_id.get(&cursor).cloned() {
+            path_ids.push(parent.clone());
+            if parent == from_id {
+                break;
+            }
+            cursor = parent;
+        }
+        path_ids.reverse();
+        let path = path_ids
+            .iter()
+            .filter_map(|file_id| path_by_id.get(file_id).cloned())
+            .collect::<Vec<_>>();
+
+        Ok(GraphPathResult {
+            found: !path.is_empty(),
+            explored_nodes,
+            path,
+        })
+    }
+
     /// Walk graph neighbors from one root path using frontier SQL lookups.
     pub fn walk(
         &self,
@@ -425,14 +592,19 @@ impl BacklinkGraphService {
         else {
             return Ok(Vec::new());
         };
-        let path_by_id = FilesRepository::list_all(connection)
-            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-            .into_iter()
-            .filter(|row| row.is_markdown)
-            .map(|row| (row.file_id, row.normalized_path))
-            .collect::<HashMap<_, _>>();
+        let mut path_by_id = HashMap::<String, String>::new();
+        path_by_id.insert(
+            start_file.file_id.clone(),
+            start_file.normalized_path.clone(),
+        );
         let mut folder_members = HashMap::<String, Vec<String>>::new();
         if request.include_folders {
+            path_by_id = FilesRepository::list_all(connection)
+                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+                .into_iter()
+                .filter(|row| row.is_markdown)
+                .map(|row| (row.file_id, row.normalized_path))
+                .collect::<HashMap<_, _>>();
             for (file_id, path) in &path_by_id {
                 folder_members
                     .entry(note_folder(path).to_string())
@@ -811,5 +983,11 @@ pub enum LinkGraphServiceError {
         /// Links repository error.
         #[source]
         source: tao_sdk_storage::LinksRepositoryError,
+    },
+    /// Traversal exceeded caller-provided bounds.
+    #[error("graph traversal aborted after exploring {max_nodes} nodes; increase --max-nodes")]
+    TraversalLimit {
+        /// Maximum allowed discovered nodes.
+        max_nodes: u32,
     },
 }
