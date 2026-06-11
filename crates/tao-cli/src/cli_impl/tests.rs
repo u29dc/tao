@@ -12,12 +12,13 @@ use super::{
     CURRENT_LINK_RESOLUTION_VERSION, CachedCommandResult, ClapOutput, Cli, CliContractError,
     CommandResult, Commands, DaemonCommands, DaemonExecutionPolicy, DaemonSocketArgs,
     DaemonStopAllArgs, DocCommands, ExitKind, HealthArgs, LINK_RESOLUTION_VERSION_STATE_KEY,
-    OutputFormat, QueryArgs, RuntimeCache, RuntimeMode, SearchArgs, VaultCommands, VaultPathArgs,
-    classify_cli_error, daemon_execution_policy, derive_daemon_socket_for_vault, dispatch,
-    dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon, maybe_refresh_daemon_state,
-    maybe_render_streaming_output, prepare_daemon_socket_path, read_bounded_bytes, registry,
-    render_error_output, render_output, render_output_with_format, resolve_command_vault_paths,
-    resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key, update_daemon_command_cache,
+    OutputFormat, QueryArgs, RunResult, RuntimeCache, RuntimeMode, SearchArgs, VaultCommands,
+    VaultPathArgs, classify_cli_error, daemon_execution_policy, derive_daemon_socket_for_vault,
+    dispatch, dispatch_with_runtime, handle_daemon, maybe_forward_to_daemon,
+    maybe_refresh_daemon_state, maybe_render_streaming_output, prepare_daemon_socket_path,
+    read_bounded_bytes, registry, render_error_output, render_output, render_output_with_format,
+    resolve_command_vault_paths, resolve_daemon_socket_for_cli, run_from_args, runtime_cache_key,
+    update_daemon_command_cache,
 };
 use clap::{CommandFactory, Parser, error::ErrorKind as ClapErrorKind};
 use rusqlite::Connection;
@@ -166,7 +167,7 @@ fn validate_cli_parses_file_folder_and_recursive_forms() {
 }
 
 #[test]
-fn validate_missing_path_uses_json_usage_error() {
+fn validate_missing_path_uses_native_clap_usage_error() {
     let result = run_from_args(
         ["tao", "validate"]
             .into_iter()
@@ -174,17 +175,7 @@ fn validate_missing_path_uses_json_usage_error() {
             .collect(),
     );
 
-    assert_eq!(result.exit_kind, ExitKind::Failure);
-    let stdout = result.stdout.expect("json stdout");
-    let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse output");
-    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
-    assert_eq!(
-        envelope
-            .get("error")
-            .and_then(|error| error.get("code"))
-            .and_then(JsonValue::as_str),
-        Some("invalid_argument")
-    );
+    assert_usage_error(result, ClapErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -210,7 +201,7 @@ fn run_from_args_supports_toon_tools_output() {
 }
 
 #[test]
-fn toon_parse_errors_use_toon_error_envelope() {
+fn toon_parse_errors_use_native_clap_usage_error() {
     let result = run_from_args(
         ["tao", "--toon", "validate"]
             .into_iter()
@@ -218,17 +209,7 @@ fn toon_parse_errors_use_toon_error_envelope() {
             .collect(),
     );
 
-    assert_eq!(result.exit_kind, ExitKind::Failure);
-    let stdout = result.stdout.expect("toon stdout");
-    let envelope: JsonValue = toon_format::decode_default(&stdout).expect("parse toon output");
-    assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
-    assert_eq!(
-        envelope
-            .get("error")
-            .and_then(|error| error.get("code"))
-            .and_then(JsonValue::as_str),
-        Some("invalid_argument")
-    );
+    assert_usage_error(result, ClapErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -967,6 +948,18 @@ fn assert_json_contract(value: &JsonValue, expected_command: &str) {
     assert_registry_output_fields_match_payload(expected_command, payload);
 }
 
+fn assert_usage_error(result: RunResult, expected_kind: ClapErrorKind) {
+    assert_eq!(result.exit_kind, ExitKind::Usage);
+    assert!(result.stdout.is_none());
+    assert!(result.stderr.is_none());
+    match result.clap_output {
+        Some(ClapOutput::Error(error)) => {
+            assert_eq!(error.kind(), expected_kind);
+        }
+        other => panic!("expected native clap error output, got {other:?}"),
+    }
+}
+
 fn validate_output(vault_root: &Path, path: &str, recursive: bool) -> JsonValue {
     let mut args = vec![
         "tao".to_string(),
@@ -1028,7 +1021,7 @@ fn conditional_output_field(tool: &str, field: &str) -> bool {
 }
 
 #[test]
-fn removed_write_surface_parse_failures_use_json_error_envelopes() {
+fn removed_write_surface_parse_failures_use_native_clap_errors() {
     for args in [
         vec![
             "tao",
@@ -1075,31 +1068,26 @@ fn removed_write_surface_parse_failures_use_json_error_envelopes() {
     ] {
         let result = run_from_args(args.into_iter().map(std::ffi::OsString::from).collect());
 
-        assert_eq!(result.exit_kind, ExitKind::Failure);
+        assert_eq!(result.exit_kind, ExitKind::Usage);
+        assert!(result.stdout.is_none());
         assert!(result.stderr.is_none());
-        let stdout = result.stdout.expect("json stdout");
-        let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse output");
-        assert_eq!(envelope.get("ok").and_then(JsonValue::as_bool), Some(false));
-        assert!(
-            envelope
-                .as_object()
-                .is_some_and(|object| !object.contains_key("data"))
-        );
-        let error_payload = envelope
-            .get("error")
-            .and_then(JsonValue::as_object)
-            .expect("error object");
-        assert_eq!(
-            error_payload.get("code").and_then(JsonValue::as_str),
-            Some("invalid_argument")
-        );
-        assert!(
-            error_payload
-                .get("message")
-                .and_then(JsonValue::as_str)
-                .is_some_and(|message| !message.contains("panicked at")),
-            "error message should not include stack traces"
-        );
+        match result.clap_output {
+            Some(ClapOutput::Error(error)) => {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        ClapErrorKind::UnknownArgument | ClapErrorKind::InvalidSubcommand
+                    ),
+                    "unexpected clap error kind for removed surface: {:?}",
+                    error.kind(),
+                );
+                assert!(
+                    !error.to_string().contains("panicked at"),
+                    "error message should not include stack traces"
+                );
+            }
+            other => panic!("expected native clap error output, got {other:?}"),
+        }
     }
 }
 
@@ -1396,7 +1384,7 @@ fn tools_catalog_includes_version_and_optional_query_parameters() {
 }
 
 #[test]
-fn parse_failures_default_to_json_error_envelope() {
+fn parse_failures_default_to_native_clap_error() {
     let result = run_from_args(
         ["tao", "note", "read"]
             .into_iter()
@@ -1404,24 +1392,7 @@ fn parse_failures_default_to_json_error_envelope() {
             .collect(),
     );
 
-    assert_eq!(result.exit_kind, ExitKind::Failure);
-    assert!(result.stderr.is_none());
-    let stdout = result.stdout.expect("json stdout");
-    let envelope: JsonValue = serde_json::from_str(&stdout).expect("parse cli parse error");
-    assert_eq!(
-        envelope
-            .get("error")
-            .and_then(|error| error.get("code"))
-            .and_then(JsonValue::as_str),
-        Some("invalid_argument")
-    );
-    assert_eq!(
-        envelope
-            .get("meta")
-            .and_then(|meta| meta.get("tool"))
-            .and_then(JsonValue::as_str),
-        Some("tao")
-    );
+    assert_usage_error(result, ClapErrorKind::InvalidSubcommand);
 }
 
 #[test]
@@ -1501,7 +1472,7 @@ read_only = false
             .map(std::ffi::OsString::from)
             .collect(),
         );
-        assert_eq!(doc_result.exit_kind, ExitKind::Failure);
+        assert_usage_error(doc_result, ClapErrorKind::InvalidSubcommand);
         assert!(
             !vault_root.join("notes/policy-write.md").exists(),
             "removed public write command must not create vault content"
@@ -1523,7 +1494,7 @@ read_only = false
             .map(std::ffi::OsString::from)
             .collect(),
         );
-        assert_eq!(task_result.exit_kind, ExitKind::Failure);
+        assert_usage_error(task_result, ClapErrorKind::InvalidSubcommand);
 
         let tools = Cli::parse_from(["tao", "tools"]);
         let tools_output = render_output(
@@ -3543,6 +3514,27 @@ fn json_stream_docs_query_uses_streaming_envelope() {
             vec!["path", "title"]
         );
     });
+}
+
+#[test]
+fn json_stream_and_toon_are_conflicting_output_modes() {
+    let result = run_from_args(
+        [
+            "tao",
+            "query",
+            "--json-stream",
+            "--toon",
+            "--vault-root",
+            "/tmp",
+            "--from",
+            "docs",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect(),
+    );
+
+    assert_usage_error(result, ClapErrorKind::ArgumentConflict);
 }
 
 #[test]

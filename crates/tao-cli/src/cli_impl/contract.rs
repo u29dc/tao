@@ -49,9 +49,20 @@ pub(crate) struct JsonMeta {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitKind {
-    Success = 0,
-    Failure = 1,
-    Blocked = 2,
+    Success,
+    Failure,
+    Usage,
+    Blocked,
+}
+
+impl ExitKind {
+    pub(crate) fn code(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Failure => 1,
+            Self::Usage | Self::Blocked => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,11 +248,7 @@ pub(crate) fn emit_clap_output(output: ClapOutput) {
     }
 }
 
-pub(crate) fn handle_parse_error(
-    error: clap::Error,
-    output_format: OutputFormat,
-    raw_args: &[OsString],
-) -> RunResult {
+pub(crate) fn handle_parse_error(error: clap::Error, raw_args: &[OsString]) -> RunResult {
     match error.kind() {
         ClapErrorKind::DisplayHelp
         | ClapErrorKind::DisplayVersion
@@ -257,30 +264,12 @@ pub(crate) fn handle_parse_error(
                 _ => help_output_for_missing_subcommand(raw_args).unwrap_or(ClapOutput::RootHelp),
             }),
         },
-        _ => {
-            let classified = classify_parse_error(&error);
-            let rendered = render_error_output_for_tool_with_format(
-                "tao",
-                Duration::ZERO,
-                &classified,
-                output_format,
-            )
-            .unwrap_or_else(|render_source| {
-                fallback_render_error(
-                    "tao",
-                    Duration::ZERO,
-                    &classified.error,
-                    &render_source.to_string(),
-                    output_format,
-                )
-            });
-            RunResult {
-                exit_kind: classified.exit_kind,
-                stdout: Some(rendered),
-                stderr: None,
-                clap_output: None,
-            }
-        }
+        _ => RunResult {
+            exit_kind: ExitKind::Usage,
+            stdout: None,
+            stderr: None,
+            clap_output: Some(ClapOutput::Error(error)),
+        },
     }
 }
 
@@ -360,22 +349,6 @@ pub(crate) fn fallback_render_error(
         OutputFormat::Toon => {
             toon_format::encode_default(&fallback).unwrap_or_else(|_| fallback.to_string())
         }
-    }
-}
-
-pub(crate) fn classify_parse_error(error: &clap::Error) -> ClassifiedCliError {
-    ClassifiedCliError {
-        exit_kind: ExitKind::Failure,
-        error: JsonError {
-            code: "invalid_argument".to_string(),
-            message: error.to_string().trim().to_string(),
-            hint: Some(
-                "rerun with --help or use `tao tools` to inspect the public surface".to_string(),
-            ),
-            details: Some(serde_json::json!({
-                "kind": format!("{:?}", error.kind()),
-            })),
-        },
     }
 }
 

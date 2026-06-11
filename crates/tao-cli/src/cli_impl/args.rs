@@ -10,7 +10,13 @@ pub(crate) struct Cli {
     #[arg(long, global = true, default_value_t = false)]
     pub(crate) toon: bool,
     /// Stream JSON envelope serialization for supported large read commands.
-    #[arg(long, global = true, default_value_t = false, hide = true)]
+    #[arg(
+        long,
+        global = true,
+        default_value_t = false,
+        hide = true,
+        conflicts_with = "toon"
+    )]
     pub(crate) json_stream: bool,
     /// Route command execution through a warm daemon socket.
     #[arg(long, global = true, hide = true)]

@@ -79,14 +79,13 @@ pub fn run() -> i32 {
             emit_output(stderr, true);
         }
     }
-    result.exit_kind as i32
+    result.exit_kind.code()
 }
 
 fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
-    let parse_output_format = output_format_from_raw_args(&raw_args);
     let cli = match Cli::try_parse_from(raw_args.clone()) {
         Ok(cli) => cli,
-        Err(error) => return handle_parse_error(error, parse_output_format, &raw_args),
+        Err(error) => return handle_parse_error(error, &raw_args),
     };
 
     let started_at = Instant::now();
@@ -150,17 +149,6 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
                 }
             }
         }
-    }
-}
-
-fn output_format_from_raw_args(raw_args: &[OsString]) -> OutputFormat {
-    if raw_args
-        .iter()
-        .any(|arg| arg.to_str().is_some_and(|value| value == "--toon"))
-    {
-        OutputFormat::Toon
-    } else {
-        OutputFormat::Json
     }
 }
 
