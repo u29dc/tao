@@ -11,22 +11,32 @@ pub(crate) fn handle(command: BaseCommands, runtime: &mut RuntimeMode) -> Result
             let mut items = Vec::with_capacity(bases.len());
             let mut invalid = Vec::new();
             for base in bases {
+                let diagnostics = validate_base_config_json(&base.config_json);
                 match decode_base_document(&base.config_json) {
-                    Ok(document) => items.push(serde_json::json!({
+                    Ok(document)
+                        if !diagnostics.iter().any(|diagnostic| {
+                            matches!(
+                                diagnostic.severity,
+                                tao_sdk_bases::BaseDiagnosticSeverity::Error
+                            )
+                        }) =>
+                    {
+                        items.push(serde_json::json!({
+                            "base_id": base.base_id,
+                            "file_path": base.file_path,
+                            "views": document
+                                .views
+                                .into_iter()
+                                .map(|view| view.name)
+                                .collect::<Vec<_>>(),
+                            "updated_at": base.updated_at,
+                        }))
+                    }
+                    _ => invalid.push(serde_json::json!({
                         "base_id": base.base_id,
                         "file_path": base.file_path,
-                        "views": document
-                            .views
-                            .into_iter()
-                            .map(|view| view.name)
-                            .collect::<Vec<_>>(),
                         "updated_at": base.updated_at,
-                    })),
-                    Err(_) => invalid.push(serde_json::json!({
-                        "base_id": base.base_id,
-                        "file_path": base.file_path,
-                        "updated_at": base.updated_at,
-                        "diagnostics": validate_base_config_json(&base.config_json),
+                        "diagnostics": diagnostics,
                     })),
                 }
             }
@@ -120,6 +130,8 @@ pub(crate) fn handle(command: BaseCommands, runtime: &mut RuntimeMode) -> Result
             .ok_or_else(|| anyhow!("base id/path not found: {}", args.path_or_id))?;
             let document = decode_base_document(&base.config_json)
                 .with_context(|| format!("decode base document '{}'", base.file_path))?;
+            BaseViewRegistry::from_document(&document)
+                .map_err(|source| anyhow!("decode base view registry failed: {source}"))?;
             let views = document
                 .views
                 .iter()

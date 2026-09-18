@@ -5,7 +5,6 @@ use std::time::UNIX_EPOCH;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rayon::prelude::*;
 use thiserror::Error;
-use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::{CasePolicy, PathCanonicalizationError, PathCanonicalizationService};
@@ -13,9 +12,9 @@ use crate::{CasePolicy, PathCanonicalizationError, PathCanonicalizationService};
 /// One file record from a vault scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultManifestEntry {
-    /// Canonical absolute path after symlink resolution.
+    /// Physical absolute path. Symlinks are excluded and this spelling is retained.
     pub absolute: PathBuf,
-    /// Canonical path relative to the vault root.
+    /// Physical path relative to the canonical vault root.
     pub relative: PathBuf,
     /// UTF-8 NFC normalized relative path with `/` separators.
     pub normalized: String,
@@ -66,25 +65,53 @@ impl VaultScanService {
 
     /// Perform a full vault scan and return a deterministic manifest.
     pub fn scan(&self) -> Result<VaultManifest, VaultScanError> {
+        self.scan_from(self.root(), true)
+    }
+
+    /// Scan one physical vault-relative directory using root inclusion rules.
+    /// A non-recursive scan includes only the immediate regular files.
+    pub fn scan_subtree(
+        &self,
+        folder: &str,
+        recursive: bool,
+    ) -> Result<VaultManifest, VaultScanError> {
+        let physical = self.canonicalizer.physical_path(folder).map_err(|source| {
+            VaultScanError::Canonicalize {
+                path: self.root().join(folder),
+                source,
+            }
+        })?;
+        if !physical.absolute.is_dir() {
+            return Err(VaultScanError::Canonicalize {
+                path: physical.absolute.clone(),
+                source: PathCanonicalizationError::RootNotDirectory {
+                    path: physical.absolute,
+                },
+            });
+        }
+        self.scan_from(&physical.absolute, recursive)
+    }
+
+    fn scan_from(
+        &self,
+        scan_root: &Path,
+        recursive: bool,
+    ) -> Result<VaultManifest, VaultScanError> {
+        crate::check_index_cancellation()?;
+        let cancellation = crate::cancellation::current_cancellation();
         let root = self.canonicalizer.root().to_path_buf();
-        let root_for_filter = root.clone();
         let case_policy = self.canonicalizer.case_policy();
-        let taoignore = load_taoignore(&root, case_policy)?;
+        let inclusion = VaultInclusionPolicy::load(&root, case_policy)?;
         let mut discovered_files = Vec::new();
 
-        for entry in WalkDir::new(&root)
+        for entry in WalkDir::new(scan_root)
             .follow_links(false)
+            .max_depth(if recursive { usize::MAX } else { 1 })
             .sort_by_file_name()
             .into_iter()
-            .filter_entry(|entry| {
-                should_include_scan_entry(
-                    entry.path(),
-                    entry.file_type().is_dir(),
-                    &root_for_filter,
-                    &taoignore,
-                )
-            })
+            .filter_entry(|entry| inclusion.includes(entry.path(), entry.file_type().is_dir()))
         {
+            crate::check_index_cancellation()?;
             let entry = entry.map_err(|source| VaultScanError::Walk {
                 root: root.clone(),
                 source,
@@ -100,23 +127,27 @@ impl VaultScanService {
         let mut entries = discovered_files
             .into_par_iter()
             .map(|absolute| {
-                let relative = absolute
-                    .strip_prefix(&root)
-                    .map_err(|_| VaultScanError::OutsideRoot {
-                        root: root.clone(),
-                        path: absolute.clone(),
-                    })?
-                    .to_path_buf();
-                let normalized = normalize_relative_path(&relative)?;
-                let match_key = match case_policy {
-                    CasePolicy::Sensitive => normalized.clone(),
-                    CasePolicy::Insensitive => normalized.to_ascii_lowercase(),
-                };
-                let metadata =
-                    fs::metadata(&absolute).map_err(|source| VaultScanError::Metadata {
+                if let Some(context) = &cancellation {
+                    context.check()?;
+                }
+                let canonical = self
+                    .canonicalizer
+                    .regular_file(&absolute)
+                    .map_err(|source| VaultScanError::Canonicalize {
                         path: absolute.clone(),
                         source,
                     })?;
+                let metadata =
+                    fs::symlink_metadata(&absolute).map_err(|source| VaultScanError::Metadata {
+                        path: absolute.clone(),
+                        source,
+                    })?;
+                if !metadata.is_file() {
+                    return Err(VaultScanError::Canonicalize {
+                        path: absolute.clone(),
+                        source: PathCanonicalizationError::NotRegularFile { path: absolute },
+                    });
+                }
                 let modified_unix_ms = metadata
                     .modified()
                     .map_err(|source| VaultScanError::ModifiedTime {
@@ -138,9 +169,9 @@ impl VaultScanService {
 
                 Ok(VaultManifestEntry {
                     absolute,
-                    relative,
-                    normalized,
-                    match_key,
+                    relative: canonical.relative,
+                    normalized: canonical.normalized,
+                    match_key: canonical.match_key,
                     size_bytes: metadata.len(),
                     modified_unix_ms,
                 })
@@ -153,32 +184,23 @@ impl VaultScanService {
                 .then(left.normalized.cmp(&right.normalized))
         });
 
+        validate_sorted_identities(&entries)?;
+
         Ok(VaultManifest { root, entries })
     }
 }
 
-fn normalize_relative_path(path: &Path) -> Result<String, VaultScanError> {
-    let mut segments = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(value) => {
-                let value = value
-                    .to_str()
-                    .ok_or_else(|| VaultScanError::NonUtf8Component {
-                        path: path.to_path_buf(),
-                    })?;
-                segments.push(value.nfc().collect::<String>());
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(VaultScanError::InvalidPathComponent {
-                    path: path.to_path_buf(),
-                });
-            }
+fn validate_sorted_identities(entries: &[VaultManifestEntry]) -> Result<(), VaultScanError> {
+    for pair in entries.windows(2) {
+        if pair[0].match_key == pair[1].match_key {
+            return Err(VaultScanError::IdentityCollision {
+                match_key: pair[0].match_key.clone(),
+                first: pair[0].relative.clone(),
+                second: pair[1].relative.clone(),
+            });
         }
     }
-
-    Ok(segments.join("/"))
+    Ok(())
 }
 
 fn load_taoignore(root: &Path, case_policy: CasePolicy) -> Result<Gitignore, VaultScanError> {
@@ -213,27 +235,83 @@ fn load_taoignore(root: &Path, case_policy: CasePolicy) -> Result<Gitignore, Vau
         })
 }
 
+/// Shared lexical inclusion policy for inventory scans and filesystem events.
+/// Symlink and regular-file checks happen at the point of filesystem access.
+#[derive(Debug, Clone)]
+pub struct VaultInclusionPolicy {
+    root: PathBuf,
+    taoignore: Gitignore,
+    case_policy: CasePolicy,
+}
+
+impl VaultInclusionPolicy {
+    /// Load only the vault root `.taoignore`; Git ignore files are not consulted.
+    pub fn load(root: &Path, case_policy: CasePolicy) -> Result<Self, VaultScanError> {
+        Ok(Self {
+            root: root.to_path_buf(),
+            taoignore: load_taoignore(root, case_policy)?,
+            case_policy,
+        })
+    }
+
+    /// Whether a path is the root ignore-control file, which watchers must observe.
+    #[must_use]
+    pub fn is_control_path(&self, path: &Path) -> bool {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        path.strip_prefix(&self.root)
+            .is_ok_and(|relative| relative == Path::new(".taoignore"))
+    }
+
+    /// Whether a physical or vault-relative path belongs in the inventory.
+    /// This does not probe the filesystem, so it also works for deletion events.
+    #[must_use]
+    pub fn includes(&self, path: &Path, is_dir: bool) -> bool {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        should_include_scan_entry(&path, is_dir, &self.root, &self.taoignore, self.case_policy)
+    }
+}
+
 fn should_include_scan_entry(
     path: &Path,
     is_dir: bool,
     root: &Path,
     taoignore: &Gitignore,
+    case_policy: CasePolicy,
 ) -> bool {
     if path == root {
         return true;
     }
 
     let Ok(relative) = path.strip_prefix(root) else {
-        return true;
+        return false;
     };
+    if relative
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return false;
+    }
     let Some(Component::Normal(first_component)) = relative.components().next() else {
-        return true;
+        return false;
     };
-
-    if matches!(
-        first_component.to_str(),
-        Some(".git" | ".obsidian" | ".tao")
-    ) {
+    let is_reserved = first_component.to_str().is_some_and(|name| {
+        [".git", ".obsidian", ".tao"].iter().any(|reserved| {
+            if case_policy == CasePolicy::Insensitive {
+                name.eq_ignore_ascii_case(reserved)
+            } else {
+                name == *reserved
+            }
+        })
+    });
+    if is_reserved {
         return false;
     }
 
@@ -249,6 +327,19 @@ fn should_include_scan_entry(
 /// Errors returned by vault scan operations.
 #[derive(Debug, Error)]
 pub enum VaultScanError {
+    /// Request cancellation stopped the scan before publication.
+    #[error(transparent)]
+    Cancelled(#[from] crate::OperationCancelled),
+    /// Two physical paths cannot be represented by one normalized comparison key.
+    #[error("vault path identity collision for '{match_key}': '{first}' and '{second}'")]
+    IdentityCollision {
+        /// Shared NFC/case-policy comparison key.
+        match_key: String,
+        /// First physical path.
+        first: PathBuf,
+        /// Second physical path.
+        second: PathBuf,
+    },
     /// Filesystem walk failed.
     #[error("failed to walk vault root '{root}': {source}")]
     Walk {
@@ -679,6 +770,128 @@ mod tests {
 
         assert!(error.to_string().contains("failed to parse .taoignore"));
         assert!(error.to_string().contains("{foo,bar"));
+    }
+
+    #[test]
+    fn scan_fingerprint_and_capture_share_unicode_keys_and_physical_paths() {
+        let temp = tempdir().expect("tempdir");
+        let physical_name = "A\u{308}pfel.MD";
+        fs::write(temp.path().join(physical_name), "# Apple").expect("write");
+        let scanner =
+            VaultScanService::from_root(temp.path(), CasePolicy::Insensitive).expect("scanner");
+        let manifest = scanner.scan().expect("scan");
+        let entry = &manifest.entries[0];
+        assert_eq!(entry.normalized, "Äpfel.MD");
+        assert_eq!(entry.match_key, "äpfel.md");
+        assert_eq!(
+            fs::read_to_string(&entry.absolute).expect("physical read"),
+            "# Apple"
+        );
+        let service =
+            crate::FileFingerprintService::from_root(temp.path(), CasePolicy::Insensitive)
+                .expect("service");
+        let captured = service
+            .capture(&entry.absolute)
+            .expect("capture physical path");
+        assert_eq!(entry.relative, captured.fingerprint.relative);
+        assert_eq!(entry.match_key, captured.fingerprint.match_key);
+    }
+
+    #[test]
+    fn scan_reports_comparison_collisions_when_physical_names_can_coexist() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("Äpfel.md"), "# Upper").expect("upper");
+        fs::write(temp.path().join("äpfel.md"), "# Lower").expect("lower");
+        if fs::read_dir(temp.path()).expect("entries").count() != 2 {
+            return; // Case-insensitive filesystems cannot construct this collision.
+        }
+        let scanner =
+            VaultScanService::from_root(temp.path(), CasePolicy::Insensitive).expect("scanner");
+        assert!(matches!(
+            scanner.scan(),
+            Err(super::VaultScanError::IdentityCollision { .. })
+        ));
+        assert_eq!(
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive)
+                .expect("scanner")
+                .scan()
+                .expect("sensitive")
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn collision_diagnostic_retains_distinct_physical_spellings() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("Café.md"), "# Note").expect("note");
+        let scanner =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        let mut entries = scanner.scan().expect("scan").entries;
+        // Exercise NFC collisions even on filesystems which cannot create both
+        // physical spellings. Production input is the sorted scanner inventory.
+        entries[0].relative = PathBuf::from("Café.md");
+        let mut decomposed = entries[0].clone();
+        decomposed.relative = PathBuf::from("Cafe\u{301}.md");
+        entries.push(decomposed);
+        let error = super::validate_sorted_identities(&entries).expect_err("NFC collision");
+        match error {
+            super::VaultScanError::IdentityCollision {
+                first,
+                second,
+                match_key,
+            } => {
+                assert_ne!(first, second);
+                assert_eq!(match_key, "Café.md");
+            }
+            other => panic!("unexpected diagnostic: {other}"),
+        }
+    }
+
+    #[test]
+    fn scoped_scan_preserves_root_exclusions_and_recursion_boundary() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes/nested")).expect("mkdir");
+        fs::write(temp.path().join("notes/a.MD"), "# A").expect("a");
+        fs::write(temp.path().join("notes/nested/b.md"), "# B").expect("b");
+        fs::write(temp.path().join("notes/excluded.md"), "# Excluded").expect("excluded");
+        fs::write(temp.path().join(".taoignore"), "notes/excluded.md\n").expect("ignore");
+        let scanner =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        assert_eq!(
+            normalized_paths(&scanner.scan_subtree("notes", false).expect("shallow")),
+            ["notes/a.MD"]
+        );
+        assert_eq!(
+            normalized_paths(&scanner.scan_subtree("notes", true).expect("recursive")),
+            ["notes/a.MD", "notes/nested/b.md"]
+        );
+        assert!(scanner.scan_subtree("../", true).is_err());
+        assert!(scanner.scan_subtree("notes/a.MD", true).is_err());
+        let policy = super::VaultInclusionPolicy::load(scanner.root(), CasePolicy::Sensitive)
+            .expect("policy");
+        assert!(!policy.includes(std::path::Path::new("../outside.md"), false));
+        assert!(!policy.includes(std::path::Path::new("/outside.md"), false));
+        assert!(policy.is_control_path(std::path::Path::new(".taoignore")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_and_scoped_scan_exclude_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("notes")).expect("mkdir");
+        fs::write(temp.path().join("notes/a.md"), "# A").expect("write");
+        symlink(temp.path().join("notes/a.md"), temp.path().join("alias.md")).expect("file alias");
+        symlink(temp.path().join("notes"), temp.path().join("alias")).expect("directory alias");
+        let scanner =
+            VaultScanService::from_root(temp.path(), CasePolicy::Sensitive).expect("scanner");
+        assert_eq!(
+            normalized_paths(&scanner.scan().expect("scan")),
+            ["notes/a.md"]
+        );
+        assert!(scanner.scan_subtree("alias", true).is_err());
     }
 
     fn normalized_paths(manifest: &crate::VaultManifest) -> Vec<&str> {

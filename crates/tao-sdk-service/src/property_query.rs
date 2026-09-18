@@ -1,9 +1,6 @@
 //! Property query service for structured property lookup and filtering.
 
-use std::cmp::Ordering;
-
-use rusqlite::Connection;
-use tao_sdk_storage::PropertiesRepository;
+use rusqlite::{Connection, params};
 use thiserror::Error;
 
 /// Sorting strategies supported by property query APIs.
@@ -85,85 +82,104 @@ impl PropertyQueryService {
             return Err(PropertyQueryError::InvalidLimit { limit: 0 });
         }
 
-        let mut rows = PropertiesRepository::list_by_key_with_paths(connection, key)
-            .map_err(|source| PropertyQueryError::Repository { source })?;
-
-        if let Some(filter) = request
+        let order = match request.sort {
+            PropertyQuerySort::FilePathAsc => "f.normalized_path ASC, p.property_id ASC",
+            PropertyQuerySort::FilePathDesc => "f.normalized_path DESC, p.property_id ASC",
+            PropertyQuerySort::UpdatedAtAsc => {
+                "p.updated_at ASC, f.normalized_path ASC, p.property_id ASC"
+            }
+            PropertyQuerySort::UpdatedAtDesc => {
+                "p.updated_at DESC, f.normalized_path ASC, p.property_id ASC"
+            }
+            PropertyQuerySort::ValueAsc => {
+                "p.value_json ASC, f.normalized_path ASC, p.property_id ASC"
+            }
+            PropertyQuerySort::ValueDesc => {
+                "p.value_json DESC, f.normalized_path ASC, p.property_id ASC"
+            }
+        };
+        let filter = request
             .value_contains
             .as_deref()
             .map(str::trim)
-            .filter(|filter| !filter.is_empty())
-        {
-            let filter = filter.to_lowercase();
-            rows.retain(|row| row.value_json.to_lowercase().contains(&filter));
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase);
+        // SQLite's lower() is ASCII-only. Keep Unicode substring semantics in a
+        // streaming fallback, rather than silently changing them for pushdown.
+        let (limit, offset) = if filter.is_some() {
+            (-1, 0)
+        } else {
+            (
+                request
+                    .limit
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| PropertyQueryError::InvalidLimit {
+                        limit: request.limit.unwrap_or_default(),
+                    })?
+                    .unwrap_or(-1),
+                i64::try_from(request.offset).map_err(|_| PropertyQueryError::InvalidOffset {
+                    offset: request.offset,
+                })?,
+            )
+        };
+        let query = format!(
+            "SELECT p.property_id, p.file_id, f.normalized_path, p.key, p.value_type, p.value_json, p.updated_at FROM properties p JOIN files f ON f.file_id = p.file_id WHERE p.key = ?1 ORDER BY {order} LIMIT ?2 OFFSET ?3"
+        );
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|source| PropertyQueryError::Sql { source })?;
+        let mapped = statement
+            .query_map(params![key, limit, offset], |row| {
+                Ok(PropertyQueryRow {
+                    property_id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    key: row.get(3)?,
+                    value_type: row.get(4)?,
+                    value_json: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|source| PropertyQueryError::Sql { source })?;
+        let mut total = 0_u64;
+        let mut rows = Vec::new();
+        for row in mapped {
+            let row = row.map_err(|source| PropertyQueryError::Sql { source })?;
+            if let Some(filter) = &filter {
+                if !row.value_json.to_lowercase().contains(filter) {
+                    continue;
+                }
+                let position = total;
+                total += 1;
+                if position < request.offset as u64
+                    || request.limit.is_some_and(|limit| rows.len() >= limit)
+                {
+                    continue;
+                }
+            }
+            rows.push(row);
+        }
+        if filter.is_none() {
+            total = connection.query_row("SELECT COUNT(*) FROM properties p JOIN files f ON f.file_id=p.file_id WHERE p.key=?1", [key], |row| row.get(0)).map_err(|source| PropertyQueryError::Sql { source })?;
         }
 
-        rows.sort_by(|left, right| compare_property_rows(left, right, request.sort));
-
-        let total = rows.len() as u64;
-        let iter = rows.into_iter().skip(request.offset);
-        let paged_rows = match request.limit {
-            Some(limit) => iter.take(limit).collect::<Vec<_>>(),
-            None => iter.collect::<Vec<_>>(),
-        };
-
-        let rows = paged_rows
-            .into_iter()
-            .map(|row| PropertyQueryRow {
-                property_id: row.property_id,
-                file_id: row.file_id,
-                file_path: row.file_path,
-                key: row.key,
-                value_type: row.value_type,
-                value_json: row.value_json,
-                updated_at: row.updated_at,
-            })
-            .collect();
-
         Ok(PropertyQueryResult { total, rows })
-    }
-}
-
-fn compare_property_rows(
-    left: &tao_sdk_storage::PropertyWithPath,
-    right: &tao_sdk_storage::PropertyWithPath,
-    sort: PropertyQuerySort,
-) -> Ordering {
-    match sort {
-        PropertyQuerySort::FilePathAsc => left
-            .file_path
-            .cmp(&right.file_path)
-            .then_with(|| left.property_id.cmp(&right.property_id)),
-        PropertyQuerySort::FilePathDesc => right
-            .file_path
-            .cmp(&left.file_path)
-            .then_with(|| left.property_id.cmp(&right.property_id)),
-        PropertyQuerySort::UpdatedAtAsc => left
-            .updated_at
-            .cmp(&right.updated_at)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.property_id.cmp(&right.property_id)),
-        PropertyQuerySort::UpdatedAtDesc => right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.property_id.cmp(&right.property_id)),
-        PropertyQuerySort::ValueAsc => left
-            .value_json
-            .cmp(&right.value_json)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.property_id.cmp(&right.property_id)),
-        PropertyQuerySort::ValueDesc => right
-            .value_json
-            .cmp(&left.value_json)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.property_id.cmp(&right.property_id)),
     }
 }
 
 /// Property query failures.
 #[derive(Debug, Error)]
 pub enum PropertyQueryError {
+    /// SQL query execution failed.
+    #[error("property query failed: {source}")]
+    Sql {
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Requested offset does not fit SQLite's integer range.
+    #[error("property query offset is out of range: {offset}")]
+    InvalidOffset { offset: usize },
     /// Query key was empty.
     #[error("property query key must not be empty")]
     InvalidKey,
@@ -172,12 +188,5 @@ pub enum PropertyQueryError {
     InvalidLimit {
         /// Invalid limit value.
         limit: usize,
-    },
-    /// Properties repository query failed.
-    #[error("property query repository operation failed: {source}")]
-    Repository {
-        /// Repository error.
-        #[source]
-        source: tao_sdk_storage::PropertiesRepositoryError,
     },
 }

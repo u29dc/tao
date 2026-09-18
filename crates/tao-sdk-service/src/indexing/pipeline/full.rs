@@ -24,201 +24,100 @@ pub struct FullIndexService {
 }
 
 impl FullIndexService {
-    /// Rebuild all core index tables from the current vault filesystem state.
+    /// Rebuild canonical revisions and publish all projections atomically.
     pub fn rebuild(
         &self,
         vault_root: &Path,
         connection: &mut Connection,
         case_policy: CasePolicy,
     ) -> Result<FullIndexResult, FullIndexError> {
-        let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
-            FullIndexError::CreateScanner {
+        let _publication =
+            crate::publication_lock::PublicationGuard::acquire(connection).map_err(|source| {
+                FullIndexError::CanonicalState {
+                    operation: "coordinate_full_publication",
+                    message: source.to_string(),
+                }
+            })?;
+        let generation = tao_sdk_storage::IndexGenerationRepository::get(connection)
+            .map_err(|source| FullIndexError::CanonicalState {
+                operation: "full_preparation_generation",
+                message: source.to_string(),
+            })?
+            .canonical_generation;
+        let manifest = VaultScanService::from_root(vault_root, case_policy)
+            .map_err(|source| FullIndexError::CreateScanner {
                 source: Box::new(source),
-            }
-        })?;
-        let manifest = scanner.scan().map_err(|source| FullIndexError::Scan {
-            source: Box::new(source),
-        })?;
-
-        let resolution_candidates: Vec<String> = manifest
+            })?
+            .scan()
+            .map_err(|source| FullIndexError::Scan {
+                source: Box::new(source),
+            })?;
+        let paths = manifest
             .entries
             .iter()
             .map(|entry| entry.normalized.clone())
-            .collect();
-        let resolution_index = LinkResolutionIndex::with_case_policy(
-            &resolution_candidates,
-            link_case_policy(case_policy),
-        );
-        let markdown_candidates: Vec<String> = manifest
+            .collect::<std::collections::HashSet<_>>();
+        let mut changes = manifest
             .entries
-            .iter()
-            .filter(|entry| entry.normalized.ends_with(".md"))
-            .map(|entry| entry.normalized.clone())
-            .collect();
-
-        let prepared_entries = manifest
-            .entries
-            .par_iter()
-            .map(|entry| build_prepared_index_entry(entry, self.parser))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut file_records = Vec::with_capacity(prepared_entries.len());
-        let mut file_id_by_path = HashMap::with_capacity(prepared_entries.len());
-        let mut markdown_docs = Vec::new();
-        let mut base_records = Vec::new();
-
-        for prepared in prepared_entries {
-            file_id_by_path.insert(
-                prepared.file_record.normalized_path.clone(),
-                prepared.file_record.file_id.clone(),
-            );
-            file_records.push(prepared.file_record);
-            if let Some(markdown_doc) = prepared.markdown_doc {
-                markdown_docs.push(markdown_doc);
-            }
-            if let Some(base_record) = prepared.base_record {
-                base_records.push(base_record);
-            }
-        }
-
-        markdown_docs.sort_by(|left, right| left.source_path.cmp(&right.source_path));
-        file_records.sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
-        base_records.sort_by(|left, right| left.base_id.cmp(&right.base_id));
-
-        let mut property_records = markdown_docs
-            .iter()
-            .flat_map(|document| document.properties.iter().cloned())
-            .collect::<Vec<_>>();
-        let mut task_records = markdown_docs
-            .iter()
-            .flat_map(|document| document.tasks.iter().cloned())
-            .collect::<Vec<_>>();
-        property_records.sort_by(|left, right| left.property_id.cmp(&right.property_id));
-        task_records.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-
-        let heading_index = markdown_docs
-            .iter()
-            .map(|document| (document.source_path.clone(), document.heading_slugs.clone()))
-            .collect::<HashMap<_, _>>();
-        let block_index = markdown_docs
-            .iter()
-            .map(|document| (document.source_path.clone(), document.block_ids.clone()))
-            .collect::<HashMap<_, _>>();
-        let mut unresolved_links = 0_u64;
-        let mut link_records = markdown_docs
-            .par_iter()
-            .map(|document| {
-                resolve_document_link_records(
-                    document,
-                    &resolution_index,
-                    &file_id_by_path,
-                    &heading_index,
-                    &block_index,
-                )
+            .into_iter()
+            .map(|entry| IndexChange::Upsert {
+                entry: Box::new(entry),
+                captured: None,
             })
             .collect::<Vec<_>>();
-        let mut link_record_rows = Vec::new();
-        for batch in link_records.drain(..) {
-            unresolved_links += batch.unresolved_total;
-            link_record_rows.extend(batch.records);
+        for existing in FilesRepository::list_all(connection).map_err(|source| {
+            FullIndexError::UpsertFileMetadata {
+                source: Box::new(source),
+            }
+        })? {
+            if !paths.contains(&existing.normalized_path) {
+                changes.push(IndexChange::Remove {
+                    normalized_path: existing.normalized_path,
+                });
+            }
         }
-        link_record_rows.sort_by(|left, right| left.link_id.cmp(&right.link_id));
-        let link_records = link_record_rows;
-
-        let transaction =
+        apply::apply_changes(
+            vault_root,
+            connection,
+            changes,
+            case_policy,
+            self.parser,
+            apply::PublicationOptions {
+                force: true,
+                force_full_corpus: true,
+                expected_generation: Some(generation),
+            },
+        )?;
+        let count = |sql: &str| {
             connection
-                .transaction()
-                .map_err(|source| FullIndexError::BeginTransaction {
-                    source: Box::new(source),
-                })?;
-
-        transaction
-            .execute_batch(
-                "DELETE FROM links;\
-                 DELETE FROM properties;\
-                 DELETE FROM bases;\
-                 DELETE FROM render_cache;\
-                 DELETE FROM tasks;\
-                 DELETE FROM files;",
-            )
-            .map_err(|source| FullIndexError::ClearTables {
-                source: Box::new(source),
-            })?;
-
-        upsert_files_batch(&transaction, &file_records)?;
-        upsert_properties_batch(&transaction, &property_records)?;
-        upsert_tasks_batch(&transaction, &task_records)?;
-        insert_links_batch(&transaction, &link_records)?;
-        upsert_bases_batch(&transaction, &base_records)?;
-        let search_corpus = crate::SearchCorpusService
-            .rebuild_in_transaction(&transaction, case_policy)
-            .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                source: Box::new(source),
-            })?;
-
-        let now_unix_ms = current_unix_ms()?;
+                .query_row(sql, [], |row| row.get::<_, u64>(0))
+                .map_err(|source| FullIndexError::CanonicalState {
+                    operation: "full_index_totals",
+                    message: source.to_string(),
+                })
+        };
+        let result = FullIndexResult {
+            indexed_files: count("SELECT COUNT(*) FROM files")?,
+            markdown_files: count("SELECT COUNT(*) FROM files WHERE is_markdown=1")?,
+            links_total: count("SELECT COUNT(*) FROM links")?,
+            unresolved_links: count("SELECT COUNT(*) FROM links WHERE is_unresolved=1")?,
+            properties_total: count("SELECT COUNT(*) FROM properties")?,
+            bases_total: count("SELECT COUNT(*) FROM bases")?,
+        };
+        let summary = json!({"mode":"full_rebuild","indexed_files":result.indexed_files,
+            "markdown_files":result.markdown_files,"links_total":result.links_total,
+            "unresolved_links":result.unresolved_links,"properties_total":result.properties_total,
+            "bases_total":result.bases_total,"completed_unix_ms":current_unix_ms()?});
         IndexStateRepository::upsert(
-            &transaction,
-            &IndexStateRecordInput {
-                key: "last_index_at".to_string(),
-                value_json: now_unix_ms.to_string(),
-            },
-        )
-        .map_err(|source| FullIndexError::UpsertIndexState {
-            source: Box::new(source),
-        })?;
-        IndexStateRepository::upsert(
-            &transaction,
-            &IndexStateRecordInput {
-                key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
-                value_json: CURRENT_LINK_RESOLUTION_VERSION.to_string(),
-            },
-        )
-        .map_err(|source| FullIndexError::UpsertIndexState {
-            source: Box::new(source),
-        })?;
-
-        let summary_json = serde_json::to_string(&json!({
-            "mode": "full_rebuild",
-            "indexed_files": file_records.len(),
-            "markdown_files": markdown_candidates.len(),
-            "links_total": link_records.len(),
-            "unresolved_links": unresolved_links,
-            "properties_total": property_records.len(),
-            "tasks_total": task_records.len(),
-            "bases_total": base_records.len(),
-            "search_segments_total": search_corpus.search_segments_total,
-            "search_aliases_total": search_corpus.search_aliases_total,
-            "completed_unix_ms": now_unix_ms,
-        }))
-        .map_err(|source| FullIndexError::SerializeStateSummary {
-            source: Box::new(source),
-        })?;
-
-        IndexStateRepository::upsert(
-            &transaction,
+            connection,
             &IndexStateRecordInput {
                 key: "last_full_index_summary".to_string(),
-                value_json: summary_json,
+                value_json: summary.to_string(),
             },
         )
         .map_err(|source| FullIndexError::UpsertIndexState {
             source: Box::new(source),
         })?;
-
-        transaction
-            .commit()
-            .map_err(|source| FullIndexError::CommitTransaction {
-                source: Box::new(source),
-            })?;
-
-        Ok(FullIndexResult {
-            indexed_files: file_records.len() as u64,
-            markdown_files: markdown_candidates.len() as u64,
-            links_total: link_records.len() as u64,
-            unresolved_links,
-            properties_total: property_records.len() as u64,
-            bases_total: base_records.len() as u64,
-        })
+        Ok(result)
     }
 }

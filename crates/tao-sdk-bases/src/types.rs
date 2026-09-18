@@ -46,7 +46,7 @@ pub fn coerce_json_value(
     field_type: BaseFieldType,
     mode: BaseCoercionMode,
 ) -> Result<JsonValue, BaseCoercionError> {
-    if matches!(mode, BaseCoercionMode::Permissive) {
+    if value.is_null() || matches!(mode, BaseCoercionMode::Permissive) {
         return Ok(value.clone());
     }
 
@@ -86,6 +86,12 @@ fn coerce_number(value: &JsonValue) -> Result<JsonValue, String> {
             let normalized = value.trim();
             if normalized.is_empty() {
                 return Err("empty string is not coercible to number".to_string());
+            }
+            if let Ok(integer) = normalized.parse::<i64>() {
+                return Ok(JsonValue::from(integer));
+            }
+            if let Ok(integer) = normalized.parse::<u64>() {
+                return Ok(JsonValue::from(integer));
             }
             let parsed = normalized
                 .parse::<f64>()
@@ -136,11 +142,29 @@ fn is_iso_date(value: &str) -> bool {
         return false;
     }
     let bytes = value.as_bytes();
-    bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[..4].iter().all(|byte| byte.is_ascii_digit())
-        && bytes[5..7].iter().all(|byte| byte.is_ascii_digit())
-        && bytes[8..10].iter().all(|byte| byte.is_ascii_digit())
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4]
+            .iter()
+            .chain(&bytes[5..7])
+            .chain(&bytes[8..10])
+            .all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    let year = value[..4].parse::<u32>().unwrap_or_default();
+    let month = value[5..7].parse::<u32>().unwrap_or_default();
+    let day = value[8..10].parse::<u32>().unwrap_or_default();
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    };
+    day > 0 && day <= days
 }
 
 #[cfg(test)]
@@ -180,7 +204,7 @@ mod tests {
                 BaseCoercionMode::Strict
             )
             .expect("number"),
-            json!(42.0)
+            json!(42)
         );
         assert_eq!(
             coerce_json_value(
@@ -199,6 +223,41 @@ mod tests {
             )
             .expect("date"),
             json!("2026-03-05")
+        );
+    }
+    #[test]
+    fn strict_dates_and_large_integer_strings_are_validated_without_rounding() {
+        for date in ["2026-99-99", "2026-02-29", "1900-02-29", "2026-04-31"] {
+            assert!(
+                coerce_json_value(&json!(date), BaseFieldType::Date, BaseCoercionMode::Strict)
+                    .is_err()
+            );
+        }
+        assert!(
+            coerce_json_value(
+                &json!("2000-02-29"),
+                BaseFieldType::Date,
+                BaseCoercionMode::Strict
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            coerce_json_value(
+                &json!("9007199254740993"),
+                BaseFieldType::Number,
+                BaseCoercionMode::Strict
+            )
+            .unwrap(),
+            json!(9_007_199_254_740_993_u64)
+        );
+        assert_eq!(
+            coerce_json_value(
+                &json!(null),
+                BaseFieldType::String,
+                BaseCoercionMode::Strict
+            )
+            .unwrap(),
+            json!(null)
         );
     }
 }

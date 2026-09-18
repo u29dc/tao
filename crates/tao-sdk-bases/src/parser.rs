@@ -118,6 +118,16 @@ pub fn parse_base_document(input: &str) -> Result<BaseDocument, BaseParseError> 
             expected: "sequence",
         });
     };
+    for (key, _) in &root {
+        if !matches!(key.as_str(), Some("views" | "filters" | "properties")) {
+            return Err(BaseParseError::UnsupportedRootFilter {
+                expression: format!(
+                    "unsupported root field {}",
+                    key.as_str().unwrap_or("<non-string>")
+                ),
+            });
+        }
+    }
     let defaults = parse_obsidian_root_defaults(&root)?;
 
     let mut views = Vec::with_capacity(view_values.len());
@@ -166,6 +176,15 @@ fn parse_view_mapping(
     view_index: usize,
     defaults: &ObsidianRootDefaults,
 ) -> Result<BaseViewDefinition, BaseParseError> {
+    for (left, right) in [("sorts", "sort"), ("columns", "order")] {
+        if mapping.contains_key(left) && mapping.contains_key(right) {
+            return Err(BaseParseError::UnsupportedValue {
+                view_index,
+                field: left.to_string(),
+                value: format!("cannot combine '{left}' and '{right}'"),
+            });
+        }
+    }
     let kind = match mapping_get(mapping, "type") {
         Some(Value::String(kind)) => parse_view_kind(kind, view_index, "type")?,
         Some(_) => {
@@ -190,7 +209,7 @@ fn parse_view_mapping(
         None => default_view_name(kind, view_index),
     };
 
-    let source = match mapping_get(mapping, "source") {
+    let mut source = match mapping_get(mapping, "source") {
         Some(Value::String(source)) => {
             Some(normalize_non_empty_string(source, view_index, "source")?)
         }
@@ -204,6 +223,15 @@ fn parse_view_mapping(
         None => defaults.source.clone(),
     };
 
+    if let (Some(root), Some(view)) = (&defaults.source, &source) {
+        source = Some(intersect_source_paths(root, view).ok_or_else(|| {
+            BaseParseError::UnsupportedValue {
+                view_index,
+                field: "source".to_string(),
+                value: "root and view folder scopes are disjoint".to_string(),
+            }
+        })?);
+    }
     let mut filters = defaults.filters.clone();
     filters.extend(parse_filters(mapping, view_index)?);
     let sorts = parse_sorts(mapping, view_index)?;
@@ -256,6 +284,7 @@ fn parse_filter_op(raw: &str, view_index: usize) -> Result<BaseFilterOp, BasePar
         "in" => Ok(BaseFilterOp::In),
         "not_in" | "notin" | "not-in" => Ok(BaseFilterOp::NotIn),
         "exists" => Ok(BaseFilterOp::Exists),
+        "is_empty" | "isempty" => Ok(BaseFilterOp::IsEmpty),
         "starts_with" | "startswith" => Ok(BaseFilterOp::StartsWith),
         "not_starts_with" | "notstartswith" | "not-starts-with" => Ok(BaseFilterOp::NotStartsWith),
         "ends_with" | "endswith" => Ok(BaseFilterOp::EndsWith),
@@ -344,9 +373,12 @@ fn parse_obsidian_root_filters(
             expected: "mapping",
         });
     };
-    let Some(and_filters) = mapping_get(filters_map, "and") else {
-        return Ok((None, Vec::new()));
-    };
+    if filters_map.len() != 1 || !filters_map.contains_key("and") {
+        return Err(BaseParseError::UnsupportedRootFilter {
+            expression: "root filters support only an 'and' sequence".to_string(),
+        });
+    }
+    let and_filters = mapping_get(filters_map, "and").expect("validated and key");
     let Value::Sequence(expressions) = and_filters else {
         return Err(BaseParseError::InvalidRootFieldType {
             field: "filters.and".to_string(),
@@ -354,7 +386,7 @@ fn parse_obsidian_root_filters(
         });
     };
 
-    let mut source = None;
+    let mut source: Option<String> = None;
     let mut clauses = Vec::new();
     for expression in expressions {
         let Value::String(raw_expression) = expression else {
@@ -366,18 +398,37 @@ fn parse_obsidian_root_filters(
         let parsed = parse_obsidian_filter_expression(raw_expression)?;
         match parsed {
             ObsidianFilterExpr::InFolder(path) => {
-                if source.is_some() && source.as_deref() != Some(path.as_str()) {
-                    return Err(BaseParseError::UnsupportedRootFilter {
-                        expression: raw_expression.clone(),
-                    });
-                }
-                source = Some(path);
+                source = Some(if let Some(existing) = &source {
+                    intersect_source_paths(existing, &path).ok_or_else(|| {
+                        BaseParseError::UnsupportedRootFilter {
+                            expression: raw_expression.clone(),
+                        }
+                    })?
+                } else {
+                    path
+                });
             }
             ObsidianFilterExpr::Clause(clause) => clauses.push(clause),
         }
     }
 
     Ok((source, clauses))
+}
+
+fn intersect_source_paths(left: &str, right: &str) -> Option<String> {
+    let left = left.trim().replace('\\', "/").trim_matches('/').to_string();
+    let right = right
+        .trim()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string();
+    if left.is_empty() || left == right || right.starts_with(&format!("{left}/")) {
+        Some(right)
+    } else if right.is_empty() || left.starts_with(&format!("{right}/")) {
+        Some(left)
+    } else {
+        None
+    }
 }
 
 enum ObsidianFilterExpr {
@@ -424,11 +475,16 @@ fn parse_obsidian_filter_expression(
     }
 
     if let Some(field_expr) = body.strip_suffix(".isEmpty()") {
+        if !valid_expression_field(field_expr) {
+            return Err(BaseParseError::UnsupportedRootFilter {
+                expression: expression.to_string(),
+            });
+        }
         let key = normalize_obsidian_field_key(field_expr);
         let clause = BaseFilterClause {
             key,
-            op: BaseFilterOp::Exists,
-            value: serde_json::Value::Bool(negated),
+            op: BaseFilterOp::IsEmpty,
+            value: serde_json::Value::Bool(!negated),
         };
         return Ok(ObsidianFilterExpr::Clause(clause));
     }
@@ -457,12 +513,7 @@ fn parse_obsidian_comparison_clause(
     }
 
     let field_expr = field_expr.trim();
-    if field_expr.is_empty()
-        || field_expr.contains('(')
-        || field_expr.contains(')')
-        || field_expr.contains('"')
-        || field_expr.contains('\'')
-    {
+    if !valid_expression_field(field_expr) {
         return Err(BaseParseError::UnsupportedRootFilter {
             expression: expression.to_string(),
         });
@@ -491,31 +542,81 @@ fn parse_obsidian_comparison_parts(expression: &str) -> Option<(&str, BaseFilter
         ("<", BaseFilterOp::Lt),
     ];
 
-    for (symbol, op) in OPERATORS {
-        if let Some((lhs, rhs)) = expression.split_once(symbol) {
-            return Some((lhs, op, rhs));
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in expression.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote.is_some() && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if character == active {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            continue;
+        }
+        for (symbol, op) in OPERATORS {
+            if expression[index..].starts_with(symbol) {
+                return Some((
+                    &expression[..index],
+                    op,
+                    &expression[index + symbol.len()..],
+                ));
+            }
         }
     }
 
     None
 }
 
+fn valid_expression_field(field: &str) -> bool {
+    !field.is_empty()
+        && field
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 fn parse_obsidian_scalar_value(raw: &str) -> Option<serde_json::Value> {
-    let parsed = serde_yaml::from_str::<Value>(raw.trim()).ok()?;
+    let raw = raw.trim();
+    let parsed = serde_yaml::from_str::<Value>(raw).ok()?;
     match parsed {
         Value::Null => Some(serde_json::Value::Null),
         Value::Bool(value) => Some(serde_json::Value::Bool(value)),
         Value::Number(value) => serde_json::to_value(value).ok(),
-        Value::String(value) => Some(serde_json::Value::String(value)),
-        Value::Tagged(tagged) => match tagged.value {
-            Value::Null => Some(serde_json::Value::Null),
-            Value::Bool(value) => Some(serde_json::Value::Bool(value)),
-            Value::Number(value) => serde_json::to_value(value).ok(),
-            Value::String(value) => Some(serde_json::Value::String(value)),
-            _ => None,
-        },
+        Value::String(value) if raw.starts_with(['\'', '"']) || valid_expression_field(raw) => {
+            Some(serde_json::Value::String(value))
+        }
         _ => None,
     }
+}
+
+fn validate_mapping_fields(
+    mapping: &Mapping,
+    allowed: &[&str],
+    view_index: usize,
+    field: &str,
+) -> Result<(), BaseParseError> {
+    for key in mapping.keys() {
+        if !key.as_str().is_some_and(|key| allowed.contains(&key)) {
+            return Err(BaseParseError::UnsupportedValue {
+                view_index,
+                field: field.to_string(),
+                value: format!(
+                    "unsupported field '{}'",
+                    key.as_str().unwrap_or("<non-string>")
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_filters(
@@ -543,6 +644,7 @@ fn parse_filters(
             });
         };
 
+        validate_mapping_fields(filter_map, &["key", "op", "value"], view_index, "filters[]")?;
         let key = required_string_field(filter_map, view_index, "key", "filters[]")?;
         let op_raw = required_string_field(filter_map, view_index, "op", "filters[]")?;
         let op = parse_filter_op(&op_raw, view_index)?;
@@ -560,7 +662,7 @@ fn parse_filters(
             })?;
 
         parsed.push(BaseFilterClause {
-            key,
+            key: normalize_obsidian_field_key(&key),
             op,
             value: value_json,
         });
@@ -598,6 +700,19 @@ fn parse_sorts(
             });
         };
 
+        validate_mapping_fields(
+            sort_map,
+            &["key", "property", "direction", "nulls"],
+            view_index,
+            "sorts[]",
+        )?;
+        if sort_map.contains_key("key") && sort_map.contains_key("property") {
+            return Err(BaseParseError::UnsupportedValue {
+                view_index,
+                field: "sorts[]".into(),
+                value: "key and property cannot both be specified".into(),
+            });
+        }
         let key = if sort_map.contains_key("key") {
             required_string_field(sort_map, view_index, "key", "sorts[]")?
         } else {
@@ -663,6 +778,12 @@ fn parse_columns(
                     hidden: false,
                 }),
                 Value::Mapping(column_map) => {
+                    validate_mapping_fields(
+                        column_map,
+                        &["key", "label", "width", "hidden"],
+                        view_index,
+                        "columns[]",
+                    )?;
                     let key = required_string_field(
                         column_map,
                         view_index,
@@ -818,6 +939,7 @@ fn parse_aggregates(
                 });
             };
 
+            validate_mapping_fields(entry, &["alias", "op", "key"], view_index, "aggregates[]")?;
             let alias = required_string_field(entry, view_index, "alias", "aggregates[]")?;
             let op_raw = required_string_field(entry, view_index, "op", "aggregates[]")?;
             let op = parse_aggregate_op(&op_raw, view_index, "aggregates[].op")?;
@@ -870,14 +992,17 @@ fn parse_relations(
                     &format!("relations[{index}]"),
                 )?),
             }),
-            Value::Mapping(entry) => Ok(BaseRelationSpec {
-                key: normalize_obsidian_field_key(&required_string_field(
-                    entry,
-                    view_index,
-                    "key",
-                    "relations[]",
-                )?),
-            }),
+            Value::Mapping(entry) => {
+                validate_mapping_fields(entry, &["key"], view_index, "relations[]")?;
+                Ok(BaseRelationSpec {
+                    key: normalize_obsidian_field_key(&required_string_field(
+                        entry,
+                        view_index,
+                        "key",
+                        "relations[]",
+                    )?),
+                })
+            }
             _ => Err(BaseParseError::InvalidFieldType {
                 view_index,
                 field: format!("relations[{index}]"),
@@ -914,6 +1039,12 @@ fn parse_rollups(
                 });
             };
 
+            validate_mapping_fields(
+                entry,
+                &["alias", "relation", "target", "op"],
+                view_index,
+                "rollups[]",
+            )?;
             let alias = required_string_field(entry, view_index, "alias", "rollups[]")?;
             let relation_key = normalize_obsidian_field_key(&required_string_field(
                 entry,

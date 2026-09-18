@@ -3,36 +3,30 @@ use super::super::*;
 pub(crate) fn handle(command: MetaCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
         MetaCommands::Properties(args) => {
+            use tao_sdk_service::{
+                MetadataAggregationKind, MetadataAggregationRequest, MetadataAggregationService,
+            };
+            let request = MetadataAggregationRequest::new(
+                MetadataAggregationKind::Properties,
+                args.limit,
+                args.offset,
+            )?;
             let resolved = args.resolve()?;
-            let items = with_connection(runtime, &resolved, |connection| {
-                let mut statement = connection
-                    .prepare(
-                        "SELECT key, COUNT(*) AS total FROM properties GROUP BY key ORDER BY key ASC",
-                    )
-                    .context("prepare properties aggregate query")?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok(serde_json::json!({
-                            "key": row.get::<_, String>(0)?,
-                            "total": row.get::<_, u64>(1)?,
-                        }))
-                    })
-                    .context("query properties aggregate rows")?;
-                let mut items = Vec::new();
-                for row in rows {
-                    items.push(row.context("map properties aggregate row")?);
-                }
-                Ok(items)
+            let page = with_connection(runtime, &resolved, |connection| {
+                Ok(MetadataAggregationService.aggregate(connection, request)?)
             })?;
-            let total = items.len();
-            let items = paginate_json_items(items, args.limit, args.offset);
+            let items = page
+                .items
+                .into_iter()
+                .map(|item| serde_json::json!({ "key": item.value, "total": item.total }))
+                .collect::<Vec<_>>();
             Ok(CommandResult {
                 command: "meta.properties".to_string(),
                 summary: "meta properties completed".to_string(),
                 args: serde_json::json!({
-                    "total": total,
-                    "limit": args.limit,
-                    "offset": args.offset,
+                    "total": page.total,
+                    "limit": page.limit,
+                    "offset": page.offset,
                     "items": items,
                 }),
             })
@@ -40,10 +34,6 @@ pub(crate) fn handle(command: MetaCommands, runtime: &mut RuntimeMode) -> Result
         MetaCommands::Tags(args) => handle_meta_token_aggregate(args, "tags", "meta.tags", runtime),
         MetaCommands::Aliases(args) => {
             handle_meta_token_aggregate(args, "aliases", "meta.aliases", runtime)
-        }
-        MetaCommands::Tasks(args) => {
-            let result = handle_task(TaskCommands::List(args), runtime)?;
-            Ok(retag_result(result, "meta.tasks", "meta tasks completed"))
         }
     }
 }

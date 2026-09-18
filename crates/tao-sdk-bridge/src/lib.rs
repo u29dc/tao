@@ -411,6 +411,41 @@ pub struct BridgeKernel {
 }
 
 impl BridgeKernel {
+    /// Open an existing index for a bounded read snapshot without changing schema or paths.
+    pub fn open_read_only(
+        vault_root: impl AsRef<Path>,
+        db_path: impl AsRef<Path>,
+        case_policy: CasePolicy,
+        busy_timeout: std::time::Duration,
+    ) -> Result<Self, BridgeInitError> {
+        let vault_root = vault_root.as_ref().to_path_buf();
+        if !vault_root.is_dir() {
+            return Err(BridgeInitError::VaultRootMissing { vault_root });
+        }
+        let connection =
+            Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|source| BridgeInitError::OpenDb { source })?;
+        connection
+            .busy_timeout(busy_timeout)
+            .map_err(|source| BridgeInitError::OpenDb { source })?;
+        tao_sdk_storage::preflight_migrations(&connection)
+            .map_err(|source| BridgeInitError::RunMigrations { source })?;
+        connection
+            .execute_batch("PRAGMA query_only = ON; BEGIN DEFERRED;")
+            .map_err(|source| BridgeInitError::OpenDb { source })?;
+        Ok(Self {
+            vault_root,
+            case_policy,
+            connection,
+            parser: MarkdownParser,
+        })
+    }
+
+    /// Interrupt the current query when its request deadline or cancellation is reached.
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.connection.get_interrupt_handle()
+    }
+
     /// Open bridge runtime with vault root and sqlite database path.
     pub fn open(
         vault_root: impl AsRef<Path>,
@@ -534,6 +569,32 @@ impl BridgeKernel {
         }
     }
 
+    /// Return one bounded indexed revision with physical line/page locators.
+    #[must_use]
+    pub fn content_get(
+        &self,
+        normalized_path: &str,
+        offset: usize,
+        limit: usize,
+        revision: Option<&str>,
+    ) -> BridgeEnvelope<tao_sdk_service::ContentReadResult> {
+        match tao_sdk_service::read_content(
+            &self.connection,
+            &self.vault_root,
+            normalized_path,
+            offset,
+            limit,
+            revision,
+        ) {
+            Ok(content) => BridgeEnvelope::success(content),
+            Err(error) => BridgeEnvelope::failure(
+                BridgeError::with_code("bridge.content_get.failed", error.to_string()).with_hint(
+                    "refresh the index or restart pagination using continuation_revision",
+                ),
+            ),
+        }
+    }
+
     /// Return parsed note payload for one normalized path.
     #[must_use]
     pub fn note_get(&self, normalized_path: &str) -> BridgeEnvelope<BridgeNoteView> {
@@ -577,6 +638,22 @@ impl BridgeKernel {
                 BridgeError::with_code(BRIDGE_ERROR_NOTE_GET_PARSE_FAILED, source.to_string())
                     .with_hint("fix note markdown syntax issues and retry"),
             ),
+        }
+    }
+
+    /// Return a bounded Markdown listing without materializing the complete vault.
+    #[must_use]
+    pub fn documents_page(
+        &self,
+        offset: usize,
+        limit: u32,
+    ) -> BridgeEnvelope<tao_sdk_service::DocumentListResult> {
+        match tao_sdk_service::list_documents(&self.connection, offset, limit) {
+            Ok(result) => BridgeEnvelope::success(result),
+            Err(error) => BridgeEnvelope::failure(BridgeError::with_code(
+                "bridge.documents_page.failed",
+                error.to_string(),
+            )),
         }
     }
 
@@ -1040,7 +1117,9 @@ fn map_bridge_note_property(property: TypedProperty) -> BridgeNoteProperty {
 fn bridge_note_property_kind(value: &TypedPropertyValue) -> &'static str {
     match value {
         TypedPropertyValue::Bool(_) => "bool",
-        TypedPropertyValue::Number(_) => "number",
+        TypedPropertyValue::Number(_)
+        | TypedPropertyValue::Integer(_)
+        | TypedPropertyValue::UnsignedInteger(_) => "number",
         TypedPropertyValue::Date(_) => "date",
         TypedPropertyValue::String(_) => "string",
         TypedPropertyValue::List(_) => "list",
@@ -1052,6 +1131,8 @@ fn bridge_note_property_display_value(value: &TypedPropertyValue) -> String {
     match value {
         TypedPropertyValue::Bool(value) => value.to_string(),
         TypedPropertyValue::Number(value) => value.to_string(),
+        TypedPropertyValue::Integer(value) => value.to_string(),
+        TypedPropertyValue::UnsignedInteger(value) => value.to_string(),
         TypedPropertyValue::Date(value) | TypedPropertyValue::String(value) => value.clone(),
         TypedPropertyValue::List(_) => {
             serde_json::to_string(&bridge_note_property_json_value(value))
@@ -1064,6 +1145,8 @@ fn bridge_note_property_display_value(value: &TypedPropertyValue) -> String {
 fn bridge_note_property_json_value(value: &TypedPropertyValue) -> JsonValue {
     match value {
         TypedPropertyValue::Bool(value) => JsonValue::Bool(*value),
+        TypedPropertyValue::Integer(value) => JsonValue::Number((*value).into()),
+        TypedPropertyValue::UnsignedInteger(value) => JsonValue::Number((*value).into()),
         TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),

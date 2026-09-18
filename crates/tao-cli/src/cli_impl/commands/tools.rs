@@ -14,6 +14,7 @@ pub(crate) fn handle(args: ToolsArgs) -> Result<CommandResult> {
             "outputFormats": ["json", "toon"],
             "defaultOutputFormat": "json",
             "tool": tool,
+            "schemas": registry::tool_schemas(&tool),
             "globalFlags": registry::global_flags(),
         })
     } else {

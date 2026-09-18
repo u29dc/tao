@@ -33,3 +33,7 @@ Path/defaults -> TOML parse -> typed config -> normalization -> consumer crates.
 ## Limits
 
 - Does not manage runtime overrides directly; callers compose final precedence.
+
+## Supported settings
+
+The schema accepts only `[runtime].case_policy`, `[storage].data_dir`, `[storage].db_path`, and `[vault].root`. Unknown keys or sections fail parsing with a diagnostic. Public vault content is always read-only; there is no configurable write mode. Configuration does not expose unused tracing switches or feature flags.

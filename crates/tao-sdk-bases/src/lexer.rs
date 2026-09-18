@@ -9,10 +9,10 @@ pub(crate) fn parse_function_argument(
     let body = body.trim();
 
     if body.len() >= 2 && body.starts_with('"') && body.ends_with('"') {
-        return Some(body[1..body.len() - 1].to_string());
+        return serde_yaml::from_str::<String>(body).ok();
     }
     if body.len() >= 2 && body.starts_with('\'') && body.ends_with('\'') {
-        return Some(body[1..body.len() - 1].to_string());
+        return serde_yaml::from_str::<String>(body).ok();
     }
 
     None
@@ -34,10 +34,37 @@ pub(crate) fn normalize_obsidian_field_key(raw: &str) -> String {
         return "file_ext".to_string();
     }
     if let Some(rest) = normalized.strip_prefix("note.") {
+        // Keep the namespace whenever a note property would shadow file metadata.
+        if is_file_field(rest)
+            || ["file.", "formula.", "note."]
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        {
+            return normalized.to_string();
+        }
         return rest.to_string();
     }
 
     normalized.to_string()
+}
+
+/// Whether a canonical key refers to built-in file metadata.
+pub fn is_file_field(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "title" | "path" | "file_path" | "folder" | "file_folder" | "ext" | "file_ext"
+    )
+}
+
+/// Storage key for a note-property reference; built-in file fields have no property row.
+pub fn property_key(key: &str) -> Option<&str> {
+    if let Some(key) = key.strip_prefix("note.") {
+        Some(key)
+    } else if is_file_field(key) {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 #[cfg(test)]

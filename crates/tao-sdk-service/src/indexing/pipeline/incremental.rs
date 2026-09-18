@@ -80,7 +80,7 @@ pub struct IncrementalIndexService {
 }
 
 impl IncrementalIndexService {
-    /// Apply incremental indexing updates for one or more changed relative paths.
+    /// Apply updates using authoritative scan membership, not filesystem existence.
     pub fn apply_changes(
         &self,
         vault_root: &Path,
@@ -88,17 +88,21 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
-        self.apply_changes_internal(
+        let changes = apply::changes_for_paths(vault_root, changed_paths, case_policy)?;
+        apply::apply_changes(
             vault_root,
             connection,
-            changed_paths,
+            changes,
             case_policy,
-            true,
-            true,
+            self.parser,
+            apply::PublicationOptions {
+                force: false,
+                force_full_corpus: false,
+                expected_generation: None,
+            },
         )
     }
-
-    /// Apply incremental indexing updates and always rebuild derived rows for provided paths.
+    /// Rebuild the canonical projections for each supplied path.
     pub fn apply_changes_force(
         &self,
         vault_root: &Path,
@@ -106,575 +110,19 @@ impl IncrementalIndexService {
         changed_paths: &[PathBuf],
         case_policy: CasePolicy,
     ) -> Result<IncrementalIndexResult, FullIndexError> {
-        self.apply_changes_internal(
+        let changes = apply::changes_for_paths(vault_root, changed_paths, case_policy)?;
+        apply::apply_changes(
             vault_root,
             connection,
-            changed_paths,
+            changes,
             case_policy,
-            false,
-            true,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn apply_changes_internal(
-        &self,
-        vault_root: &Path,
-        connection: &mut Connection,
-        changed_paths: &[PathBuf],
-        case_policy: CasePolicy,
-        prefilter_unchanged: bool,
-        rebuild_search_corpus: bool,
-    ) -> Result<IncrementalIndexResult, FullIndexError> {
-        let fingerprint_service = FileFingerprintService::from_root(vault_root, case_policy)
-            .map_err(|source| FullIndexError::CreateFingerprintService {
-                source: Box::new(source),
-            })?;
-
-        let transaction =
-            connection
-                .transaction()
-                .map_err(|source| FullIndexError::BeginTransaction {
-                    source: Box::new(source),
-                })?;
-
-        let mut upserted_files = 0_u64;
-        let mut removed_files = 0_u64;
-        let mut links_reindexed = 0_u64;
-        let mut properties_reindexed = 0_u64;
-        let mut bases_reindexed = 0_u64;
-        let mut pending_link_records = Vec::<LinkRecordInput>::new();
-        let mut changed_markdown_paths = std::collections::BTreeSet::<String>::new();
-        let mut search_corpus_refresh_file_ids = std::collections::BTreeSet::<String>::new();
-        let mut requires_full_search_corpus_refresh = if rebuild_search_corpus {
-            crate::SearchCorpusService
-                .status(&transaction)
-                .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                    source: Box::new(source),
-                })?
-                .search_index_stale
-        } else {
-            false
-        };
-        let mut has_new_files = false;
-        let mut removed_file_ids = Vec::<String>::new();
-        let resolution_case_policy = link_case_policy(case_policy);
-
-        let existing_records = FilesRepository::list_all(&transaction).map_err(|source| {
-            FullIndexError::UpsertFileMetadata {
-                source: Box::new(source),
-            }
-        })?;
-        let mut markdown_candidates = Vec::new();
-        let mut resolution_candidates = Vec::new();
-        let mut file_id_by_path = HashMap::<String, String>::new();
-        for record in existing_records {
-            if record.is_markdown {
-                markdown_candidates.push(record.normalized_path.clone());
-            }
-            resolution_candidates.push(record.normalized_path.clone());
-            file_id_by_path.insert(record.normalized_path, record.file_id);
-        }
-        for changed_path in changed_paths {
-            let normalized = normalize_changed_path(changed_path)?;
-            let absolute = vault_root.join(changed_path);
-            if absolute.exists() && normalized.ends_with(".md") {
-                markdown_candidates.push(normalized.clone());
-                let lookup_key = normalize_changed_path(changed_path)?;
-                file_id_by_path
-                    .entry(lookup_key.clone())
-                    .or_insert_with(|| deterministic_id("file", &lookup_key));
-            }
-            if absolute.exists() {
-                resolution_candidates.push(normalized);
-            }
-        }
-        markdown_candidates.sort();
-        markdown_candidates.dedup();
-        resolution_candidates.sort();
-        resolution_candidates.dedup();
-        let mut heading_index =
-            build_heading_index(vault_root, &markdown_candidates, &self.parser)?;
-        let mut block_index = build_block_index(vault_root, &markdown_candidates, &self.parser)?;
-
-        for changed_path in changed_paths {
-            let normalized = normalize_changed_path(changed_path)?;
-            let absolute = vault_root.join(changed_path);
-            if normalized.ends_with(".md") {
-                changed_markdown_paths.insert(normalized.clone());
-            }
-            let existing = FilesRepository::get_by_normalized_path(&transaction, &normalized)
-                .map_err(|source| FullIndexError::UpsertFileMetadata {
-                    source: Box::new(source),
-                })?;
-
-            if absolute.exists() {
-                if prefilter_unchanged && let Some(existing_record) = existing.as_ref() {
-                    let metadata =
-                        fs::metadata(&absolute).map_err(|source| FullIndexError::ReadFile {
-                            path: absolute.clone(),
-                            source,
-                        })?;
-                    let modified_unix_ms = metadata_modified_unix_ms(&metadata, &absolute)?;
-                    if existing_record.size_bytes == metadata.len()
-                        && existing_record.modified_unix_ms == modified_unix_ms
-                    {
-                        // Fast unchanged prefilter: only skip when size/mtime/hash all match.
-                        // This preserves correctness for rapid same-size rewrites on filesystems
-                        // with coarse mtime granularity.
-                        let hash_blake3 = hash_file_blake3(&absolute).map_err(|source| {
-                            FullIndexError::ReadFile {
-                                path: absolute.clone(),
-                                source,
-                            }
-                        })?;
-                        if existing_record.hash_blake3 == hash_blake3 {
-                            continue;
-                        }
-                    }
-                }
-
-                let fingerprint =
-                    fingerprint_service
-                        .fingerprint(changed_path)
-                        .map_err(|source| FullIndexError::Fingerprint {
-                            path: absolute.clone(),
-                            source: Box::new(source),
-                        })?;
-                let modified_unix_ms =
-                    i64::try_from(fingerprint.modified_unix_ms).map_err(|_| {
-                        FullIndexError::TimestampOverflow {
-                            value: fingerprint.modified_unix_ms,
-                        }
-                    })?;
-                if existing.is_none() {
-                    has_new_files = true;
-                    requires_full_search_corpus_refresh = true;
-                }
-                let file_id = existing
-                    .map(|record| record.file_id)
-                    .unwrap_or_else(|| deterministic_id("file", &normalized));
-                file_id_by_path.insert(normalized.clone(), file_id.clone());
-                search_corpus_refresh_file_ids.insert(file_id.clone());
-
-                for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
-                    &transaction,
-                    &file_id,
-                )
-                .map_err(|source| FullIndexError::InsertLink {
-                    source: Box::new(source),
-                })? {
-                    add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
-                }
-
-                FilesRepository::upsert(
-                    &transaction,
-                    &FileRecordInput {
-                        file_id: file_id.clone(),
-                        normalized_path: normalized.clone(),
-                        match_key: fingerprint.match_key,
-                        absolute_path: fingerprint.absolute.to_string_lossy().to_string(),
-                        size_bytes: fingerprint.size_bytes,
-                        modified_unix_ms,
-                        hash_blake3: fingerprint.hash_blake3,
-                        is_markdown: normalized.ends_with(".md"),
-                    },
-                )
-                .map_err(|source| FullIndexError::UpsertFileMetadata {
-                    source: Box::new(source),
-                })?;
-
-                transaction
-                    .execute(
-                        "DELETE FROM links WHERE source_file_id = ?1",
-                        params![file_id],
-                    )
-                    .map_err(|source| FullIndexError::ExecuteSql {
-                        operation: "delete_links_for_file",
-                        source: Box::new(source),
-                    })?;
-                transaction
-                    .execute(
-                        "DELETE FROM properties WHERE file_id = ?1",
-                        params![file_id],
-                    )
-                    .map_err(|source| FullIndexError::ExecuteSql {
-                        operation: "delete_properties_for_file",
-                        source: Box::new(source),
-                    })?;
-                TasksRepository::delete_by_file_id(&transaction, &file_id).map_err(|source| {
-                    FullIndexError::UpsertTask {
-                        source: Box::new(source),
-                    }
-                })?;
-                transaction
-                    .execute("DELETE FROM bases WHERE file_id = ?1", params![file_id])
-                    .map_err(|source| FullIndexError::ExecuteSql {
-                        operation: "delete_bases_for_file",
-                        source: Box::new(source),
-                    })?;
-                if normalized.ends_with(".md") {
-                    let markdown = fs::read_to_string(&absolute).map_err(|source| {
-                        FullIndexError::ReadFile {
-                            path: absolute.clone(),
-                            source,
-                        }
-                    })?;
-                    let parsed = self
-                        .parser
-                        .parse(MarkdownParseRequest {
-                            normalized_path: normalized.clone(),
-                            raw: markdown.clone(),
-                        })
-                        .map_err(|source| FullIndexError::ParseMarkdown {
-                            path: absolute.clone(),
-                            source: Box::new(source),
-                        })?;
-
-                    let property_records =
-                        build_property_records(&file_id, &normalized, &markdown, &absolute)?;
-                    properties_reindexed += property_records.len() as u64;
-                    for property in &property_records {
-                        PropertiesRepository::upsert(&transaction, property).map_err(|source| {
-                            FullIndexError::UpsertProperty {
-                                source: Box::new(source),
-                            }
-                        })?;
-                    }
-
-                    for task in build_task_records(&file_id, &normalized, &markdown) {
-                        TasksRepository::upsert(&transaction, &task).map_err(|source| {
-                            FullIndexError::UpsertTask {
-                                source: Box::new(source),
-                            }
-                        })?;
-                    }
-
-                    if !markdown_candidates.iter().any(|path| path == &normalized) {
-                        markdown_candidates.push(normalized.clone());
-                        markdown_candidates.sort();
-                    }
-                    if !resolution_candidates.iter().any(|path| path == &normalized) {
-                        resolution_candidates.push(normalized.clone());
-                        resolution_candidates.sort();
-                    }
-                    let mut heading_slugs = parsed
-                        .headings
-                        .iter()
-                        .map(|heading| slugify_heading(&heading.text))
-                        .filter(|slug| !slug.is_empty())
-                        .collect::<Vec<_>>();
-                    heading_slugs.sort();
-                    heading_slugs.dedup();
-                    heading_index.insert(normalized.clone(), heading_slugs);
-                    block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
-
-                    let resolution_index = LinkResolutionIndex::with_case_policy(
-                        &resolution_candidates,
-                        resolution_case_policy,
-                    );
-                    let link_records = build_incremental_link_records(
-                        &LinkResolutionContext {
-                            resolution_index: &resolution_index,
-                            file_id_by_path: &file_id_by_path,
-                            heading_index: &heading_index,
-                            block_index: &block_index,
-                        },
-                        &file_id,
-                        &normalized,
-                        &markdown,
-                        &parsed.body,
-                    );
-                    links_reindexed += link_records.len() as u64;
-                    add_link_input_corpus_file_ids(
-                        &mut search_corpus_refresh_file_ids,
-                        &link_records,
-                    );
-                    pending_link_records.extend(link_records);
-                } else if normalized.ends_with(".base") {
-                    requires_full_search_corpus_refresh = true;
-                    let raw = fs::read_to_string(&absolute).map_err(|source| {
-                        FullIndexError::ReadFile {
-                            path: absolute.clone(),
-                            source,
-                        }
-                    })?;
-                    let config_json =
-                        serde_json::to_string(&json!({ "raw": raw })).map_err(|source| {
-                            FullIndexError::SerializeBaseConfig {
-                                path: absolute.clone(),
-                                source,
-                            }
-                        })?;
-
-                    BasesRepository::upsert(
-                        &transaction,
-                        &BaseRecordInput {
-                            base_id: deterministic_id("base", &normalized),
-                            file_id,
-                            config_json,
-                        },
-                    )
-                    .map_err(|source| FullIndexError::UpsertBase {
-                        source: Box::new(source),
-                    })?;
-                    bases_reindexed += 1;
-                }
-
-                upserted_files += 1;
-            } else if let Some(existing) = existing {
-                search_corpus_refresh_file_ids.insert(existing.file_id.clone());
-                for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
-                    &transaction,
-                    &existing.file_id,
-                )
-                .map_err(|source| FullIndexError::InsertLink {
-                    source: Box::new(source),
-                })? {
-                    add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
-                }
-                removed_file_ids.push(existing.file_id.clone());
-                FilesRepository::delete_by_id(&transaction, &existing.file_id).map_err(
-                    |source| FullIndexError::UpsertFileMetadata {
-                        source: Box::new(source),
-                    },
-                )?;
-                if existing.is_markdown {
-                    markdown_candidates.retain(|candidate| candidate != &normalized);
-                    heading_index.remove(&normalized);
-                    block_index.remove(&normalized);
-                }
-                resolution_candidates.retain(|candidate| candidate != &normalized);
-                file_id_by_path.remove(&normalized);
-                removed_files += 1;
-            }
-        }
-
-        // Newly-added files can change deterministic basename/path tie-breakers
-        // for already-resolved links, so preserve correctness by falling back to
-        // the full link scan in that case.
-        let candidate_link_rows = if has_new_files {
-            tao_sdk_storage::LinksRepository::list_all_with_paths(&transaction).map_err(
-                |source| FullIndexError::InsertLink {
-                    source: Box::new(source),
-                },
-            )?
-        } else {
-            // Otherwise, only fetch links that could have changed resolution
-            // state due to the vault changes processed above. This avoids the
-            // unconditional O(total_links) scan for common update/delete flows.
-            let include_unresolved =
-                !removed_file_ids.is_empty() || !changed_markdown_paths.is_empty();
-            let excluded_source_paths: Vec<String> =
-                changed_markdown_paths.iter().cloned().collect();
-            let changed_target_paths: Vec<String> =
-                changed_markdown_paths.iter().cloned().collect();
-            tao_sdk_storage::LinksRepository::list_affected_by_changes_with_paths(
-                &transaction,
-                &excluded_source_paths,
-                &changed_target_paths,
-                include_unresolved,
-            )
-            .map_err(|source| FullIndexError::InsertLink {
-                source: Box::new(source),
-            })?
-        };
-
-        let resolution_index =
-            LinkResolutionIndex::with_case_policy(&resolution_candidates, resolution_case_policy);
-        let affected_sources = candidate_link_rows
-            .iter()
-            .filter(|link| {
-                stored_link_requires_refresh(
-                    link,
-                    &resolution_index,
-                    &file_id_by_path,
-                    &heading_index,
-                    &block_index,
-                )
-            })
-            .map(|link| link.source_path.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-
-        for source_path in affected_sources {
-            let Some(source_record) =
-                FilesRepository::get_by_normalized_path(&transaction, &source_path).map_err(
-                    |source| FullIndexError::UpsertFileMetadata {
-                        source: Box::new(source),
-                    },
-                )?
-            else {
-                continue;
-            };
-            let absolute = vault_root.join(&source_path);
-            search_corpus_refresh_file_ids.insert(source_record.file_id.clone());
-            for link in tao_sdk_storage::LinksRepository::list_outgoing_with_paths(
-                &transaction,
-                &source_record.file_id,
-            )
-            .map_err(|source| FullIndexError::InsertLink {
-                source: Box::new(source),
-            })? {
-                add_link_with_paths_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link);
-            }
-            let markdown =
-                fs::read_to_string(&absolute).map_err(|source| FullIndexError::ReadFile {
-                    path: absolute.clone(),
-                    source,
-                })?;
-            let parsed = self
-                .parser
-                .parse(MarkdownParseRequest {
-                    normalized_path: source_path.clone(),
-                    raw: markdown.clone(),
-                })
-                .map_err(|source| FullIndexError::ParseMarkdown {
-                    path: absolute,
-                    source: Box::new(source),
-                })?;
-
-            transaction
-                .execute(
-                    "DELETE FROM links WHERE source_file_id = ?1",
-                    params![source_record.file_id],
-                )
-                .map_err(|source| FullIndexError::ExecuteSql {
-                    operation: "delete_links_for_dependent_source",
-                    source: Box::new(source),
-                })?;
-            let resolution_index = LinkResolutionIndex::with_case_policy(
-                &resolution_candidates,
-                resolution_case_policy,
-            );
-            let link_records = build_incremental_link_records(
-                &LinkResolutionContext {
-                    resolution_index: &resolution_index,
-                    file_id_by_path: &file_id_by_path,
-                    heading_index: &heading_index,
-                    block_index: &block_index,
-                },
-                &source_record.file_id,
-                &source_path,
-                &markdown,
-                &parsed.body,
-            );
-            links_reindexed += link_records.len() as u64;
-            add_link_input_corpus_file_ids(&mut search_corpus_refresh_file_ids, &link_records);
-            pending_link_records.extend(link_records);
-        }
-
-        insert_links_batch(&transaction, &pending_link_records)?;
-        let search_corpus_refresh_file_ids = search_corpus_refresh_file_ids
-            .into_iter()
-            .collect::<Vec<_>>();
-        let (search_segments_total, search_aliases_total, search_corpus_refresh) =
-            if rebuild_search_corpus && requires_full_search_corpus_refresh {
-                let search_corpus = crate::SearchCorpusService
-                    .rebuild_in_transaction(&transaction, case_policy)
-                    .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                        source: Box::new(source),
-                    })?;
-                (
-                    search_corpus.search_segments_total,
-                    search_corpus.search_aliases_total,
-                    SearchCorpusRefreshMode::Full,
-                )
-            } else if rebuild_search_corpus && !search_corpus_refresh_file_ids.is_empty() {
-                let search_corpus = crate::SearchCorpusService
-                    .refresh_files_in_transaction(
-                        &transaction,
-                        &search_corpus_refresh_file_ids,
-                        case_policy,
-                    )
-                    .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                        source: Box::new(source),
-                    })?;
-                (
-                    search_corpus.search_segments_total,
-                    search_corpus.search_aliases_total,
-                    SearchCorpusRefreshMode::Partial,
-                )
-            } else {
-                let search_status =
-                    crate::SearchCorpusService
-                        .status(&transaction)
-                        .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                            source: Box::new(source),
-                        })?;
-                (
-                    search_status.search_segments_total,
-                    search_status.search_aliases_total,
-                    SearchCorpusRefreshMode::None,
-                )
-            };
-
-        let now_unix_ms = current_unix_ms()?;
-        IndexStateRepository::upsert(
-            &transaction,
-            &IndexStateRecordInput {
-                key: "last_index_at".to_string(),
-                value_json: now_unix_ms.to_string(),
+            self.parser,
+            apply::PublicationOptions {
+                force: true,
+                force_full_corpus: false,
+                expected_generation: None,
             },
         )
-        .map_err(|source| FullIndexError::UpsertIndexState {
-            source: Box::new(source),
-        })?;
-        IndexStateRepository::upsert(
-            &transaction,
-            &IndexStateRecordInput {
-                key: LINK_RESOLUTION_VERSION_STATE_KEY.to_string(),
-                value_json: CURRENT_LINK_RESOLUTION_VERSION.to_string(),
-            },
-        )
-        .map_err(|source| FullIndexError::UpsertIndexState {
-            source: Box::new(source),
-        })?;
-
-        let summary_json = serde_json::to_string(&json!({
-            "mode": "incremental",
-            "processed_paths": changed_paths.len(),
-            "upserted_files": upserted_files,
-            "removed_files": removed_files,
-            "links_reindexed": links_reindexed,
-            "properties_reindexed": properties_reindexed,
-            "bases_reindexed": bases_reindexed,
-            "search_segments_total": search_segments_total,
-            "search_aliases_total": search_aliases_total,
-            "search_corpus_refresh": search_corpus_refresh.as_str(),
-            "completed_unix_ms": now_unix_ms,
-        }))
-        .map_err(|source| FullIndexError::SerializeStateSummary {
-            source: Box::new(source),
-        })?;
-
-        IndexStateRepository::upsert(
-            &transaction,
-            &IndexStateRecordInput {
-                key: "last_incremental_index_summary".to_string(),
-                value_json: summary_json,
-            },
-        )
-        .map_err(|source| FullIndexError::UpsertIndexState {
-            source: Box::new(source),
-        })?;
-
-        transaction
-            .commit()
-            .map_err(|source| FullIndexError::CommitTransaction {
-                source: Box::new(source),
-            })?;
-
-        Ok(IncrementalIndexResult {
-            processed_paths: changed_paths.len() as u64,
-            upserted_files,
-            removed_files,
-            links_reindexed,
-            properties_reindexed,
-            bases_reindexed,
-            search_corpus_refresh,
-            search_corpus_refresh_file_ids,
-            requires_full_search_corpus_refresh,
-        })
     }
 }
 
@@ -685,7 +133,8 @@ pub struct CoalescedBatchIndexService {
 }
 
 impl CoalescedBatchIndexService {
-    /// Deduplicate changed paths and apply incremental indexing in bounded batches.
+    /// Deduplicate events and publish the complete final inventory in one transaction.
+    /// Batch size bounds logical work accounting; it never publishes partial generations.
     pub fn apply_coalesced(
         &self,
         vault_root: &Path,
@@ -697,86 +146,59 @@ impl CoalescedBatchIndexService {
         if max_batch_size == 0 {
             return Err(FullIndexError::InvalidBatchSize { value: 0 });
         }
-
-        let mut seen = std::collections::BTreeSet::new();
-        let mut unique_paths = Vec::new();
-        for path in changed_paths {
-            let normalized = normalize_changed_path(path)?;
-            if seen.insert(normalized.clone()) {
-                unique_paths.push(PathBuf::from(normalized));
-            }
+        let changes = apply::changes_for_paths(vault_root, changed_paths, case_policy)?;
+        let mut result = self.apply_plan(
+            vault_root,
+            connection,
+            changes,
+            None,
+            max_batch_size,
+            case_policy,
+        )?;
+        result.input_events = changed_paths.len() as u64;
+        Ok(result)
+    }
+    pub(crate) fn apply_plan(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        changes: Vec<IndexChange>,
+        expected_generation: Option<i64>,
+        max_batch_size: usize,
+        case_policy: CasePolicy,
+    ) -> Result<CoalescedBatchIndexResult, FullIndexError> {
+        if max_batch_size == 0 {
+            return Err(FullIndexError::InvalidBatchSize { value: 0 });
         }
-
-        let mut batches_applied = 0_u64;
-        let mut upserted_files = 0_u64;
-        let mut removed_files = 0_u64;
-        let mut links_reindexed = 0_u64;
-        let mut properties_reindexed = 0_u64;
-        let mut bases_reindexed = 0_u64;
-        let mut requires_full_search_corpus_refresh = crate::SearchCorpusService
-            .status(connection)
-            .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                source: Box::new(source),
-            })?
-            .search_index_stale;
-        let mut search_corpus_refresh_file_ids = std::collections::BTreeSet::<String>::new();
-
-        for batch in unique_paths.chunks(max_batch_size) {
-            let batch_result = self.incremental.apply_changes_internal(
-                vault_root,
-                connection,
-                batch,
-                case_policy,
-                true,
-                false,
-            )?;
-            batches_applied += 1;
-            upserted_files += batch_result.upserted_files;
-            removed_files += batch_result.removed_files;
-            links_reindexed += batch_result.links_reindexed;
-            properties_reindexed += batch_result.properties_reindexed;
-            bases_reindexed += batch_result.bases_reindexed;
-            requires_full_search_corpus_refresh |= batch_result.requires_full_search_corpus_refresh;
-            search_corpus_refresh_file_ids.extend(batch_result.search_corpus_refresh_file_ids);
-        }
-        let search_corpus_refresh_file_ids = search_corpus_refresh_file_ids
-            .into_iter()
-            .collect::<Vec<_>>();
-        let search_corpus_refresh = if batches_applied > 0 && requires_full_search_corpus_refresh {
-            crate::SearchCorpusService
-                .rebuild_atomic(connection, case_policy)
-                .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                    source: Box::new(source),
-                })?;
-            SearchCorpusRefreshMode::Full
-        } else if !search_corpus_refresh_file_ids.is_empty() {
-            crate::SearchCorpusService
-                .refresh_files_atomic(connection, &search_corpus_refresh_file_ids, case_policy)
-                .map_err(|source| FullIndexError::RebuildSearchCorpus {
-                    source: Box::new(source),
-                })?;
-            SearchCorpusRefreshMode::Partial
-        } else {
-            SearchCorpusRefreshMode::None
-        };
-        let search_segments_rebuilt = search_corpus_refresh != SearchCorpusRefreshMode::None;
-
+        let unique_paths = changes.len();
+        let result = apply::apply_changes(
+            vault_root,
+            connection,
+            changes,
+            case_policy,
+            self.incremental.parser,
+            apply::PublicationOptions {
+                force: false,
+                force_full_corpus: false,
+                expected_generation,
+            },
+        )?;
         Ok(CoalescedBatchIndexResult {
-            input_events: changed_paths.len() as u64,
-            unique_paths: unique_paths.len() as u64,
-            batches_applied,
-            upserted_files,
-            removed_files,
-            links_reindexed,
-            properties_reindexed,
-            bases_reindexed,
-            search_segments_rebuilt,
-            search_corpus_refresh,
+            input_events: unique_paths as u64,
+            unique_paths: unique_paths as u64,
+            batches_applied: unique_paths.div_ceil(max_batch_size) as u64,
+            upserted_files: result.upserted_files,
+            removed_files: result.removed_files,
+            links_reindexed: result.links_reindexed,
+            properties_reindexed: result.properties_reindexed,
+            bases_reindexed: result.bases_reindexed,
+            search_segments_rebuilt: result.search_corpus_refresh != SearchCorpusRefreshMode::None,
+            search_corpus_refresh: result.search_corpus_refresh,
         })
     }
 }
 
-fn add_link_with_paths_corpus_file_ids(
+pub(super) fn add_link_with_paths_corpus_file_ids(
     file_ids: &mut std::collections::BTreeSet<String>,
     link: &LinkWithPaths,
 ) {
@@ -786,7 +208,7 @@ fn add_link_with_paths_corpus_file_ids(
     }
 }
 
-fn add_link_input_corpus_file_ids(
+pub(super) fn add_link_input_corpus_file_ids(
     file_ids: &mut std::collections::BTreeSet<String>,
     links: &[LinkRecordInput],
 ) {
@@ -838,36 +260,33 @@ impl StaleCleanupService {
                 source: Box::new(source),
             }
         })?;
-        let stale_ids = existing
+        let changes = existing
             .into_iter()
             .filter(|record| !live_paths.contains(&record.normalized_path))
-            .map(|record| record.file_id)
+            .map(|record| IndexChange::Remove {
+                normalized_path: record.normalized_path,
+            })
             .collect::<Vec<_>>();
-
-        let transaction =
-            connection
-                .transaction()
-                .map_err(|source| StaleCleanupError::BeginTransaction {
-                    source: Box::new(source),
-                })?;
-
-        for file_id in &stale_ids {
-            FilesRepository::delete_by_id(&transaction, file_id).map_err(|source| {
-                StaleCleanupError::DeleteFileRow {
-                    source: Box::new(source),
-                }
-            })?;
-        }
-        crate::SearchCorpusService
-            .rebuild_in_transaction(&transaction, case_policy)
-            .map_err(|source| StaleCleanupError::RebuildSearchCorpus {
-                source: Box::new(source),
-            })?;
-
+        let stale_files_removed = changes.len() as u64;
+        apply::apply_changes(
+            vault_root,
+            connection,
+            changes,
+            case_policy,
+            MarkdownParser,
+            apply::PublicationOptions {
+                force: false,
+                force_full_corpus: false,
+                expected_generation: None,
+            },
+        )
+        .map_err(|source| StaleCleanupError::Publish {
+            source: Box::new(source),
+        })?;
         let summary_json = serde_json::to_string(&json!({
             "mode": "stale_cleanup",
             "scanned_files": manifest.entries.len(),
-            "stale_files_removed": stale_ids.len(),
+            "stale_files_removed": stale_files_removed,
             "completed_unix_ms": current_unix_ms_raw().map_err(|source| StaleCleanupError::Clock {
                 source: Box::new(source),
             })?,
@@ -877,7 +296,7 @@ impl StaleCleanupService {
         })?;
 
         IndexStateRepository::upsert(
-            &transaction,
+            connection,
             &IndexStateRecordInput {
                 key: "last_stale_cleanup_summary".to_string(),
                 value_json: summary_json,
@@ -887,15 +306,9 @@ impl StaleCleanupService {
             source: Box::new(source),
         })?;
 
-        transaction
-            .commit()
-            .map_err(|source| StaleCleanupError::CommitTransaction {
-                source: Box::new(source),
-            })?;
-
         Ok(StaleCleanupResult {
             scanned_files: manifest.entries.len() as u64,
-            stale_files_removed: stale_ids.len() as u64,
+            stale_files_removed,
         })
     }
 }

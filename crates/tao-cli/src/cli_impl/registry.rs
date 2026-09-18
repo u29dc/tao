@@ -34,58 +34,11 @@ pub(crate) struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    fn deprecated(self) -> bool {
-        matches!(
-            self.name,
-            "graph.outgoing"
-                | "graph.backlinks"
-                | "graph.inbound-scope"
-                | "graph.unresolved"
-                | "graph.deadends"
-                | "graph.orphans"
-                | "graph.floating"
-                | "graph.components"
-                | "graph.neighbors"
-                | "meta.tasks"
-                | "vault.stats"
-                | "vault.reconcile"
-                | "vault.daemon.start"
-                | "vault.daemon.status"
-                | "vault.daemon.stop"
-                | "vault.daemon.stop_all"
-        )
+    fn operational(self) -> bool {
+        self.name.starts_with("vault.daemon.")
     }
-
-    fn alias_of(self) -> Option<&'static str> {
-        match self.name {
-            "graph.outgoing" | "graph.backlinks" | "graph.neighbors" => Some("graph.links"),
-            "graph.inbound-scope"
-            | "graph.unresolved"
-            | "graph.deadends"
-            | "graph.orphans"
-            | "graph.floating"
-            | "graph.components" => Some("graph.audit"),
-            "meta.tasks" => Some("task.list"),
-            "vault.stats" => Some("health"),
-            "vault.reconcile" => Some("vault.reindex"),
-            _ => None,
-        }
-    }
-
-    fn replaced_by(self) -> Option<&'static str> {
-        self.alias_of()
-    }
-
     fn stability(self) -> &'static str {
-        if self.deprecated() {
-            "compatibility"
-        } else if matches!(
-            self.name,
-            "vault.daemon.start"
-                | "vault.daemon.status"
-                | "vault.daemon.stop"
-                | "vault.daemon.stop_all"
-        ) {
+        if self.operational() {
             "operational"
         } else {
             "stable"
@@ -98,7 +51,7 @@ impl Serialize for ToolDefinition {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("ToolDefinition", 15)?;
+        let mut state = serializer.serialize_struct("ToolDefinition", 12)?;
         let output_schema = self
             .output_schema
             .map(str::to_string)
@@ -119,9 +72,6 @@ impl Serialize for ToolDefinition {
         state.serialize_field("idempotent", &self.idempotent)?;
         state.serialize_field("rateLimit", &self.rate_limit)?;
         state.serialize_field("example", &self.example)?;
-        state.serialize_field("deprecated", &self.deprecated())?;
-        state.serialize_field("aliasOf", &self.alias_of())?;
-        state.serialize_field("replacedBy", &self.replaced_by())?;
         state.serialize_field("stability", &self.stability())?;
         state.end()
     }
@@ -149,7 +99,7 @@ const PARAM_PATH: ToolParameter = ToolParameter {
     name: "path",
     type_name: "string",
     required: true,
-    description: "Vault-relative normalized note path.",
+    description: "Vault-relative normalized source path.",
 };
 const PARAM_VALIDATE_PATH: ToolParameter = ToolParameter {
     name: "path",
@@ -222,12 +172,6 @@ const PARAM_OFFSET: ToolParameter = ToolParameter {
     type_name: "integer",
     required: false,
     description: "Zero-based row offset.",
-};
-const PARAM_SCOPE: ToolParameter = ToolParameter {
-    name: "scope",
-    type_name: "string",
-    required: true,
-    description: "Vault-relative folder or file prefix to audit.",
 };
 const PARAM_OPTIONAL_SCOPE: ToolParameter = ToolParameter {
     name: "scope",
@@ -361,12 +305,6 @@ const PARAM_INCLUDE_CONTENT: ToolParameter = ToolParameter {
     required: false,
     description: "Include bounded note body excerpts.",
 };
-const PARAM_INCLUDE_PII: ToolParameter = ToolParameter {
-    name: "include_pii",
-    type_name: "boolean",
-    required: false,
-    description: "Include local frontmatter and property values.",
-};
 const PARAM_NO_PII: ToolParameter = ToolParameter {
     name: "no_pii",
     type_name: "boolean",
@@ -428,10 +366,36 @@ const PARAM_SOCKET_DIR: ToolParameter = ToolParameter {
     description: "Directory used to discover managed daemon sockets.",
 };
 
-const GLOBAL_FLAGS: &[GlobalFlag] = &[GlobalFlag {
-    name: "--toon",
-    description: "Emit Toon instead of the default JSON envelope.",
-}];
+const GLOBAL_FLAGS: &[GlobalFlag] = &[
+    GlobalFlag {
+        name: "--toon",
+        description: "Emit Toon instead of the default JSON envelope.",
+    },
+    GlobalFlag {
+        name: "--execution-mode",
+        description: "auto, direct, or required-daemon; default auto.",
+    },
+    GlobalFlag {
+        name: "--timeout-ms",
+        description: "Request deadline including queued work; default 120000 milliseconds.",
+    },
+    GlobalFlag {
+        name: "--continuation",
+        description: "Bind a paged read to the prior response token; reject changed query, scope, policy or publication.",
+    },
+];
+const PARAM_REVISION: ToolParameter = ToolParameter {
+    name: "revision",
+    type_name: "string",
+    required: false,
+    description: "Continuation revision returned by the first content window; required for continuation.",
+};
+const PARAM_WAIT_CONTENT: ToolParameter = ToolParameter {
+    name: "wait_content_ms",
+    type_name: "integer",
+    required: false,
+    description: "Wait for local PDF extraction within this time budget; default 0 reports pending work.",
+};
 
 const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
@@ -445,9 +409,6 @@ const TOOLS: &[ToolDefinition] = &[
             "data_dir",
             "db_path",
             "case_policy",
-            "tracing_enabled",
-            "feature_flags",
-            "read_only",
             "sources",
             "inputs",
             "precedence",
@@ -522,9 +483,9 @@ const TOOLS: &[ToolDefinition] = &[
         name: "doc.list",
         command: "tao doc list",
         category: "doc",
-        description: "List markdown note windows.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH],
-        output_fields: &["items", "total"],
+        description: "List a bounded window of indexed Markdown notes.",
+        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_LIMIT, PARAM_OFFSET],
+        output_fields: &["items", "total", "offset", "next_offset"],
         output_schema: None,
         input_schema: None,
         idempotent: true,
@@ -535,9 +496,36 @@ const TOOLS: &[ToolDefinition] = &[
         name: "doc.read",
         command: "tao doc read --path <value>",
         category: "doc",
-        description: "Return one note by normalized path.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_PATH],
-        output_fields: &["path", "title", "front_matter", "body", "headings_total"],
+        description: "Read bounded indexed Markdown/TXT/PDF content or an asset inventory record.",
+        parameters: &[
+            PARAM_VAULT_ROOT,
+            PARAM_DB_PATH,
+            PARAM_PATH,
+            PARAM_LIMIT,
+            PARAM_OFFSET,
+            PARAM_REVISION,
+        ],
+        output_fields: &[
+            "path",
+            "format",
+            "file_group",
+            "desired_revision",
+            "served_revision",
+            "continuation_revision",
+            "stale",
+            "coverage",
+            "availability",
+            "extractor_identity",
+            "desired_extractor_identity",
+            "total_segments",
+            "offset",
+            "all_indexed_text_returned",
+            "metadata",
+            "diagnostics",
+            "original",
+            "segments",
+            "next_offset",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: true,
@@ -557,7 +545,16 @@ const TOOLS: &[ToolDefinition] = &[
             PARAM_LIMIT,
             PARAM_OFFSET,
         ],
-        output_fields: &["path", "direction", "items", "total", "limit", "offset"],
+        output_fields: &[
+            "path",
+            "direction",
+            "representation",
+            "complete",
+            "items",
+            "total",
+            "limit",
+            "offset",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: true,
@@ -594,46 +591,14 @@ const TOOLS: &[ToolDefinition] = &[
             "total_files",
             "linked_files",
             "unlinked_files",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph audit --vault-root /abs/vault --kind unresolved --limit 20",
-    },
-    ToolDefinition {
-        name: "graph.backlinks",
-        command: "tao graph backlinks --path <value>",
-        category: "graph",
-        description: "Return backlinks for one note.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_PATH],
-        output_fields: &["path", "items", "total"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph backlinks --vault-root /abs/vault --path notes/project.md",
-    },
-    ToolDefinition {
-        name: "graph.components",
-        command: "tao graph components",
-        category: "graph",
-        description: "Return connected graph components across resolved edges.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_LIMIT,
-            PARAM_OFFSET,
-            PARAM_INCLUDE_MEMBERS,
-            PARAM_SAMPLE_SIZE,
-            PARAM_COMPONENT_MODE,
-        ],
-        output_fields: &[
-            "items",
-            "total",
-            "limit",
-            "offset",
-            "mode",
+            "include_markdown",
+            "include_non_md",
+            "exclude_prefixes",
+            "total_floating",
+            "notes_count",
+            "attachments_count",
+            "domain",
+            "complete",
             "include_members",
             "sample_size",
         ],
@@ -641,121 +606,7 @@ const TOOLS: &[ToolDefinition] = &[
         input_schema: None,
         idempotent: true,
         rate_limit: None,
-        example: "tao graph components --vault-root /abs/vault --mode weak",
-    },
-    ToolDefinition {
-        name: "graph.deadends",
-        command: "tao graph deadends",
-        category: "graph",
-        description: "Return notes with no outgoing resolved edges.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_LIMIT, PARAM_OFFSET],
-        output_fields: &["items", "total", "limit", "offset"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph deadends --vault-root /abs/vault",
-    },
-    ToolDefinition {
-        name: "graph.floating",
-        command: "tao graph floating",
-        category: "graph",
-        description: "Return strict floating files with built-in graph-view filtering.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_LIMIT, PARAM_OFFSET],
-        output_fields: &[
-            "items",
-            "total",
-            "limit",
-            "offset",
-            "total_floating",
-            "notes_count",
-            "attachments_count",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph floating --vault-root /abs/vault",
-    },
-    ToolDefinition {
-        name: "graph.inbound-scope",
-        command: "tao graph inbound-scope --scope <value>",
-        category: "graph",
-        description: "Return scoped inbound-link counts for file audits.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_SCOPE,
-            PARAM_INCLUDE_MARKDOWN,
-            PARAM_INCLUDE_NON_MD,
-            PARAM_EXCLUDE_PREFIX,
-            PARAM_LIMIT,
-            PARAM_OFFSET,
-        ],
-        output_fields: &[
-            "scope",
-            "include_markdown",
-            "include_non_md",
-            "exclude_prefixes",
-            "total_files",
-            "linked_files",
-            "unlinked_files",
-            "total",
-            "limit",
-            "offset",
-            "items",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph inbound-scope --vault-root /abs/vault --scope notes --include-markdown",
-    },
-    ToolDefinition {
-        name: "graph.neighbors",
-        command: "tao graph neighbors --path <value>",
-        category: "graph",
-        description: "Return one-hop neighbors for one note.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_PATH,
-            PARAM_DIRECTION,
-            PARAM_LIMIT,
-            PARAM_OFFSET,
-        ],
-        output_fields: &["path", "direction", "items", "total", "limit", "offset"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph neighbors --vault-root /abs/vault --path notes/root.md",
-    },
-    ToolDefinition {
-        name: "graph.orphans",
-        command: "tao graph orphans",
-        category: "graph",
-        description: "Return isolated notes with no incoming or outgoing resolved edges.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_LIMIT, PARAM_OFFSET],
-        output_fields: &["items", "total", "limit", "offset"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph orphans --vault-root /abs/vault",
-    },
-    ToolDefinition {
-        name: "graph.outgoing",
-        command: "tao graph outgoing --path <value>",
-        category: "graph",
-        description: "Return outgoing links for one note.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_PATH],
-        output_fields: &["path", "items", "total"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph outgoing --vault-root /abs/vault --path notes/root.md",
+        example: "tao graph audit --vault-root /abs/vault --kind unresolved --limit 20",
     },
     ToolDefinition {
         name: "graph.path",
@@ -777,6 +628,9 @@ const TOOLS: &[ToolDefinition] = &[
             "max_depth",
             "max_nodes",
             "explored_nodes",
+            "examined_edges",
+            "complete",
+            "truncation_reason",
             "edge_count",
             "path",
         ],
@@ -785,19 +639,6 @@ const TOOLS: &[ToolDefinition] = &[
         idempotent: true,
         rate_limit: None,
         example: "tao graph path --vault-root /abs/vault --from notes/a.md --to notes/b.md",
-    },
-    ToolDefinition {
-        name: "graph.unresolved",
-        command: "tao graph unresolved",
-        category: "graph",
-        description: "Return unresolved graph links.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_LIMIT, PARAM_OFFSET],
-        output_fields: &["items", "total", "limit", "offset"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao graph unresolved --vault-root /abs/vault",
     },
     ToolDefinition {
         name: "graph.walk",
@@ -813,7 +654,19 @@ const TOOLS: &[ToolDefinition] = &[
             PARAM_INCLUDE_UNRESOLVED,
             PARAM_INCLUDE_FOLDERS,
         ],
-        output_fields: &["path", "depth", "include_folders", "total", "items"],
+        output_fields: &[
+            "path",
+            "depth",
+            "include_folders",
+            "total",
+            "items",
+            "returned",
+            "limit",
+            "complete",
+            "truncation_reason",
+            "examined_edges",
+            "discovered_nodes",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: true,
@@ -880,26 +733,6 @@ const TOOLS: &[ToolDefinition] = &[
         example: "tao meta tags --vault-root /abs/vault",
     },
     ToolDefinition {
-        name: "meta.tasks",
-        command: "tao meta tasks",
-        category: "meta",
-        description: "Compatibility wrapper for `tao task list`.",
-        parameters: &[
-            PARAM_VAULT_ROOT,
-            PARAM_DB_PATH,
-            PARAM_STATE,
-            PARAM_QUERY,
-            PARAM_LIMIT,
-            PARAM_OFFSET,
-        ],
-        output_fields: &["items", "total", "limit", "offset"],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao meta tasks --vault-root /abs/vault",
-    },
-    ToolDefinition {
         name: "query.run",
         command: "tao query --from <scope>",
         category: "query",
@@ -920,7 +753,25 @@ const TOOLS: &[ToolDefinition] = &[
             PARAM_OFFSET,
         ],
         output_fields: &[
-            "from", "items", "rows", "columns", "total", "limit", "offset", "plan",
+            "from",
+            "items",
+            "rows",
+            "columns",
+            "total",
+            "limit",
+            "offset",
+            "logical_plan",
+            "physical_plan",
+            "explain",
+            "base_id",
+            "file_path",
+            "view_name",
+            "path",
+            "outgoing_total",
+            "backlinks_total",
+            "outgoing",
+            "backlinks",
+            "kind",
         ],
         output_schema: None,
         input_schema: None,
@@ -945,7 +796,6 @@ const TOOLS: &[ToolDefinition] = &[
             PARAM_DEPTH,
             PARAM_LIMIT,
             PARAM_INCLUDE_CONTENT,
-            PARAM_INCLUDE_PII,
             PARAM_NO_PII,
         ],
         output_fields: &[
@@ -960,6 +810,8 @@ const TOOLS: &[ToolDefinition] = &[
             "context",
             "total",
             "limit",
+            "content_truncated",
+            "content_coverage",
         ],
         output_schema: None,
         input_schema: None,
@@ -1007,6 +859,7 @@ const TOOLS: &[ToolDefinition] = &[
             "invalid",
             "unsupported",
             "diagnostics",
+            "coverage",
         ],
         output_schema: None,
         input_schema: None,
@@ -1027,6 +880,7 @@ const TOOLS: &[ToolDefinition] = &[
             "tools",
             "tool",
             "globalFlags",
+            "schemas",
         ],
         output_schema: None,
         input_schema: None,
@@ -1046,7 +900,14 @@ const TOOLS: &[ToolDefinition] = &[
             PARAM_FOREGROUND,
             PARAM_STARTUP_TIMEOUT_MS,
         ],
-        output_fields: &["socket", "started", "already_running", "pid"],
+        output_fields: &[
+            "socket",
+            "started",
+            "already_running",
+            "pid",
+            "foreground",
+            "stopped",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: false,
@@ -1059,7 +920,15 @@ const TOOLS: &[ToolDefinition] = &[
         category: "vault",
         description: "Return background warm-runtime status for inspection and troubleshooting.",
         parameters: &[PARAM_SOCKET, PARAM_VAULT_ROOT, PARAM_DB_PATH],
-        output_fields: &["socket", "running", "state", "uptime_ms"],
+        output_fields: &[
+            "socket",
+            "running",
+            "state",
+            "uptime_ms",
+            "cached_connections",
+            "cached_kernels",
+            "cached_results",
+        ],
         output_schema: None,
         input_schema: None,
         idempotent: true,
@@ -1072,7 +941,7 @@ const TOOLS: &[ToolDefinition] = &[
         category: "vault",
         description: "Stop one background warm runtime; later normal commands may auto-start it again.",
         parameters: &[PARAM_SOCKET, PARAM_VAULT_ROOT, PARAM_DB_PATH],
-        output_fields: &["socket", "stopped"],
+        output_fields: &["socket", "stopped", "running"],
         output_schema: None,
         input_schema: None,
         idempotent: false,
@@ -1119,6 +988,7 @@ const TOOLS: &[ToolDefinition] = &[
         description: "Validate migration state and checksums before startup migration apply.",
         parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH],
         output_fields: &[
+            "database_exists",
             "migrations_table_exists",
             "known_migrations",
             "applied_migrations",
@@ -1131,35 +1001,16 @@ const TOOLS: &[ToolDefinition] = &[
         example: "tao vault preflight --vault-root /abs/vault",
     },
     ToolDefinition {
-        name: "vault.reconcile",
-        command: "tao vault reconcile",
-        category: "vault",
-        description: "Compatibility wrapper for the incremental path used by `tao vault reindex`.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH],
-        output_fields: &[
-            "scanned_files",
-            "inserted_paths",
-            "updated_paths",
-            "removed_files",
-            "drift_paths",
-            "batches_applied",
-            "upserted_files",
-            "links_reindexed",
-            "properties_reindexed",
-            "bases_reindexed",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: false,
-        rate_limit: None,
-        example: "tao vault reconcile --vault-root /abs/vault",
-    },
-    ToolDefinition {
         name: "vault.reindex",
         command: "tao vault reindex",
         category: "vault",
         description: "Run smart reindex and refresh index totals.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH, PARAM_DRY_RUN],
+        parameters: &[
+            PARAM_VAULT_ROOT,
+            PARAM_DB_PATH,
+            PARAM_DRY_RUN,
+            PARAM_WAIT_CONTENT,
+        ],
         output_fields: &[
             "mode",
             "reason",
@@ -1178,6 +1029,9 @@ const TOOLS: &[ToolDefinition] = &[
             "would_rebuild_search_index",
             "search_segments_rebuilt",
             "search_corpus_refresh",
+            "content",
+            "index_complete",
+            "content_complete",
             "drift_paths",
             "batches_applied",
             "upserted_files",
@@ -1189,30 +1043,6 @@ const TOOLS: &[ToolDefinition] = &[
         rate_limit: None,
         example: "tao vault reindex --vault-root /abs/vault",
     },
-    ToolDefinition {
-        name: "vault.stats",
-        command: "tao vault stats",
-        category: "vault",
-        description: "Return a fresh observational vault health snapshot and runtime state without mutating index state.",
-        parameters: &[PARAM_VAULT_ROOT, PARAM_DB_PATH],
-        output_fields: &[
-            "vault_root",
-            "files_total",
-            "markdown_files",
-            "db_healthy",
-            "db_migrations",
-            "index_lag",
-            "scan_mode",
-            "watcher_status",
-            "last_index_updated_at",
-            "runtime",
-        ],
-        output_schema: None,
-        input_schema: None,
-        idempotent: true,
-        rate_limit: None,
-        example: "tao vault stats --vault-root /abs/vault",
-    },
 ];
 
 pub(crate) fn global_flags() -> &'static [GlobalFlag] {
@@ -1220,7 +1050,7 @@ pub(crate) fn global_flags() -> &'static [GlobalFlag] {
 }
 
 pub(crate) fn public_tools_catalog() -> Vec<ToolDefinition> {
-    sorted_tools(TOOLS.iter().copied().filter(|tool| !tool.deprecated()))
+    sorted_tools(TOOLS.iter().copied().filter(|tool| !tool.operational()))
 }
 
 fn sorted_tools(tools: impl Iterator<Item = ToolDefinition>) -> Vec<ToolDefinition> {
@@ -1236,3 +1066,9 @@ fn sorted_tools(tools: impl Iterator<Item = ToolDefinition>) -> Vec<ToolDefiniti
 pub(crate) fn tool_detail(name: &str) -> Option<ToolDefinition> {
     TOOLS.iter().copied().find(|tool| tool.name == name)
 }
+
+#[path = "registry_schemas.rs"]
+mod schemas;
+#[cfg(test)]
+pub(crate) use schemas::assert_schema_types;
+pub(crate) use schemas::tool_schemas;

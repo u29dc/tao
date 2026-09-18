@@ -48,6 +48,7 @@ pub(crate) fn handle(args: ValidateArgs, _runtime: &mut RuntimeMode) -> Result<C
             "valid": totals.valid,
             "invalid": totals.invalid,
             "unsupported": totals.unsupported,
+            "coverage": if totals.files_checked == 0 { "none_checked" } else if totals.invalid > 0 { "invalid" } else if totals.unsupported > 0 { "partial" } else { "complete" },
             "diagnostics": totals.diagnostics,
         }),
     })
@@ -59,7 +60,7 @@ fn validate_folder(
     recursive: bool,
 ) -> Result<ValidationTotals> {
     let manifest = VaultScanService::new(canonicalizer.clone())
-        .scan()
+        .scan_subtree(folder, recursive)
         .map_err(|source| anyhow!("scan vault for validation failed: {source}"))?;
     let mut totals = ValidationTotals::default();
     for entry in manifest

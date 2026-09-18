@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 /// Result payload for index self-heal workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,9 @@ impl IndexSelfHealService {
 
         for issue in &before.issues {
             match issue.kind {
+                ConsistencyIssueKind::InaccessibleOnDiskFile => {
+                    // Inaccessibility never proves removal; retain the last-good revision.
+                }
                 ConsistencyIssueKind::OrphanProperty => {
                     let changed = transaction
                         .execute(
@@ -75,19 +79,6 @@ impl IndexSelfHealService {
                         )
                         .map_err(|source| IndexSelfHealError::ExecuteSql {
                             operation: "delete_orphan_base",
-                            record_id: issue.record_id.clone(),
-                            source: Box::new(source),
-                        })?;
-                    rows_deleted += changed as u64;
-                }
-                ConsistencyIssueKind::OrphanRenderCache => {
-                    let changed = transaction
-                        .execute(
-                            "DELETE FROM render_cache WHERE cache_key = ?1",
-                            params![issue.record_id],
-                        )
-                        .map_err(|source| IndexSelfHealError::ExecuteSql {
-                            operation: "delete_orphan_render_cache",
                             record_id: issue.record_id.clone(),
                             source: Box::new(source),
                         })?;
@@ -148,6 +139,28 @@ impl IndexSelfHealService {
                 }
             }
         }
+
+        let case_policy = transaction
+            .query_row(
+                "SELECT value_json FROM index_state WHERE key='index_case_policy'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .filter(|value| value == "insensitive")
+            .map_or(CasePolicy::Sensitive, |_| CasePolicy::Insensitive);
+        apply::repair_canonical_links(&transaction, case_policy).map_err(|source| {
+            IndexSelfHealError::Publish {
+                source: Box::new(source),
+            }
+        })?;
+        crate::SearchCorpusService
+            .rebuild_in_transaction(&transaction, case_policy)
+            .map_err(|source| IndexSelfHealError::Publish {
+                source: Box::new(FullIndexError::RebuildSearchCorpus {
+                    source: Box::new(source),
+                }),
+            })?;
 
         transaction
             .commit()
@@ -253,50 +266,6 @@ ORDER BY b.base_id ASC
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|source| IndexConsistencyError::Sql {
             operation: "map_orphan_bases",
-            source: Box::new(source),
-        })
-}
-
-pub(super) fn query_orphan_render_cache(
-    connection: &Connection,
-) -> Result<Vec<IndexConsistencyIssue>, IndexConsistencyError> {
-    let mut statement = connection
-        .prepare(
-            r#"
-SELECT
-  r.cache_key,
-  r.file_id
-FROM render_cache r
-LEFT JOIN files f ON f.file_id = r.file_id
-WHERE r.file_id IS NOT NULL
-  AND f.file_id IS NULL
-ORDER BY r.cache_key ASC
-"#,
-        )
-        .map_err(|source| IndexConsistencyError::Sql {
-            operation: "prepare_orphan_render_cache",
-            source: Box::new(source),
-        })?;
-
-    let rows = statement
-        .query_map([], |row| {
-            Ok(IndexConsistencyIssue {
-                kind: ConsistencyIssueKind::OrphanRenderCache,
-                record_id: row.get("cache_key")?,
-                detail: format!(
-                    "references missing file_id {}",
-                    row.get::<_, String>("file_id")?
-                ),
-            })
-        })
-        .map_err(|source| IndexConsistencyError::Sql {
-            operation: "query_orphan_render_cache",
-            source: Box::new(source),
-        })?;
-
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|source| IndexConsistencyError::Sql {
-            operation: "map_orphan_render_cache",
             source: Box::new(source),
         })
 }
@@ -462,7 +431,11 @@ pub(super) fn query_filesystem_path_issues(
 
         if let Err(source) = fs::metadata(&absolute_path) {
             issues.push(IndexConsistencyIssue {
-                kind: ConsistencyIssueKind::MissingOnDiskFile,
+                kind: if source.kind() == std::io::ErrorKind::NotFound {
+                    ConsistencyIssueKind::MissingOnDiskFile
+                } else {
+                    ConsistencyIssueKind::InaccessibleOnDiskFile
+                },
                 record_id: file.file_id,
                 detail: format!(
                     "absolute path '{}' is not readable: {source}",

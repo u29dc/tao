@@ -2,141 +2,186 @@ use super::super::*;
 
 pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     match command {
+        GraphCommands::Audit(args) => handle_audit(args, runtime),
         GraphCommands::Links(args) => {
-            let result = handle(
-                GraphCommands::Neighbors(GraphNeighborsArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    path: args.path,
-                    direction: args.direction,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                runtime,
-            )?;
-            Ok(retag_graph_result(result, "graph.links", None))
-        }
-        GraphCommands::Audit(args) => {
-            let kind = args.kind.trim().to_ascii_lowercase();
-            let command = match kind.as_str() {
-                "unresolved" => GraphCommands::Unresolved(GraphWindowArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                "deadends" => GraphCommands::Deadends(GraphWindowArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                "orphans" => GraphCommands::Orphans(GraphWindowArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                "floating" => GraphCommands::Floating(GraphWindowArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                "components" => GraphCommands::Components(GraphComponentsArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    limit: args.limit,
-                    offset: args.offset,
-                    include_members: args.include_members,
-                    sample_size: args.sample_size,
-                    mode: args.mode,
-                }),
-                "inbound-scope" => GraphCommands::InboundScope(GraphInboundScopeArgs {
-                    vault_root: args.vault_root,
-                    db_path: args.db_path,
-                    scope: args.scope.ok_or_else(|| {
-                        anyhow!("graph audit --kind inbound-scope requires --scope")
-                    })?,
-                    include_markdown: args.include_markdown,
-                    include_non_md: args.include_non_md,
-                    exclude_prefix: args.exclude_prefix,
-                    limit: args.limit,
-                    offset: args.offset,
-                }),
-                _ => {
-                    return Err(anyhow!(
-                        "unsupported --kind '{}'; expected one of: unresolved|deadends|orphans|floating|components|inbound-scope",
-                        args.kind
-                    ));
-                }
+            let resolved = args.resolve()?;
+            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
+            let direction = GraphNeighborDirection::parse(args.direction.trim())?;
+            let service_direction = match direction {
+                GraphNeighborDirection::All => tao_sdk_service::GraphLinkDirection::All,
+                GraphNeighborDirection::Outgoing => tao_sdk_service::GraphLinkDirection::Outgoing,
+                GraphNeighborDirection::Incoming => tao_sdk_service::GraphLinkDirection::Incoming,
             };
-            let result = handle(command, runtime)?;
-            Ok(retag_graph_result(result, "graph.audit", Some(kind)))
-        }
-        GraphCommands::Outgoing(args) => {
-            let resolved = args.resolve()?;
-            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
-            let panels = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(kernel.note_links(&path), "graph.outgoing")
-            })?;
-            let items = panels
-                .outgoing
+            let (total, rows) = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.links_page(
+                    connection,
+                    &path,
+                    service_direction,
+                    args.limit,
+                    args.offset,
+                )?)
+            })
+            .map_err(|source| anyhow!("graph occurrences failed: {source}"))?;
+            let items = rows
                 .into_iter()
-                .map(|link| {
-                    serde_json::json!({
-                        "source_path": link.source_path,
-                        "target_path": link.target_path,
-                        "heading": link.heading,
-                        "block_id": link.block_id,
-                        "display_text": link.display_text,
-                        "kind": link.kind,
-                        "resolved": link.resolved,
-                    })
+                .map(|edge| {
+                    let outgoing = service_direction
+                        != tao_sdk_service::GraphLinkDirection::Incoming
+                        && edge.source_path == path;
+                    let neighbor = if outgoing {
+                        edge.resolved_path.clone()
+                    } else {
+                        Some(edge.source_path.clone())
+                    };
+                    let mut value = link_edge_to_json(edge);
+                    value["direction"] =
+                        serde_json::json!(if outgoing { "outgoing" } else { "incoming" });
+                    value["path"] = serde_json::json!(neighbor);
+                    value
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.outgoing".to_string(),
-                summary: "graph outgoing completed".to_string(),
+                command: "graph.links".to_string(),
+                summary: "graph links completed".to_string(),
                 args: serde_json::json!({
                     "path": path,
-                    "total": items.len(),
+                    "direction": args.direction,
+                    "representation": "edge_occurrences",
+                    "complete": u64::from(args.offset).saturating_add(items.len() as u64) >= total,
+                    "total": total,
+                    "limit": args.limit,
+                    "offset": args.offset,
                     "items": items,
                 }),
             })
         }
-        GraphCommands::Backlinks(args) => {
+        GraphCommands::Path(args) => {
+            if args.max_nodes == 0 {
+                return Err(anyhow!("--max-nodes must be greater than zero"));
+            }
+            let resolved = args.resolve()?;
+            let from = normalize_relative_note_path_arg(&args.from, "--from")?;
+            let to = normalize_relative_note_path_arg(&args.to, "--to")?;
+            let path_result = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.shortest_path(
+                    connection,
+                    &GraphPathRequest {
+                        from_path: from.clone(),
+                        to_path: to.clone(),
+                        max_depth: args.max_depth,
+                        max_nodes: args.max_nodes,
+                    },
+                )?)
+            })
+            .map_err(|source| anyhow!("graph path failed: {source}"))?;
+            let edge_count = path_result.path.len().saturating_sub(1);
+            Ok(CommandResult {
+                command: "graph.path".to_string(),
+                summary: "graph path completed".to_string(),
+                args: serde_json::json!({
+                    "from": from,
+                    "to": to,
+                    "found": path_result.found,
+                    "max_depth": args.max_depth,
+                    "max_nodes": args.max_nodes,
+                    "explored_nodes": path_result.explored_nodes,
+                    "examined_edges": path_result.examined_edges,
+                    "complete": path_result.complete,
+                    "truncation_reason": path_result.truncation_reason,
+                    "edge_count": edge_count,
+                    "path": path_result.path,
+                }),
+            })
+        }
+        GraphCommands::Walk(args) => {
             let resolved = args.resolve()?;
             let path = normalize_relative_note_path_arg(&args.path, "--path")?;
-            let panels = with_kernel(runtime, &resolved, |kernel| {
-                expect_bridge_value(kernel.note_links(&path), "graph.backlinks")
-            })?;
-            let items = panels
-                .backlinks
+            let traversed = with_connection(runtime, &resolved, |connection| {
+                Ok(BacklinkGraphService.walk_bounded(
+                    connection,
+                    &GraphWalkRequest {
+                        path: path.clone(),
+                        depth: args.depth,
+                        limit: args.limit,
+                        include_unresolved: args.include_unresolved,
+                        include_folders: args.include_folders,
+                    },
+                )?)
+            })
+            .map_err(|source| anyhow!("graph walk failed: {source}"))?;
+            let complete = traversed.complete;
+            let truncation_reason = traversed.truncation_reason;
+            let examined_edges = traversed.examined_edges;
+            let discovered_nodes = traversed.discovered_nodes;
+            let items = traversed
+                .items
                 .into_iter()
-                .map(|link| {
+                .map(|step| {
+                    let direction = match step.direction {
+                        GraphWalkDirection::Outgoing => "outgoing",
+                        GraphWalkDirection::Incoming => "incoming",
+                    };
+                    let edge_type = match step.edge_type {
+                        tao_sdk_service::GraphWalkEdgeType::Wikilink => "wikilink",
+                        tao_sdk_service::GraphWalkEdgeType::Markdown => "markdown",
+                        tao_sdk_service::GraphWalkEdgeType::Embed => "embed",
+                        tao_sdk_service::GraphWalkEdgeType::FolderParent => "folder-parent",
+                        tao_sdk_service::GraphWalkEdgeType::FolderSibling => "folder-sibling",
+                    };
                     serde_json::json!({
-                        "source_path": link.source_path,
-                        "target_path": link.target_path,
-                        "heading": link.heading,
-                        "block_id": link.block_id,
-                        "display_text": link.display_text,
-                        "kind": link.kind,
-                        "resolved": link.resolved,
+                        "depth": step.depth,
+                        "direction": direction,
+                        "edge_type": edge_type,
+                        "link_id": step.link_id,
+                        "source_path": step.source_path,
+                        "target_path": step.target_path,
+                        "raw_target": step.raw_target,
+                        "resolved": step.resolved,
                     })
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.backlinks".to_string(),
-                summary: "graph backlinks completed".to_string(),
+                command: "graph.walk".to_string(),
+                summary: "graph walk completed".to_string(),
                 args: serde_json::json!({
                     "path": path,
-                    "total": items.len(),
+                    "depth": args.depth,
+                    "include_folders": args.include_folders,
+                    "returned": items.len(),
+                    "total": if complete { Some(items.len()) } else { None },
+                    "limit": args.limit,
+                    "complete": complete,
+                    "truncation_reason": truncation_reason,
+                    "examined_edges": examined_edges,
+                    "discovered_nodes": discovered_nodes,
                     "items": items,
                 }),
             })
         }
-        GraphCommands::InboundScope(args) => {
+    }
+}
+
+fn handle_audit(args: GraphAuditArgs, runtime: &mut RuntimeMode) -> Result<CommandResult> {
+    let kind = args.kind.trim().to_ascii_lowercase();
+    if kind != "inbound-scope"
+        && (args.scope.is_some()
+            || args.include_markdown
+            || args.include_non_md
+            || !args.exclude_prefix.is_empty())
+    {
+        return Err(anyhow!(
+            "--scope, --include-markdown, --include-non-md and --exclude-prefix require --kind inbound-scope"
+        ));
+    }
+    if kind != "components"
+        && (args.include_members || args.sample_size != 64 || args.mode != "weak")
+    {
+        return Err(anyhow!(
+            "--include-members, --sample-size and --mode require --kind components"
+        ));
+    }
+    let result: Result<CommandResult> = match kind.as_str() {
+        "inbound-scope" => {
             if !args.include_markdown && !args.include_non_md {
                 return Err(anyhow!(
                     "graph inbound-scope requires at least one file-kind selector: --include-markdown and/or --include-non-md"
@@ -144,13 +189,17 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
             }
 
             let resolved = args.resolve()?;
-            let mut scope = args.scope.trim().trim_matches('/').replace('\\', "/");
+            let scope_arg = args
+                .scope
+                .as_deref()
+                .ok_or_else(|| anyhow!("graph audit --kind inbound-scope requires --scope"))?;
+            let mut scope = scope_arg.trim().trim_matches('/').replace('\\', "/");
             if scope == "." {
                 scope.clear();
             }
             if !scope.is_empty() {
                 validate_relative_vault_path(&scope)
-                    .map_err(|source| anyhow!("invalid --scope '{}': {source}", args.scope))?;
+                    .map_err(|source| anyhow!("invalid --scope '{}': {source}", scope_arg))?;
             }
 
             let mut exclude_prefixes = Vec::<String>::new();
@@ -196,7 +245,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.inbound-scope".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph inbound-scope completed".to_string(),
                 args: serde_json::json!({
                     "scope": scope,
@@ -213,7 +262,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Unresolved(args) => {
+        "unresolved" => {
             let resolved = args.resolve()?;
             let (total, rows) = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.unresolved_links_page(
@@ -225,7 +274,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
             .map_err(|source| anyhow!("query unresolved links failed: {source}"))?;
             let items = rows.into_iter().map(link_edge_to_json).collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.unresolved".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph unresolved completed".to_string(),
                 args: serde_json::json!({
                     "total": total,
@@ -235,7 +284,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Deadends(args) => {
+        "deadends" => {
             let resolved = args.resolve()?;
             let (total, rows) = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.deadends_page(connection, args.limit, args.offset)?)
@@ -253,7 +302,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.deadends".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph deadends completed".to_string(),
                 args: serde_json::json!({
                     "total": total,
@@ -263,7 +312,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Orphans(args) => {
+        "orphans" => {
             let resolved = args.resolve()?;
             let (total, rows) = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.orphans_page(connection, args.limit, args.offset)?)
@@ -281,7 +330,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.orphans".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph orphans completed".to_string(),
                 args: serde_json::json!({
                     "total": total,
@@ -291,7 +340,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Floating(args) => {
+        "floating" => {
             let resolved = args.resolve()?;
             let (summary, rows) = with_connection(runtime, &resolved, |connection| {
                 Ok(BacklinkGraphService.floating_page(connection, args.limit, args.offset)?)
@@ -308,7 +357,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.floating".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph floating completed".to_string(),
                 args: serde_json::json!({
                     "total_floating": summary.total_files,
@@ -321,7 +370,7 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Components(args) => {
+        "components" => {
             let resolved = args.resolve()?;
             let mode = GraphComponentModeArg::parse(args.mode.trim())?;
             let (total, rows) = with_connection(runtime, &resolved, |connection| {
@@ -346,10 +395,12 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 })
                 .collect::<Vec<_>>();
             Ok(CommandResult {
-                command: "graph.components".to_string(),
+                command: "graph.audit".to_string(),
                 summary: "graph components completed".to_string(),
                 args: serde_json::json!({
                     "mode": mode.as_str(),
+                    "domain": "all_files",
+                    "complete": true,
                     "total": total,
                     "limit": args.limit,
                     "offset": args.offset,
@@ -359,195 +410,16 @@ pub(crate) fn handle(command: GraphCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        GraphCommands::Neighbors(args) => {
-            let resolved = args.resolve()?;
-            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
-            let direction = GraphNeighborDirection::parse(args.direction.trim())?;
-            let (total, items) = with_connection(runtime, &resolved, |connection| {
-                let mut rows = Vec::<serde_json::Value>::new();
-
-                if matches!(
-                    direction,
-                    GraphNeighborDirection::All | GraphNeighborDirection::Outgoing
-                ) {
-                    let outgoing = BacklinkGraphService.outgoing_for_path(connection, &path)?;
-                    for edge in outgoing {
-                        let Some(target_path) = edge.resolved_path.clone() else {
-                            continue;
-                        };
-                        rows.push(serde_json::json!({
-                            "path": target_path,
-                            "direction": "outgoing",
-                            "link_id": edge.link_id,
-                            "source_path": edge.source_path,
-                            "raw_target": edge.raw_target,
-                        }));
-                    }
-                }
-
-                if matches!(
-                    direction,
-                    GraphNeighborDirection::All | GraphNeighborDirection::Incoming
-                ) {
-                    let incoming = BacklinkGraphService.backlinks_for_path(connection, &path)?;
-                    for edge in incoming {
-                        rows.push(serde_json::json!({
-                            "path": edge.source_path,
-                            "direction": "incoming",
-                            "link_id": edge.link_id,
-                            "source_path": edge.source_path,
-                            "raw_target": edge.raw_target,
-                        }));
-                    }
-                }
-
-                rows.sort_by(|left, right| {
-                    let left_path = left
-                        .get("path")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    let right_path = right
-                        .get("path")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    let left_direction = left
-                        .get("direction")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    let right_direction = right
-                        .get("direction")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    left_path
-                        .cmp(right_path)
-                        .then_with(|| left_direction.cmp(right_direction))
-                });
-                rows.dedup_by(|left, right| {
-                    left.get("path") == right.get("path")
-                        && left.get("direction") == right.get("direction")
-                });
-
-                let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-                let items = paginate_json_items(rows, args.limit, args.offset);
-                Ok((total, items))
-            })
-            .map_err(|source| anyhow!("graph neighbors failed: {source}"))?;
-            Ok(CommandResult {
-                command: "graph.neighbors".to_string(),
-                summary: "graph neighbors completed".to_string(),
-                args: serde_json::json!({
-                    "path": path,
-                    "direction": args.direction,
-                    "total": total,
-                    "limit": args.limit,
-                    "offset": args.offset,
-                    "items": items,
-                }),
-            })
+        _ => {
+            return Err(anyhow!(
+                "unsupported --kind '{}'; expected unresolved|deadends|orphans|floating|components|inbound-scope",
+                args.kind
+            ));
         }
-        GraphCommands::Path(args) => {
-            if args.max_nodes == 0 {
-                return Err(anyhow!("--max-nodes must be greater than zero"));
-            }
-            let resolved = args.resolve()?;
-            let from = normalize_relative_note_path_arg(&args.from, "--from")?;
-            let to = normalize_relative_note_path_arg(&args.to, "--to")?;
-            let path_result = with_connection(runtime, &resolved, |connection| {
-                Ok(BacklinkGraphService.shortest_path(
-                    connection,
-                    &GraphPathRequest {
-                        from_path: from.clone(),
-                        to_path: to.clone(),
-                        max_depth: args.max_depth,
-                        max_nodes: args.max_nodes,
-                    },
-                )?)
-            })
-            .map_err(|source| anyhow!("graph path failed: {source}"))?;
-            let edge_count = path_result.path.len().saturating_sub(1);
-            Ok(CommandResult {
-                command: "graph.path".to_string(),
-                summary: "graph path completed".to_string(),
-                args: serde_json::json!({
-                    "from": from,
-                    "to": to,
-                    "found": path_result.found,
-                    "max_depth": args.max_depth,
-                    "max_nodes": args.max_nodes,
-                    "explored_nodes": path_result.explored_nodes,
-                    "edge_count": edge_count,
-                    "path": path_result.path,
-                }),
-            })
-        }
-        GraphCommands::Walk(args) => {
-            let resolved = args.resolve()?;
-            let path = normalize_relative_note_path_arg(&args.path, "--path")?;
-            let traversed = with_connection(runtime, &resolved, |connection| {
-                Ok(BacklinkGraphService.walk(
-                    connection,
-                    &GraphWalkRequest {
-                        path: path.clone(),
-                        depth: args.depth,
-                        limit: args.limit,
-                        include_unresolved: args.include_unresolved,
-                        include_folders: args.include_folders,
-                    },
-                )?)
-            })
-            .map_err(|source| anyhow!("graph walk failed: {source}"))?;
-            let items = traversed
-                .into_iter()
-                .map(|step| {
-                    let direction = match step.direction {
-                        GraphWalkDirection::Outgoing => "outgoing",
-                        GraphWalkDirection::Incoming => "incoming",
-                    };
-                    let edge_type = match step.edge_type {
-                        tao_sdk_service::GraphWalkEdgeType::Wikilink => "wikilink",
-                        tao_sdk_service::GraphWalkEdgeType::FolderParent => "folder-parent",
-                        tao_sdk_service::GraphWalkEdgeType::FolderSibling => "folder-sibling",
-                    };
-                    serde_json::json!({
-                        "depth": step.depth,
-                        "direction": direction,
-                        "edge_type": edge_type,
-                        "link_id": step.link_id,
-                        "source_path": step.source_path,
-                        "target_path": step.target_path,
-                        "raw_target": step.raw_target,
-                        "resolved": step.resolved,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(CommandResult {
-                command: "graph.walk".to_string(),
-                summary: "graph walk completed".to_string(),
-                args: serde_json::json!({
-                    "path": path,
-                    "depth": args.depth,
-                    "include_folders": args.include_folders,
-                    "total": items.len(),
-                    "items": items,
-                }),
-            })
-        }
-    }
-}
-
-fn retag_graph_result(
-    mut result: CommandResult,
-    command: &str,
-    kind: Option<String>,
-) -> CommandResult {
-    result.command = command.to_string();
-    result.summary = format!("{command} completed");
-    if let Some(kind) = kind
-        && let Some(object) = result.args.as_object_mut()
-    {
-        object.insert("kind".to_string(), JsonValue::String(kind));
-    }
-    result
+    };
+    let mut result = result?;
+    result.args["kind"] = serde_json::json!(kind);
+    Ok(result)
 }
 
 pub(in crate::cli_impl) fn dispatch(

@@ -1,13 +1,20 @@
 //! Markdown/wikilink parsing and deterministic link-resolution primitives.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use serde::{Deserialize, Serialize};
+use tao_sdk_markdown::{LinkSyntax, parse_body};
+
+mod typed;
 use tao_sdk_core::{cmp_normalized_paths, normalize_path_like};
 use thiserror::Error;
+pub use typed::{
+    FragmentStatus, LinkFragment, LinkKind, LinkOccurrence, LinkTarget, ResolutionRule,
+    parse_link_occurrence, parse_link_target, validate_fragment,
+};
 
 /// Parsed wikilink token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WikiLink {
     /// Raw source token including brackets.
     pub raw: String,
@@ -34,7 +41,7 @@ pub fn parse_wikilink(raw: &str) -> Result<WikiLink, WikiLinkParseError> {
     let (target_with_fragment, display) = split_display(inner);
     let (target, heading, block) = split_fragments(target_with_fragment);
 
-    if target.is_empty() {
+    if target.is_empty() && heading.is_none() && block.is_none() {
         return Err(WikiLinkParseError::MissingTarget {
             raw: trimmed.to_string(),
         });
@@ -53,32 +60,17 @@ pub fn parse_wikilink(raw: &str) -> Result<WikiLink, WikiLinkParseError> {
 /// Extract all valid wikilinks from a markdown string.
 #[must_use]
 pub fn extract_wikilinks(markdown: &str) -> Vec<WikiLink> {
-    let markdown = markdown_without_code_contexts(markdown);
-    let markdown = markdown.as_str();
-    let mut links = Vec::new();
-    let mut cursor = 0;
-
-    while let Some(start_offset) = markdown[cursor..].find("[[") {
-        let start = cursor + start_offset;
-        let rest = &markdown[(start + 2)..];
-        let Some(end_offset) = rest.find("]]") else {
-            break;
-        };
-
-        let end = start + 2 + end_offset + 2;
-        let raw = &markdown[start..end];
-        if let Ok(link) = parse_wikilink(raw) {
-            links.push(link);
-        }
-
-        cursor = end;
-    }
-
-    links
+    parse_body(markdown, 0, 1)
+        .links
+        .iter()
+        .filter(|link| link.syntax == LinkSyntax::Wiki)
+        .filter_map(parse_link_occurrence)
+        .map(|occurrence| occurrence.link)
+        .collect()
 }
 
 /// Parsed markdown inline link or embed target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkdownLink {
     /// Raw destination token as emitted by markdown parser.
     pub raw_target: String,
@@ -93,38 +85,22 @@ pub struct MarkdownLink {
 /// This parser supports inline markdown links/embeds and excludes external URL schemes.
 #[must_use]
 pub fn extract_markdown_links(markdown: &str) -> Vec<MarkdownLink> {
-    let parser = Parser::new_ext(markdown, markdown_parser_options());
-    let mut links = Vec::new();
-
-    for event in parser {
-        match event {
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                if let Some(target) = normalize_markdown_target(dest_url.as_ref()) {
-                    links.push(MarkdownLink {
-                        raw_target: dest_url.into_string(),
-                        target,
-                        is_embed: false,
-                    });
-                }
-            }
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                if let Some(target) = normalize_markdown_target(dest_url.as_ref()) {
-                    links.push(MarkdownLink {
-                        raw_target: dest_url.into_string(),
-                        target,
-                        is_embed: true,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    links
+    parse_body(markdown, 0, 1)
+        .links
+        .iter()
+        .filter(|link| link.syntax == LinkSyntax::Markdown)
+        .filter_map(|link| {
+            parse_link_occurrence(link).map(|occurrence| MarkdownLink {
+                raw_target: link.target.clone(),
+                target: occurrence.target.path,
+                is_embed: link.is_embed,
+            })
+        })
+        .collect()
 }
 
 /// Deterministic resolution result for a wikilink target.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkResolution {
     /// Selected resolved path when resolution succeeded.
     pub resolved_path: Option<String>,
@@ -132,6 +108,8 @@ pub struct LinkResolution {
     pub matched_candidates: Vec<String>,
     /// True when multiple candidates matched and tie-breakers selected one path.
     pub is_ambiguous: bool,
+    /// Matching rule used to choose the result.
+    pub rule: ResolutionRule,
 }
 
 /// Controls how link targets and candidate paths are compared.
@@ -150,6 +128,8 @@ pub struct LinkResolutionIndex {
     case_policy: LinkCasePolicy,
     by_normalized_target: HashMap<String, Vec<String>>,
     by_basename: HashMap<String, Vec<String>>,
+    by_exact_path: HashMap<String, Vec<String>>,
+    by_alias: HashMap<String, Vec<String>>,
 }
 
 impl Default for LinkResolutionIndex {
@@ -170,9 +150,14 @@ impl LinkResolutionIndex {
     pub fn with_case_policy(candidates: &[String], case_policy: LinkCasePolicy) -> Self {
         let mut by_normalized_target = HashMap::<String, Vec<String>>::new();
         let mut by_basename = HashMap::<String, Vec<String>>::new();
+        let mut by_exact_path = HashMap::<String, Vec<String>>::new();
 
         for candidate in candidates {
             let normalized_candidate = normalize_path_like(candidate.trim());
+            by_exact_path
+                .entry(apply_case_policy(&normalized_candidate, case_policy))
+                .or_default()
+                .push(candidate.clone());
             let normalized_key = resolution_lookup_key(&normalized_candidate, case_policy);
             by_normalized_target
                 .entry(normalized_key)
@@ -189,6 +174,7 @@ impl LinkResolutionIndex {
         for candidates in by_normalized_target
             .values_mut()
             .chain(by_basename.values_mut())
+            .chain(by_exact_path.values_mut())
         {
             candidates.sort_by(|left, right| cmp_normalized_paths(left, right));
             candidates.dedup();
@@ -198,21 +184,46 @@ impl LinkResolutionIndex {
             case_policy,
             by_normalized_target,
             by_basename,
+            by_exact_path,
+            by_alias: HashMap::new(),
         }
+    }
+
+    /// Add explicit alias-to-path pairs. Existing file/path matches take precedence.
+    /// Aliases are complete values; callers must not split spaces or commas.
+    #[must_use]
+    pub fn with_aliases(mut self, aliases: &[(String, String)]) -> Self {
+        for (alias, path) in aliases {
+            let key = apply_case_policy(&normalize_path_like(alias), self.case_policy);
+            if key.is_empty() {
+                continue;
+            }
+            let path_key = apply_case_policy(&normalize_path_like(path), self.case_policy);
+            if let Some(paths) = self.by_exact_path.get(&path_key) {
+                self.by_alias
+                    .entry(key)
+                    .or_default()
+                    .extend(paths.iter().cloned());
+            }
+        }
+        for paths in self.by_alias.values_mut() {
+            paths.sort_by(|a, b| cmp_normalized_paths(a, b));
+            paths.dedup();
+        }
+        self
     }
 
     /// Resolve raw target using precomputed candidate lookup tables.
     #[must_use]
     pub fn resolve(&self, raw_target: &str, source_path: Option<&str>) -> LinkResolution {
-        let target = parse_wikilink(raw_target)
-            .map(|link| link.target)
-            .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
-        let Some(target) = normalize_resolution_target(&target) else {
-            return LinkResolution {
-                resolved_path: None,
-                matched_candidates: Vec::new(),
-                is_ambiguous: false,
-            };
+        parse_link_target(raw_target, LinkSyntax::Wiki)
+            .map(|target| self.resolve_link(&target, source_path))
+            .unwrap_or_else(typed::unresolved)
+    }
+
+    fn resolve_wiki_path(&self, raw_target: &str, source_path: Option<&str>) -> LinkResolution {
+        let Some(target) = normalize_resolution_target(raw_target) else {
+            return typed::unresolved();
         };
 
         let mut matched_candidates = Vec::<String>::new();
@@ -241,7 +252,7 @@ impl LinkResolutionIndex {
 }
 
 /// Heading fragment resolution result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadingResolution {
     /// Normalized heading slug when fragment exists on the resolved target file.
     pub resolved_heading_slug: Option<String>,
@@ -250,7 +261,7 @@ pub struct HeadingResolution {
 }
 
 /// Block fragment resolution result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockResolution {
     /// Normalized block id when fragment exists on the resolved target file.
     pub resolved_block_id: Option<String>,
@@ -281,56 +292,7 @@ pub fn resolve_target_with_case_policy(
     candidates: &[String],
     case_policy: LinkCasePolicy,
 ) -> LinkResolution {
-    let target = parse_wikilink(raw_target)
-        .map(|link| link.target)
-        .unwrap_or_else(|_| strip_wikilink_wrappers(raw_target).to_string());
-    let Some(target) = normalize_resolution_target(&target) else {
-        return LinkResolution {
-            resolved_path: None,
-            matched_candidates: Vec::new(),
-            is_ambiguous: false,
-        };
-    };
-
-    let mut matched_candidates = Vec::new();
-    if target.contains('/') {
-        let source_dir = source_path.map(parent_dir);
-        let resolved_variants = resolve_target_variants(&target, source_dir.as_deref());
-        for candidate in candidates {
-            if resolved_variants.iter().any(|resolved_target| {
-                normalized_candidate_equals_target(candidate, resolved_target, case_policy)
-            }) {
-                matched_candidates.push(candidate.clone());
-            }
-        }
-    } else {
-        let target_basename = basename_without_extension(&target);
-        for candidate in candidates {
-            let candidate_trimmed = candidate.trim();
-            if candidate_trimmed.contains('\\') {
-                let normalized_candidate = normalize_path_like(candidate_trimmed);
-                if case_policy_eq(
-                    &basename_without_extension(&normalized_candidate),
-                    &target_basename,
-                    case_policy,
-                ) {
-                    matched_candidates.push(candidate.clone());
-                }
-                continue;
-            }
-
-            let candidate_without_extension = strip_markdown_extension(candidate_trimmed);
-            let candidate_basename = candidate_without_extension
-                .rsplit('/')
-                .next()
-                .unwrap_or(candidate_without_extension);
-            if case_policy_eq(candidate_basename, &target_basename, case_policy) {
-                matched_candidates.push(candidate.clone());
-            }
-        }
-    }
-
-    finish_resolution(matched_candidates, source_path, case_policy)
+    LinkResolutionIndex::with_case_policy(candidates, case_policy).resolve(raw_target, source_path)
 }
 
 /// Convert heading text or heading fragment value into an Obsidian-style slug.
@@ -339,7 +301,8 @@ pub fn slugify_heading(value: &str) -> String {
     let mut slug = String::new();
     let mut previous_was_separator = false;
 
-    for character in value.trim().chars() {
+    let normalized = normalize_path_like(value);
+    for character in normalized.trim().chars() {
         if character.is_ascii_alphanumeric() {
             slug.push(character.to_ascii_lowercase());
             previous_was_separator = false;
@@ -413,69 +376,7 @@ pub fn resolve_heading_target(
 /// Extract unique block identifiers from markdown body text.
 #[must_use]
 pub fn extract_block_ids(markdown: &str) -> Vec<String> {
-    let markdown = markdown_without_code_contexts(markdown);
-    let mut block_ids = BTreeSet::new();
-
-    for line in markdown.lines() {
-        let trimmed = line.trim_end();
-        let Some(caret_index) = trimmed.rfind('^') else {
-            continue;
-        };
-
-        let boundary_ok = trimmed[..caret_index]
-            .chars()
-            .last()
-            .is_none_or(char::is_whitespace);
-        if !boundary_ok {
-            continue;
-        }
-
-        let candidate = trimmed[(caret_index + 1)..].trim();
-        if candidate.is_empty() {
-            continue;
-        }
-        if candidate
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        {
-            block_ids.insert(candidate.to_string());
-        }
-    }
-
-    block_ids.into_iter().collect()
-}
-
-fn markdown_parser_options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-}
-
-fn markdown_without_code_contexts(markdown: &str) -> String {
-    let mut sanitized = markdown.as_bytes().to_vec();
-    let parser = Parser::new_ext(markdown, markdown_parser_options()).into_offset_iter();
-    let mut in_code_block = false;
-
-    for (event, range) in parser {
-        match event {
-            Event::Code(_) => blank_range_preserving_lines(&mut sanitized, range),
-            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
-            Event::End(TagEnd::CodeBlock) => in_code_block = false,
-            Event::Text(_) if in_code_block => blank_range_preserving_lines(&mut sanitized, range),
-            _ => {}
-        }
-    }
-
-    String::from_utf8(sanitized).expect("sanitized markdown remains utf-8")
-}
-
-fn blank_range_preserving_lines(markdown: &mut [u8], range: std::ops::Range<usize>) {
-    for byte in &mut markdown[range] {
-        if !matches!(*byte, b'\n' | b'\r') {
-            *byte = b' ';
-        }
-    }
+    parse_body(markdown, 0, 1).block_ids
 }
 
 /// Resolve block fragment against target block id index.
@@ -521,27 +422,6 @@ pub fn resolve_block_target(
     }
 }
 
-fn normalize_markdown_target(raw: &str) -> Option<String> {
-    let trimmed = raw
-        .trim()
-        .strip_prefix('<')
-        .and_then(|value| value.strip_suffix('>'))
-        .unwrap_or(raw.trim());
-    if trimmed.is_empty() {
-        return None;
-    }
-    if is_external_target(trimmed) {
-        return None;
-    }
-
-    let without_fragment = trimmed.split_once('#').map_or(trimmed, |(path, _)| path);
-    let without_query = without_fragment
-        .split_once('?')
-        .map_or(without_fragment, |(path, _)| path);
-    let decoded = decode_percent(without_query);
-    normalize_resolution_target(&decoded)
-}
-
 fn normalize_resolution_target(raw: &str) -> Option<String> {
     let normalized = normalize_path_like(raw);
     (!normalized.is_empty()).then_some(normalized)
@@ -570,28 +450,6 @@ fn is_external_target(target: &str) -> bool {
     target[..colon_index]
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
-}
-
-fn decode_percent(input: &str) -> String {
-    let mut bytes = Vec::<u8>::with_capacity(input.len());
-    let mut index = 0_usize;
-    let source = input.as_bytes();
-
-    while index < source.len() {
-        if source[index] == b'%' && index + 2 < source.len() {
-            let hi = source[index + 1] as char;
-            let lo = source[index + 2] as char;
-            if let (Some(hi), Some(lo)) = (hex_value(hi), hex_value(lo)) {
-                bytes.push((hi << 4) | lo);
-                index += 3;
-                continue;
-            }
-        }
-        bytes.push(source[index]);
-        index += 1;
-    }
-
-    String::from_utf8_lossy(&bytes).to_string()
 }
 
 fn hex_value(value: char) -> Option<u8> {
@@ -656,6 +514,8 @@ fn collapse_dot_segments(path: &str) -> String {
 
 fn strip_wikilink_wrappers(value: &str) -> &str {
     value
+        .strip_prefix('!')
+        .unwrap_or(value)
         .strip_prefix("[[")
         .and_then(|value| value.strip_suffix("]]"))
         .unwrap_or(value)
@@ -691,28 +551,10 @@ fn split_fragments(value: &str) -> (&str, Option<String>, Option<String>) {
     (value.trim(), None, None)
 }
 
-fn normalized_candidate_equals_target(
-    candidate: &str,
-    target: &str,
-    case_policy: LinkCasePolicy,
-) -> bool {
-    if candidate.contains('\\') || target.contains('\\') {
-        let normalized_candidate = normalize_path_like(candidate);
-        let normalized_target = normalize_path_like(target);
-        let candidate_without_ext = strip_markdown_extension(&normalized_candidate);
-        let target_without_ext = strip_markdown_extension(&normalized_target);
-        return case_policy_eq(candidate_without_ext, target_without_ext, case_policy);
-    }
-
-    let candidate_without_ext = strip_markdown_extension(candidate.trim());
-    let target_without_ext = strip_markdown_extension(target.trim());
-    case_policy_eq(candidate_without_ext, target_without_ext, case_policy)
-}
-
 fn strip_markdown_extension(path: &str) -> &str {
-    path.strip_suffix(".md")
-        .or_else(|| path.strip_suffix(".MD"))
-        .unwrap_or(path)
+    path.get(path.len().saturating_sub(3)..)
+        .filter(|extension| extension.eq_ignore_ascii_case(".md"))
+        .map_or(path, |_| &path[..path.len() - 3])
 }
 
 fn basename_without_extension(path: &str) -> String {
@@ -752,6 +594,7 @@ fn finish_resolution(
             resolved_path: None,
             matched_candidates,
             is_ambiguous: false,
+            rule: ResolutionRule::NotFound,
         };
     }
 
@@ -765,6 +608,7 @@ fn finish_resolution(
         resolved_path,
         is_ambiguous: matched_candidates.len() > 1,
         matched_candidates,
+        rule: ResolutionRule::WikiDiscovery,
     }
 }
 

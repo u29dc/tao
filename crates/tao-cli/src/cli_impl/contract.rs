@@ -212,17 +212,22 @@ impl std::fmt::Display for CliContractError {
 
 impl std::error::Error for CliContractError {}
 
-pub(crate) fn emit_output(output: &str, to_stderr: bool) {
-    if to_stderr {
-        if output.ends_with('\n') {
-            eprint!("{output}");
-        } else {
-            eprintln!("{output}");
-        }
-    } else if output.ends_with('\n') {
-        print!("{output}");
+pub(crate) fn emit_output(output: &str, to_stderr: bool) -> std::io::Result<()> {
+    let mut writer: Box<dyn Write> = if to_stderr {
+        Box::new(std::io::stderr().lock())
     } else {
-        println!("{output}");
+        Box::new(std::io::stdout().lock())
+    };
+    let result = writer.write_all(output.as_bytes()).and_then(|()| {
+        if output.ends_with('\n') {
+            Ok(())
+        } else {
+            writer.write_all(b"\n")
+        }
+    });
+    match result {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
     }
 }
 
@@ -230,8 +235,8 @@ pub(crate) fn emit_clap_output(output: ClapOutput) {
     match output {
         ClapOutput::RootHelp => {
             let mut command = Cli::command();
-            command.print_help().expect("print tao root help");
-            println!();
+            let output = command.render_help().to_string();
+            let _ = emit_output(&output, false);
         }
         ClapOutput::SubcommandHelp(path) => {
             let mut args = vec!["tao".to_string()];
@@ -240,10 +245,10 @@ pub(crate) fn emit_clap_output(output: ClapOutput) {
             let error = Cli::command()
                 .try_get_matches_from(args)
                 .expect_err("subcommand help should render clap display error");
-            error.print().expect("print tao subcommand help");
+            let _ = error.print();
         }
         ClapOutput::Error(error) => {
-            error.print().expect("print tao clap output");
+            let _ = error.print();
         }
     }
 }
@@ -353,6 +358,21 @@ pub(crate) fn fallback_render_error(
 }
 
 pub(crate) fn classify_cli_error(error: &anyhow::Error) -> ClassifiedCliError {
+    if let Some(remote) = error.downcast_ref::<super::daemon::RemoteCliError>() {
+        return ClassifiedCliError {
+            exit_kind: if remote.exit_code == 2 {
+                ExitKind::Blocked
+            } else {
+                ExitKind::Failure
+            },
+            error: JsonError {
+                code: remote.code.clone(),
+                message: remote.message.clone(),
+                hint: remote.hint.clone(),
+                details: remote.details.clone(),
+            },
+        };
+    }
     if let Some(contract_error) = error.downcast_ref::<CliContractError>() {
         return ClassifiedCliError {
             exit_kind: contract_error.exit_kind,
@@ -362,6 +382,22 @@ pub(crate) fn classify_cli_error(error: &anyhow::Error) -> ClassifiedCliError {
                 hint: contract_error.hint.clone(),
                 details: contract_error.details.clone(),
             },
+        };
+    }
+
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<tao_sdk_storage::MigrationRunnerError>(),
+            Some(
+                tao_sdk_storage::MigrationRunnerError::UnsupportedFormat { .. }
+                    | tao_sdk_storage::MigrationRunnerError::UnsupportedSchema { .. }
+                    | tao_sdk_storage::MigrationRunnerError::ChecksumMismatch { .. }
+            )
+        )
+    }) {
+        return ClassifiedCliError {
+            exit_kind: ExitKind::Blocked,
+            error: JsonError { code: "index_rebuild_required".into(), message: format!("{error:#}"), hint: Some("Stop the old daemon, archive or remove only the configured Tao index state, then run tao vault reindex. config show identifies custom paths. Vault source files must be preserved.".into()), details: None },
         };
     }
 
@@ -402,15 +438,6 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
         Commands::Graph { command } => match command {
             GraphCommands::Links(_) => "graph.links".to_string(),
             GraphCommands::Audit(_) => "graph.audit".to_string(),
-            GraphCommands::Outgoing(_) => "graph.outgoing".to_string(),
-            GraphCommands::Backlinks(_) => "graph.backlinks".to_string(),
-            GraphCommands::InboundScope(_) => "graph.inbound-scope".to_string(),
-            GraphCommands::Unresolved(_) => "graph.unresolved".to_string(),
-            GraphCommands::Deadends(_) => "graph.deadends".to_string(),
-            GraphCommands::Orphans(_) => "graph.orphans".to_string(),
-            GraphCommands::Floating(_) => "graph.floating".to_string(),
-            GraphCommands::Components(_) => "graph.components".to_string(),
-            GraphCommands::Neighbors(_) => "graph.neighbors".to_string(),
             GraphCommands::Path(_) => "graph.path".to_string(),
             GraphCommands::Walk(_) => "graph.walk".to_string(),
         },
@@ -418,7 +445,6 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
             MetaCommands::Properties(_) => "meta.properties".to_string(),
             MetaCommands::Tags(_) => "meta.tags".to_string(),
             MetaCommands::Aliases(_) => "meta.aliases".to_string(),
-            MetaCommands::Tasks(_) => "meta.tasks".to_string(),
         },
         Commands::Task { command } => match command {
             TaskCommands::List(_) => "task.list".to_string(),
@@ -428,10 +454,8 @@ pub(crate) fn tool_name_for_command(command: &Commands) -> String {
         Commands::Query(_) => "query.run".to_string(),
         Commands::Vault { command } => match command {
             VaultCommands::Open(_) => "vault.open".to_string(),
-            VaultCommands::Stats(_) => "vault.stats".to_string(),
             VaultCommands::Preflight(_) => "vault.preflight".to_string(),
             VaultCommands::Reindex(_) => "vault.reindex".to_string(),
-            VaultCommands::Reconcile(_) => "vault.reconcile".to_string(),
             VaultCommands::Daemon { command } => match command {
                 DaemonCommands::Start(_) => "vault.daemon.start".to_string(),
                 DaemonCommands::Status(_) => "vault.daemon.status".to_string(),

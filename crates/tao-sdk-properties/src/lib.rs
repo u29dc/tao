@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use thiserror::Error;
 
@@ -22,7 +23,7 @@ pub struct FrontMatterExtraction {
 }
 
 /// Front matter parse status.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FrontMatterStatus {
     /// Front matter block not present.
     Missing,
@@ -38,7 +39,7 @@ pub enum FrontMatterStatus {
 }
 
 /// Stable front matter parse error codes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrontMatterErrorCode {
     /// Opening front matter fence was not closed.
     UnclosedFence,
@@ -48,6 +49,10 @@ pub enum FrontMatterErrorCode {
     TooDeep,
     /// YAML parser reported malformed content.
     YamlParseFailed,
+    /// The YAML root is neither a mapping nor empty.
+    ExpectedMappingRoot,
+    /// JSON cannot represent a non-finite numeric value.
+    NonFiniteNumber,
 }
 
 impl FrontMatterErrorCode {
@@ -59,6 +64,8 @@ impl FrontMatterErrorCode {
                 "frontmatter.yaml_parse_failed"
             }
             Self::TooLarge => "frontmatter.too_large",
+            Self::ExpectedMappingRoot => "frontmatter.expected_mapping",
+            Self::NonFiniteNumber => "frontmatter.non_finite_number",
         }
     }
 }
@@ -96,10 +103,15 @@ fn next_markdown_line(markdown: &str, start: usize) -> Option<MarkdownLine<'_>> 
 /// Extract front matter from markdown and capture parse failures without panicking.
 #[must_use]
 pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
-    let Some(opening_fence) = next_markdown_line(markdown, 0) else {
+    let content_start = if markdown.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let Some(opening_fence) = next_markdown_line(markdown, content_start) else {
         return FrontMatterExtraction {
             raw: None,
-            body: markdown.to_string(),
+            body: markdown[content_start..].to_string(),
             status: FrontMatterStatus::Missing,
         };
     };
@@ -107,7 +119,7 @@ pub fn extract_front_matter(markdown: &str) -> FrontMatterExtraction {
     if opening_fence.content != "---" {
         return FrontMatterExtraction {
             raw: None,
-            body: markdown.to_string(),
+            body: markdown[content_start..].to_string(),
             status: FrontMatterStatus::Missing,
         };
     }
@@ -171,6 +183,29 @@ fn parse_front_matter_yaml(raw: String, body: String) -> FrontMatterExtraction {
                 },
             }
         }
+        Ok(Value::Null) => FrontMatterExtraction {
+            raw: Some(raw),
+            body,
+            status: FrontMatterStatus::Parsed {
+                value: Value::Mapping(Default::default()),
+            },
+        },
+        Ok(value) if !matches!(value, Value::Mapping(_)) => FrontMatterExtraction {
+            raw: Some(raw),
+            body,
+            status: FrontMatterStatus::Malformed {
+                code: FrontMatterErrorCode::ExpectedMappingRoot,
+                error: PropertyProjectionError::ExpectedMappingRoot.to_string(),
+            },
+        },
+        Ok(value) if yaml_has_non_finite_number(&value) => FrontMatterExtraction {
+            raw: Some(raw),
+            body,
+            status: FrontMatterStatus::Malformed {
+                code: FrontMatterErrorCode::NonFiniteNumber,
+                error: PropertyProjectionError::NonFiniteNumber.to_string(),
+            },
+        },
         Ok(value) => FrontMatterExtraction {
             raw: Some(raw),
             body,
@@ -185,6 +220,27 @@ fn parse_front_matter_yaml(raw: String, body: String) -> FrontMatterExtraction {
             },
         },
     }
+}
+
+fn yaml_has_non_finite_number(root: &Value) -> bool {
+    let mut stack = vec![root];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Number(number) if number.as_f64().is_some_and(|v| !v.is_finite()) => {
+                return true;
+            }
+            Value::Sequence(values) => stack.extend(values),
+            Value::Mapping(values) => {
+                for (key, value) in values {
+                    stack.push(key);
+                    stack.push(value);
+                }
+            }
+            Value::Tagged(tagged) => stack.push(&tagged.value),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn yaml_exceeds_max_depth(root: &Value, max_depth: usize) -> bool {
@@ -225,7 +281,11 @@ pub struct TypedProperty {
 pub enum TypedPropertyValue {
     /// Boolean value.
     Bool(bool),
-    /// Numeric value coerced to f64.
+    /// Lossless signed integer value.
+    Integer(i64),
+    /// Lossless unsigned integer value outside the signed range.
+    UnsignedInteger(u64),
+    /// Finite floating-point value.
     Number(f64),
     /// ISO-like date string.
     Date(String),
@@ -241,6 +301,12 @@ pub enum TypedPropertyValue {
 pub fn project_typed_properties(
     front_matter: &Value,
 ) -> Result<Vec<TypedProperty>, PropertyProjectionError> {
+    if front_matter.is_null() {
+        return Ok(Vec::new());
+    }
+    if yaml_has_non_finite_number(front_matter) {
+        return Err(PropertyProjectionError::NonFiniteNumber);
+    }
     let Value::Mapping(mapping) = front_matter else {
         return Err(PropertyProjectionError::ExpectedMappingRoot);
     };
@@ -329,6 +395,16 @@ fn collect_default_tokens(kind: DefaultListKind, value: &TypedPropertyValue) -> 
         TypedPropertyValue::List(values) => {
             let mut tokens = Vec::new();
             for item in values {
+                if kind == DefaultListKind::Aliases
+                    && let TypedPropertyValue::String(value) | TypedPropertyValue::Date(value) =
+                        item
+                {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        tokens.push(value.to_owned());
+                    }
+                    continue;
+                }
                 tokens.extend(collect_default_tokens(kind, item));
             }
             dedupe_tokens(tokens)
@@ -337,6 +413,8 @@ fn collect_default_tokens(kind: DefaultListKind, value: &TypedPropertyValue) -> 
             dedupe_tokens(split_default_string_tokens(kind, value))
         }
         TypedPropertyValue::Bool(value) => vec![value.to_string()],
+        TypedPropertyValue::Integer(value) => vec![value.to_string()],
+        TypedPropertyValue::UnsignedInteger(value) => vec![value.to_string()],
         TypedPropertyValue::Number(value) => vec![value.to_string()],
         TypedPropertyValue::Null => Vec::new(),
     }
@@ -379,7 +457,7 @@ fn dedupe_tokens(tokens: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut deduped = Vec::new();
     for token in tokens {
-        if seen.insert(token.to_ascii_lowercase()) {
+        if seen.insert(token.to_lowercase()) {
             deduped.push(token);
         }
     }
@@ -389,7 +467,15 @@ fn dedupe_tokens(tokens: Vec<String>) -> Vec<String> {
 fn normalize_yaml_value(value: &Value) -> TypedPropertyValue {
     match value {
         Value::Bool(value) => TypedPropertyValue::Bool(*value),
-        Value::Number(value) => TypedPropertyValue::Number(value.as_f64().unwrap_or(0.0)),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                TypedPropertyValue::Integer(value)
+            } else if let Some(value) = value.as_u64() {
+                TypedPropertyValue::UnsignedInteger(value)
+            } else {
+                TypedPropertyValue::Number(value.as_f64().expect("validated YAML number"))
+            }
+        }
         Value::String(value) => {
             if is_iso_date(value) {
                 TypedPropertyValue::Date(value.clone())
@@ -409,11 +495,11 @@ fn normalize_yaml_value(value: &Value) -> TypedPropertyValue {
 
 fn is_iso_date(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.len() < 10 {
+    if bytes.len() != 10 {
         return false;
     }
 
-    bytes[0].is_ascii_digit()
+    let shape = bytes[0].is_ascii_digit()
         && bytes[1].is_ascii_digit()
         && bytes[2].is_ascii_digit()
         && bytes[3].is_ascii_digit()
@@ -422,7 +508,26 @@ fn is_iso_date(value: &str) -> bool {
         && bytes[6].is_ascii_digit()
         && bytes[7] == b'-'
         && bytes[8].is_ascii_digit()
-        && bytes[9].is_ascii_digit()
+        && bytes[9].is_ascii_digit();
+    if !shape {
+        return false;
+    }
+    let year = u32::from(bytes[0] - b'0') * 1000
+        + u32::from(bytes[1] - b'0') * 100
+        + u32::from(bytes[2] - b'0') * 10
+        + u32::from(bytes[3] - b'0');
+    let month = (bytes[5] - b'0') * 10 + bytes[6] - b'0';
+    let day = (bytes[8] - b'0') * 10 + bytes[9] - b'0';
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => return false,
+    };
+    day >= 1 && day <= days
 }
 
 fn yaml_to_compact_string(value: &Value) -> String {
@@ -439,6 +544,9 @@ pub enum PropertyProjectionError {
     /// Front matter root must be a mapping.
     #[error("front matter root must be a mapping")]
     ExpectedMappingRoot,
+    /// YAML non-finite numbers have no lossless JSON numeric representation.
+    #[error("front matter contains a non-finite number")]
+    NonFiniteNumber,
 }
 
 /// Front matter parse errors.
@@ -614,7 +722,7 @@ tags:
             properties[0].value,
             TypedPropertyValue::Date("2026-03-03".to_string())
         );
-        assert_eq!(properties[1].value, TypedPropertyValue::Number(2.0));
+        assert_eq!(properties[1].value, TypedPropertyValue::Integer(2));
         assert_eq!(properties[2].value, TypedPropertyValue::Bool(true));
         assert_eq!(
             properties[3].value,
@@ -630,6 +738,54 @@ tags:
         let value: Value = serde_yaml::from_str("- one\n- two").expect("parse yaml list");
         let error = project_typed_properties(&value).expect_err("non-mapping should fail");
         assert_eq!(error, PropertyProjectionError::ExpectedMappingRoot);
+    }
+
+    #[test]
+    fn empty_frontmatter_is_empty_metadata_and_invalid_roots_preserve_body() {
+        let empty = extract_front_matter("---\n---\n# Keep");
+        let FrontMatterStatus::Parsed { value } = empty.status else {
+            panic!("empty mapping")
+        };
+        assert!(project_typed_properties(&value).unwrap().is_empty());
+        assert_eq!(empty.body, "# Keep");
+        for yaml in ["42", "- one", "number: .nan", "number: .inf"] {
+            let result = extract_front_matter(&format!("---\n{yaml}\n---\n# Keep"));
+            assert!(matches!(result.status, FrontMatterStatus::Malformed { .. }));
+            assert_eq!(result.body, "# Keep");
+        }
+    }
+
+    #[test]
+    fn preserves_integer_precision_alias_items_and_real_dates() {
+        let value: Value = serde_yaml::from_str("large: 9007199254740993\nunsigned: 18446744073709551615\naliases: ['Smith, John', 'New York']\ninvalid_date: '2026-02-29'\nvalid_date: '2024-02-29'\n").unwrap();
+        let values = project_typed_properties(&value)
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.key, p.value))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            values["large"],
+            TypedPropertyValue::Integer(9_007_199_254_740_993)
+        );
+        assert_eq!(
+            values["unsigned"],
+            TypedPropertyValue::UnsignedInteger(u64::MAX)
+        );
+        assert_eq!(
+            values["aliases"],
+            TypedPropertyValue::List(vec![
+                TypedPropertyValue::String("Smith, John".into()),
+                TypedPropertyValue::String("New York".into())
+            ])
+        );
+        assert_eq!(
+            values["invalid_date"],
+            TypedPropertyValue::String("2026-02-29".into())
+        );
+        assert_eq!(
+            values["valid_date"],
+            TypedPropertyValue::Date("2024-02-29".into())
+        );
     }
 
     #[test]
@@ -675,6 +831,20 @@ cssclasses:
                 TypedPropertyValue::String("alpha".to_string()),
                 TypedPropertyValue::String("beta".to_string())
             ])
+        );
+    }
+    #[test]
+    fn utf8_bom_preserves_frontmatter_and_body() {
+        let source = "\u{feff}---\r\ntitle: Café\r\n---\r\n# Heading\r\n[[target]]\r\n";
+        let extraction = extract_front_matter(source);
+        assert!(matches!(
+            extraction.status,
+            FrontMatterStatus::Parsed { .. }
+        ));
+        assert_eq!(extraction.body, "# Heading\r\n[[target]]\r\n");
+        assert_eq!(
+            extract_front_matter("\u{feff}# Heading\n").body,
+            "# Heading\n"
         );
     }
 }

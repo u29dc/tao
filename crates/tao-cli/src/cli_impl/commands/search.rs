@@ -15,7 +15,7 @@ pub(crate) fn handle(args: SearchArgs, runtime: &mut RuntimeMode) -> Result<Comm
         .map(str::trim)
         .filter(|query| !query.is_empty())
         .map(ToString::to_string);
-    let include_pii = args.include_pii && !args.no_pii;
+    let include_pii = !args.no_pii;
     let result = with_connection(runtime, &resolved, |connection| {
         Ok(VaultSearchService.search(
             connection,

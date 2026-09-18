@@ -58,7 +58,7 @@ impl SearchAliasRepository {
         let mut statement = connection
             .prepare_cached(
                 r#"
-INSERT OR REPLACE INTO search_aliases (
+INSERT INTO search_aliases (
   alias_id,
   file_id,
   normalized_path,
@@ -71,6 +71,7 @@ INSERT OR REPLACE INTO search_aliases (
   weight
 )
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+ON CONFLICT(alias_id) DO UPDATE SET normalized_path=excluded.normalized_path, normalized_path_lc=excluded.normalized_path_lc, extension=excluded.extension, weight=excluded.weight
 "#,
             )
             .map_err(|source| SearchAliasRepositoryError::Sql {
@@ -140,12 +141,14 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
     }
 
     /// Query aliases by exact normalized or compact query text.
+    #[allow(clippy::too_many_arguments)]
     pub fn query(
         connection: &Connection,
         alias_norm: &str,
         alias_compact: &str,
         surfaces: &[String],
         scope: Option<&str>,
+        scope_case_insensitive: bool,
         extensions: &[String],
         limit: u32,
     ) -> Result<Vec<SearchAliasMatch>, SearchAliasRepositoryError> {
@@ -164,9 +167,14 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         }
 
         if let Some(scope) = scope.filter(|scope| !scope.is_empty()) {
-            clauses.push("(normalized_path = ? OR normalized_path LIKE ? ESCAPE '\\')".to_string());
+            let column = if scope_case_insensitive {
+                "normalized_path_lc"
+            } else {
+                "normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.to_string()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
 
         if !extensions.is_empty() {
@@ -179,16 +187,14 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
 
         let sql = format!(
             r#"
-SELECT
-  alias_id,
-  file_id,
-  normalized_path,
-  extension,
-  surface,
-  source,
-  weight
-FROM search_aliases
-WHERE {}
+WITH ranked AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY normalized_path ORDER BY weight DESC, surface, source, alias_id
+  ) AS path_rank
+  FROM search_aliases WHERE {}
+)
+SELECT alias_id, file_id, normalized_path, extension, surface, source, weight
+FROM ranked WHERE path_rank = 1
 ORDER BY weight DESC, normalized_path ASC, source ASC
 LIMIT ?
 "#,
@@ -236,6 +242,7 @@ LIMIT ?
         alias_compact: &str,
         surfaces: &[String],
         scope: Option<&str>,
+        scope_case_insensitive: bool,
         extensions: &[String],
     ) -> Result<Vec<String>, SearchAliasRepositoryError> {
         let mut clauses = vec!["(alias_norm = ? OR alias_compact = ?)".to_string()];
@@ -253,9 +260,14 @@ LIMIT ?
         }
 
         if let Some(scope) = scope.filter(|scope| !scope.is_empty()) {
-            clauses.push("(normalized_path = ? OR normalized_path LIKE ? ESCAPE '\\')".to_string());
+            let column = if scope_case_insensitive {
+                "normalized_path_lc"
+            } else {
+                "normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.to_string()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
 
         if !extensions.is_empty() {
@@ -299,13 +311,6 @@ ORDER BY normalized_path ASC
         })
         .collect()
     }
-}
-
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }
 
 /// Search alias repository operation failures.
@@ -361,6 +366,7 @@ mod tests {
             "jordanhart",
             &[],
             None,
+            false,
             &[],
             10,
         )
@@ -374,6 +380,7 @@ mod tests {
             "jordanhart",
             &[],
             None,
+            false,
             &[],
             10,
         )

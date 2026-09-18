@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.pyc
 node_modules/
 target/
 dist/
@@ -8,6 +10,4 @@ build/
 apps/tao-macos/.build/
 apps/tao-macos/.swiftpm/
 .benchmarks/
-vault/generated/
-vault/.tao/
-vault/config.toml
+fixtures/**/.tao/

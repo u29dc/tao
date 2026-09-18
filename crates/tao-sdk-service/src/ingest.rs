@@ -12,7 +12,7 @@ use tao_sdk_vault::{
 use thiserror::Error;
 
 /// Parsed markdown note produced by the ingest pipeline shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IngestedMarkdownNote {
     /// Canonical absolute path in the active vault.
     pub absolute_path: PathBuf,

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use rusqlite::{Connection, params};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tao_sdk_core::note_title_from_path;
+use tao_sdk_core::{compare_json_values, json_values_equal};
 
 use crate::{
     SearchQueryError, SearchQueryProjectedItem, SearchQueryProjectedPage, SearchQueryProjection,
@@ -54,7 +55,7 @@ WITH matches AS (
   SELECT 1
   FROM search_segments s
   JOIN search_segments_fts ON search_segments_fts.rowid = s.rowid
-  WHERE s.surface = 'docs'
+  WHERE s.surface = 'docs' AND s.extension IN ('md', 'markdown')
     AND search_segments_fts MATCH ?1
 )
 SELECT COUNT(*) FROM matches
@@ -72,19 +73,21 @@ WITH matches AS (
   SELECT
     s.file_id,
     s.normalized_path,
+    s.label AS title,
     s.updated_at AS indexed_at,
     LOWER(s.title_text) AS title_lc,
     s.normalized_path_lc,
     LOWER(s.body_text) AS content_lc
   FROM search_segments s
   JOIN search_segments_fts ON search_segments_fts.rowid = s.rowid
-  WHERE s.surface = 'docs'
+  WHERE s.surface = 'docs' AND s.extension IN ('md', 'markdown')
     AND search_segments_fts MATCH ?1
 ),
 scored AS (
   SELECT
     file_id,
     normalized_path,
+    title,
     indexed_at,
     CASE WHEN instr(title_lc, ?2) > 0 THEN 1 ELSE 0 END AS title_match,
     CASE WHEN instr(normalized_path_lc, ?2) > 0 THEN 1 ELSE 0 END AS path_match,
@@ -94,6 +97,7 @@ scored AS (
 SELECT
   file_id,
   normalized_path,
+  title,
   indexed_at,
   title_match,
   path_match,
@@ -154,7 +158,7 @@ OFFSET ?4
                     None
                 },
                 title: if projection.include_title {
-                    Some(title_from_path(&path))
+                    Some(row.get("title")?)
                 } else {
                     None
                 },
@@ -220,7 +224,10 @@ fn compare_row_maps(
         let left_value = left.get(&key.field);
         let right_value = right.get(&key.field);
         let mut ordering = compare_nullable_values(left_value, right_value, key.null_order);
-        if key.direction == SortDirection::Desc {
+        if key.direction == SortDirection::Desc
+            && left_value.is_some_and(|value| !value.is_null())
+            && right_value.is_some_and(|value| !value.is_null())
+        {
             ordering = ordering.reverse();
         }
         if ordering != Ordering::Equal {
@@ -251,37 +258,6 @@ fn compare_nullable_values(
             NullOrder::Last => Ordering::Less,
         },
         (Some(left), Some(right)) => compare_json_values(left, right),
-    }
-}
-
-fn compare_json_values(left: &JsonValue, right: &JsonValue) -> Ordering {
-    let left_rank = json_type_rank(left);
-    let right_rank = json_type_rank(right);
-    if left_rank != right_rank {
-        return left_rank.cmp(&right_rank);
-    }
-
-    match (left, right) {
-        (JsonValue::Null, JsonValue::Null) => Ordering::Equal,
-        (JsonValue::Bool(left), JsonValue::Bool(right)) => left.cmp(right),
-        (JsonValue::Number(left), JsonValue::Number(right)) => {
-            let left = left.as_f64().unwrap_or(0.0);
-            let right = right.as_f64().unwrap_or(0.0);
-            left.partial_cmp(&right).unwrap_or(Ordering::Equal)
-        }
-        (JsonValue::String(left), JsonValue::String(right)) => left.cmp(right),
-        _ => left.to_string().cmp(&right.to_string()),
-    }
-}
-
-fn json_type_rank(value: &JsonValue) -> u8 {
-    match value {
-        JsonValue::Null => 0,
-        JsonValue::Bool(_) => 1,
-        JsonValue::Number(_) => 2,
-        JsonValue::String(_) => 3,
-        JsonValue::Array(_) => 4,
-        JsonValue::Object(_) => 5,
     }
 }
 
@@ -320,12 +296,15 @@ fn evaluate_comparison(
 ) -> Result<bool, QueryEvalError> {
     let right = right.to_json_value();
     match op {
-        CompareOp::Eq => Ok(left.is_some_and(|value| value == &right)),
-        CompareOp::Neq => Ok(left.is_none_or(|value| value != &right)),
+        CompareOp::Eq => Ok(left.is_some_and(|value| json_values_equal(value, &right))),
+        CompareOp::Neq => Ok(left.is_none_or(|value| !json_values_equal(value, &right))),
         CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte => {
             let Some(left) = left else {
                 return Ok(false);
             };
+            if left.is_null() || right.is_null() {
+                return Ok(false);
+            }
             let ordered = compare_ordered(field, left, &right)?;
             Ok(match op {
                 CompareOp::Gt => ordered.is_gt(),
@@ -356,11 +335,7 @@ fn compare_ordered(
     right: &JsonValue,
 ) -> Result<Ordering, QueryEvalError> {
     match (left, right) {
-        (JsonValue::Number(left), JsonValue::Number(right)) => {
-            let left = left.as_f64().unwrap_or(0.0);
-            let right = right.as_f64().unwrap_or(0.0);
-            Ok(left.partial_cmp(&right).unwrap_or(Ordering::Equal))
-        }
+        (JsonValue::Number(_), JsonValue::Number(_)) => Ok(compare_json_values(left, right)),
         (JsonValue::String(left), JsonValue::String(right)) => Ok(left.cmp(right)),
         _ => Err(QueryEvalError {
             message: format!(
@@ -422,6 +397,53 @@ mod tests {
     use crate::parser::{parse_sort_keys, parse_where_expression};
 
     use super::{apply_sort, apply_where_filter};
+
+    #[test]
+    fn exact_numbers_and_optional_numeric_predicates() {
+        let rows = vec![
+            JsonMap::from_iter([("n".into(), json!(9_007_199_254_740_993_u64))]),
+            JsonMap::from_iter([("n".into(), json!(9_007_199_254_740_992_u64))]),
+            JsonMap::from_iter([("n".into(), JsonValue::Null)]),
+            JsonMap::new(),
+        ];
+        let predicate = parse_where_expression("n == 9007199254740993").unwrap();
+        let selected = apply_where_filter(rows.clone(), Some(&predicate)).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]["n"], json!(9_007_199_254_740_993_u64));
+        let predicate = parse_where_expression("n > 9007199254740992").unwrap();
+        assert_eq!(apply_where_filter(rows, Some(&predicate)).unwrap().len(), 1);
+        let rows = vec![JsonMap::from_iter([("n".into(), json!(1.0))])];
+        let predicate = parse_where_expression("n == 1").unwrap();
+        assert_eq!(apply_where_filter(rows, Some(&predicate)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn null_placement_is_independent_of_sort_direction() {
+        for direction in ["asc", "desc"] {
+            for nulls in ["nulls_first", "nulls_last"] {
+                let mut rows = vec![
+                    JsonMap::from_iter([("n".into(), json!(2))]),
+                    JsonMap::from_iter([("n".into(), JsonValue::Null)]),
+                    JsonMap::from_iter([("n".into(), json!(1))]),
+                ];
+                let sort = parse_sort_keys(Some(&format!("n:{direction}:{nulls}"))).unwrap();
+                apply_sort(&mut rows, &sort);
+                assert!(rows[if nulls == "nulls_first" { 0 } else { 2 }]["n"].is_null());
+                let numbers = rows
+                    .iter()
+                    .filter_map(|row| row["n"].as_i64())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    numbers,
+                    if direction == "asc" {
+                        vec![1, 2]
+                    } else {
+                        vec![2, 1]
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn where_filter_reports_type_mismatch() {

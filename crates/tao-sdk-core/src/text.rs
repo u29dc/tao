@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::path::Path;
+use unicode_normalization::UnicodeNormalization;
 
 /// Derive a stable note title from a normalized vault-relative path.
 #[must_use]
@@ -31,7 +32,12 @@ pub fn note_extension_from_path(path: &str) -> String {
 /// Normalize one path-like token for deterministic comparisons.
 #[must_use]
 pub fn normalize_path_like(value: &str) -> String {
-    value.trim().trim_matches('/').replace('\\', "/")
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .nfc()
+        .collect()
 }
 
 /// Deterministic lexical compare for normalized path-like values.
@@ -40,6 +46,7 @@ pub fn cmp_normalized_paths(left: &str, right: &str) -> Ordering {
     normalize_path_like(left)
         .to_ascii_lowercase()
         .cmp(&normalize_path_like(right).to_ascii_lowercase())
+        .then_with(|| normalize_path_like(left).cmp(&normalize_path_like(right)))
 }
 
 #[cfg(test)]
@@ -65,7 +72,7 @@ mod tests {
         assert_eq!(normalize_path_like("/Notes\\Alpha.md/"), "Notes/Alpha.md");
         assert_eq!(
             cmp_normalized_paths("Notes/Alpha.md", "notes/alpha.md"),
-            std::cmp::Ordering::Equal
+            std::cmp::Ordering::Less
         );
     }
 }

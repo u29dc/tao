@@ -4,7 +4,7 @@ use serde_json::Value as JsonValue;
 pub enum LiteralValue {
     Null,
     Bool(bool),
-    Number(f64),
+    Number(serde_json::Number),
     String(String),
 }
 
@@ -14,9 +14,7 @@ impl LiteralValue {
         match self {
             Self::Null => JsonValue::Null,
             Self::Bool(value) => JsonValue::Bool(*value),
-            Self::Number(value) => {
-                serde_json::Number::from_f64(*value).map_or(JsonValue::Null, JsonValue::Number)
-            }
+            Self::Number(value) => JsonValue::Number(value.clone()),
             Self::String(value) => JsonValue::String(value.clone()),
         }
     }
@@ -194,22 +192,21 @@ pub fn parse_sort_keys(input: Option<&str>) -> Result<Vec<SortKey>, ParseError> 
     Ok(keys)
 }
 
-pub fn build_fts_query(query: &str) -> String {
-    let tokens = query
+/// Canonical token text used by all indexed search surfaces.
+pub fn normalize_query_text(query: &str) -> String {
+    query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
         .split_whitespace()
-        .filter_map(|token| {
-            let sanitized = token
-                .chars()
-                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
-                .collect::<String>()
-                .to_lowercase();
-            if sanitized.is_empty() {
-                None
-            } else {
-                Some(sanitized)
-            }
-        })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn build_fts_query(query: &str) -> String {
+    let normalized = normalize_query_text(query);
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
 
     if tokens.is_empty() {
         return String::from("\"\"");
@@ -346,7 +343,7 @@ fn parse_literal(token: &Token) -> Result<LiteralValue, ParseError> {
         TokenKind::String => Ok(LiteralValue::String(token.raw.clone())),
         TokenKind::Number => token
             .raw
-            .parse::<f64>()
+            .parse::<serde_json::Number>()
             .map(LiteralValue::Number)
             .map_err(|_| ParseError {
                 message: format!("invalid numeric literal '{}'", token.raw),

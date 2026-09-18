@@ -5,9 +5,8 @@ use serde_json::Map as JsonMap;
 use thiserror::Error;
 
 use crate::ast::{
-    BaseAggregateSpec, BaseColumnConfig, BaseDocument, BaseFilterClause, BaseFilterOp,
-    BaseRelationSpec, BaseRollupSpec, BaseSortClause, BaseSortDirection, BaseViewRegistryEntry,
-    PropertyQueryPlanRequest, PropertyQuerySortHint, TableQueryPlan, TableQueryPlanRequest,
+    BaseAggregateSpec, BaseColumnConfig, BaseDocument, BaseFilterClause, BaseRelationSpec,
+    BaseRollupSpec, BaseSortClause, BaseViewRegistryEntry, TableQueryPlan, TableQueryPlanRequest,
 };
 
 /// Registry over parsed base views.
@@ -19,6 +18,19 @@ pub struct BaseViewRegistry {
 impl BaseViewRegistry {
     /// Build one registry from a parsed `.base` document.
     pub fn from_document(document: &BaseDocument) -> Result<Self, BaseViewRegistryError> {
+        if let Some(diagnostic) = crate::validation::validate_base_document(document)
+            .into_iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.severity,
+                    crate::validation::BaseDiagnosticSeverity::Error
+                ) && diagnostic.code != "bases.view.duplicate_name"
+            })
+        {
+            return Err(BaseViewRegistryError::InvalidDefinition {
+                reason: diagnostic.message,
+            });
+        }
         let mut views = Vec::with_capacity(document.views.len());
         let mut seen_names = HashSet::new();
 
@@ -179,6 +191,25 @@ impl BaseTableQueryPlanner {
         let relations = config.relations;
         let rollups = config.rollups;
 
+        if columns.is_empty() {
+            let mut seen = HashSet::new();
+            columns = filters
+                .iter()
+                .map(|f| f.key.as_str())
+                .chain(sorts.iter().map(|s| s.key.as_str()))
+                .chain(group_by.iter().map(String::as_str))
+                .chain(aggregates.iter().map(|a| a.alias.as_str()))
+                .chain(relations.iter().map(|r| r.key.as_str()))
+                .chain(rollups.iter().map(|r| r.alias.as_str()))
+                .filter(|key| seen.insert((*key).to_string()))
+                .map(|key| BaseColumnConfig {
+                    key: key.to_string(),
+                    label: None,
+                    width: None,
+                    hidden: false,
+                })
+                .collect();
+        }
         let required_property_keys = collect_required_property_keys(
             &filters,
             &sorts,
@@ -188,17 +219,6 @@ impl BaseTableQueryPlanner {
             &relations,
             &rollups,
         );
-        if columns.is_empty() {
-            columns = required_property_keys
-                .iter()
-                .map(|key| BaseColumnConfig {
-                    key: key.clone(),
-                    label: None,
-                    width: None,
-                    hidden: false,
-                })
-                .collect();
-        }
 
         let limit = request.page_size as usize;
         let page_offset = (request.page - 1) as usize;
@@ -209,8 +229,6 @@ impl BaseTableQueryPlanner {
                     page: request.page,
                     page_size: request.page_size,
                 })?;
-        let property_queries =
-            build_property_query_hints(&required_property_keys, &filters, &sorts, limit, offset);
 
         Ok(TableQueryPlan {
             view_name: view.name.clone(),
@@ -225,7 +243,6 @@ impl BaseTableQueryPlanner {
             rollups,
             limit,
             offset,
-            property_queries,
         })
     }
 }
@@ -261,6 +278,10 @@ fn collect_required_property_keys(
 ) -> Vec<String> {
     let mut keys = Vec::new();
     let mut dedupe = HashSet::new();
+    let derived_keys = rollups
+        .iter()
+        .map(|rollup| rollup.alias.as_str())
+        .collect::<HashSet<_>>();
 
     for key in filters
         .iter()
@@ -275,13 +296,17 @@ fn collect_required_property_keys(
         )
         .chain(relations.iter().map(|relation| relation.key.as_str()))
         .chain(rollups.iter().map(|rollup| rollup.relation_key.as_str()))
-        .chain(rollups.iter().map(|rollup| rollup.target_key.as_str()))
     {
-        let normalized = key.trim();
+        if derived_keys.contains(key) {
+            continue;
+        }
+        let Some(normalized) = crate::lexer::property_key(key.trim()) else {
+            continue;
+        };
         if normalized.is_empty() {
             continue;
         }
-        let dedupe_key = normalized.to_ascii_lowercase();
+        let dedupe_key = normalized.to_string();
         if dedupe.insert(dedupe_key) {
             keys.push(normalized.to_string());
         }
@@ -290,54 +315,12 @@ fn collect_required_property_keys(
     keys
 }
 
-fn build_property_query_hints(
-    required_keys: &[String],
-    filters: &[BaseFilterClause],
-    sorts: &[BaseSortClause],
-    limit: usize,
-    offset: usize,
-) -> Vec<PropertyQueryPlanRequest> {
-    required_keys
-        .iter()
-        .map(|key| {
-            let sort = sorts
-                .iter()
-                .find(|sort_clause| sort_clause.key.eq_ignore_ascii_case(key))
-                .map(|sort_clause| match sort_clause.direction {
-                    BaseSortDirection::Asc => PropertyQuerySortHint::ValueAsc,
-                    BaseSortDirection::Desc => PropertyQuerySortHint::ValueDesc,
-                })
-                .unwrap_or(PropertyQuerySortHint::FilePathAsc);
-            let value_contains = filters
-                .iter()
-                .find(|filter| {
-                    filter.key.eq_ignore_ascii_case(key) && filter.op == BaseFilterOp::Contains
-                })
-                .and_then(|filter| json_scalar_to_string(&filter.value));
-
-            PropertyQueryPlanRequest {
-                key: key.clone(),
-                value_contains,
-                sort,
-                limit: Some(limit),
-                offset,
-            }
-        })
-        .collect()
-}
-
-fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(value) => Some(value.clone()),
-        serde_json::Value::Number(value) => Some(value.to_string()),
-        serde_json::Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
 /// View registry construction failures.
 #[derive(Debug, Error)]
 pub enum BaseViewRegistryError {
+    /// Invalid execution semantics in the definition.
+    #[error("invalid base definition: {reason}")]
+    InvalidDefinition { reason: String },
     /// Duplicate names are not allowed in one `.base` document.
     #[error("duplicate base view name '{name}'")]
     DuplicateViewName {

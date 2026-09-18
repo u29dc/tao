@@ -2,19 +2,37 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use thiserror::Error;
 
 mod bases;
+mod content;
+mod documents;
 mod files;
+mod generations;
 mod index_state;
+mod link_evidence;
 mod links;
+mod metadata_aggregation;
 mod properties;
-mod render_cache;
 mod search_aliases;
 mod search_segments;
 mod tasks;
 mod transaction;
+
+pub use content::{
+    ContentDocumentRecord, ContentQueueCounts, ContentRepository, ContentSegmentRecord,
+    ExtractionJobRecord, MAX_EXTRACTION_WORKERS,
+};
+pub use documents::{
+    DiagnosticsRepository, DocumentRecord, DocumentRecordInput, DocumentStructureRecord,
+    DocumentsRepository, FileDiagnosticInput,
+};
+pub use generations::{IndexGenerationRepository, IndexGenerations};
+pub use link_evidence::{LinkEvidenceInput, LinkEvidenceRepository};
+
+/// Conservative shared SQL parameter batch size.
+pub const SQL_PARAMETER_CHUNK: usize = 256;
 
 pub use bases::{BaseRecord, BaseRecordInput, BaseWithPath, BasesRepository, BasesRepositoryError};
 pub use files::{
@@ -27,776 +45,307 @@ pub use links::{
     GraphNodeDegree, LinkRecord, LinkRecordInput, LinkWithPaths, LinksRepository,
     LinksRepositoryError, ResolvedLinkPair, ScopedInboundRow, ScopedInboundSummary,
 };
+pub use metadata_aggregation::{
+    MAX_METADATA_AGGREGATION_LIMIT, MetadataAggregateRecord, MetadataAggregateWindow,
+    MetadataAggregationRepository, MetadataAggregationRepositoryError,
+};
 pub use properties::{
     PropertiesRepository, PropertiesRepositoryError, PropertyRecord, PropertyRecordInput,
     PropertyWithPath,
-};
-pub use render_cache::{
-    RenderCacheRecord, RenderCacheRecordInput, RenderCacheRepository, RenderCacheRepositoryError,
 };
 pub use search_aliases::{
     SearchAliasInput, SearchAliasMatch, SearchAliasRepository, SearchAliasRepositoryError,
 };
 pub use search_segments::{
-    SearchSegmentCandidate, SearchSegmentInput, SearchSegmentMatch, SearchSegmentQuery,
-    SearchSegmentRepository, SearchSegmentRepositoryError,
+    SEARCH_RANK_SCALE, SearchSegmentCandidate, SearchSegmentInput, SearchSegmentMatch,
+    SearchSegmentQuery, SearchSegmentRepository, SearchSegmentRepositoryError,
 };
 pub use tasks::{TaskRecord, TaskRecordInput, TaskWithPath, TasksRepository, TasksRepositoryError};
 pub use transaction::{StorageTransaction, StorageTransactionError, with_transaction};
 
-/// Initial schema migration identifier.
-pub const MIGRATION_0001_ID: &str = "0001_init";
-/// Initial schema SQL payload.
-pub const MIGRATION_0001_SQL: &str = include_str!("../migrations/0001_init.sql");
-/// Search index schema migration identifier.
-pub const MIGRATION_0002_ID: &str = "0002_search_index";
-/// Search index schema SQL payload.
-pub const MIGRATION_0002_SQL: &str = include_str!("../migrations/0002_search_index.sql");
-/// Tasks index schema migration identifier.
-pub const MIGRATION_0003_ID: &str = "0003_tasks";
-/// Tasks index schema SQL payload.
-pub const MIGRATION_0003_SQL: &str = include_str!("../migrations/0003_tasks.sql");
-/// Link query performance migration identifier.
-pub const MIGRATION_0004_ID: &str = "0004_links_perf";
-/// Link query performance SQL payload.
-pub const MIGRATION_0004_SQL: &str = include_str!("../migrations/0004_links_perf.sql");
-/// Search index path projection migration identifier.
-pub const MIGRATION_0005_ID: &str = "0005_search_index_path";
-/// Search index path projection SQL payload.
-pub const MIGRATION_0005_SQL: &str = include_str!("../migrations/0005_search_index_path.sql");
-/// Search FTS virtual table + triggers migration identifier.
-pub const MIGRATION_0006_ID: &str = "0006_search_fts";
-/// Search FTS virtual table + triggers SQL payload.
-pub const MIGRATION_0006_SQL: &str = include_str!("../migrations/0006_search_fts.sql");
-/// Link unresolved diagnostics metadata migration identifier.
-pub const MIGRATION_0007_ID: &str = "0007_links_unresolved_metadata";
-/// Link unresolved diagnostics metadata SQL payload.
-pub const MIGRATION_0007_SQL: &str =
-    include_str!("../migrations/0007_links_unresolved_metadata.sql");
-/// Unified search segment and alias schema migration identifier.
-pub const MIGRATION_0008_ID: &str = "0008_search_segments";
-/// Unified search segment and alias schema SQL payload.
-pub const MIGRATION_0008_SQL: &str = include_str!("../migrations/0008_search_segments.sql");
-/// Legacy search index retirement migration identifier.
-pub const MIGRATION_0009_ID: &str = "0009_drop_search_index";
-/// Legacy search index retirement SQL payload.
-pub const MIGRATION_0009_SQL: &str = include_str!("../migrations/0009_drop_search_index.sql");
-
-const CREATE_SCHEMA_MIGRATIONS_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  id TEXT PRIMARY KEY,
-  checksum TEXT NOT NULL,
-  applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+/// Single supported index format. Old indexes are rebuildable caches, never upgraded in place.
+pub const CURRENT_FORMAT_EPOCH: u32 = 1;
+/// Identifier of the current schema bootstrap, retained in diagnostic reports.
+pub const CURRENT_SCHEMA_ID: &str = "current_1";
+/// Canonical and derived schema for a newly created index.
+pub const CURRENT_SCHEMA_SQL: &str = concat!(
+    include_str!("../schema/current.sql"),
+    "\n",
+    include_str!("../schema/search.sql")
 );
-"#;
+pub(crate) const SEARCH_SCHEMA_SQL: &str = include_str!("../schema/search.sql");
 
-/// Static migration definition.
+/// Current schema definition. There is no historical migration chain.
 #[derive(Debug, Clone, Copy)]
 pub struct Migration {
-    /// Ordered migration id.
+    /// Current bootstrap identifier.
     pub id: &'static str,
-    /// SQL payload.
+    /// Current complete schema.
     pub sql: &'static str,
 }
+const CURRENT_SCHEMA: [Migration; 1] = [Migration {
+    id: CURRENT_SCHEMA_ID,
+    sql: CURRENT_SCHEMA_SQL,
+}];
 
-const MIGRATIONS: [Migration; 9] = [
-    Migration {
-        id: MIGRATION_0001_ID,
-        sql: MIGRATION_0001_SQL,
-    },
-    Migration {
-        id: MIGRATION_0002_ID,
-        sql: MIGRATION_0002_SQL,
-    },
-    Migration {
-        id: MIGRATION_0003_ID,
-        sql: MIGRATION_0003_SQL,
-    },
-    Migration {
-        id: MIGRATION_0004_ID,
-        sql: MIGRATION_0004_SQL,
-    },
-    Migration {
-        id: MIGRATION_0005_ID,
-        sql: MIGRATION_0005_SQL,
-    },
-    Migration {
-        id: MIGRATION_0006_ID,
-        sql: MIGRATION_0006_SQL,
-    },
-    Migration {
-        id: MIGRATION_0007_ID,
-        sql: MIGRATION_0007_SQL,
-    },
-    Migration {
-        id: MIGRATION_0008_ID,
-        sql: MIGRATION_0008_SQL,
-    },
-    Migration {
-        id: MIGRATION_0009_ID,
-        sql: MIGRATION_0009_SQL,
-    },
-];
-
-const SQLITE_PRAGMA_PROFILE: [&str; 7] = [
-    "PRAGMA foreign_keys = ON;",
-    "PRAGMA journal_mode = WAL;",
-    "PRAGMA synchronous = NORMAL;",
-    "PRAGMA temp_store = MEMORY;",
-    "PRAGMA cache_size = -20000;",
-    "PRAGMA wal_autocheckpoint = 1000;",
-    "PRAGMA busy_timeout = 5000;",
-];
-
-/// Apply known schema migration SQL directly to an active connection.
-pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchemaError> {
-    for migration in known_migrations() {
-        if let Err(source) = connection.execute_batch(migration.sql) {
-            if migration.id == MIGRATION_0005_ID
-                && is_duplicate_column_error(&source, "normalized_path")
-            {
-                continue;
-            }
-            if migration.id == MIGRATION_0007_ID
-                && (is_duplicate_column_error(&source, "unresolved_reason")
-                    || is_duplicate_column_error(&source, "source_field"))
-            {
-                continue;
-            }
-            return Err(StorageSchemaError::ApplyMigration {
-                migration_id: migration.id,
-                source,
-            });
-        }
-
-        record_applied_schema_migration(connection, migration)?;
-    }
-
-    Ok(())
-}
-
-fn record_applied_schema_migration(
-    connection: &Connection,
-    migration: &Migration,
-) -> Result<(), StorageSchemaError> {
-    let expected_checksum = migration_checksum(migration.sql);
-    let recorded_checksum: Option<String> = connection
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE id = ?1",
-            params![migration.id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|source| StorageSchemaError::RecordMigration {
-            migration_id: migration.id,
-            source,
-        })?;
-
-    if let Some(recorded_checksum) = recorded_checksum {
-        if recorded_checksum != expected_checksum {
-            return Err(StorageSchemaError::ChecksumMismatch {
-                migration_id: migration.id,
-                expected_checksum,
-                recorded_checksum,
-            });
-        }
-
-        return Ok(());
-    }
-
-    connection
-        .execute(
-            "INSERT INTO schema_migrations (id, checksum) VALUES (?1, ?2)",
-            params![migration.id, expected_checksum],
-        )
-        .map_err(|source| StorageSchemaError::RecordMigration {
-            migration_id: migration.id,
-            source,
-        })?;
-
-    Ok(())
-}
-
-fn is_duplicate_column_error(source: &rusqlite::Error, column: &str) -> bool {
-    match source {
-        rusqlite::Error::SqliteFailure(_, Some(message)) => {
-            message.contains("duplicate column name") && message.contains(column)
-        }
-        _ => false,
-    }
-}
-
-/// Return ordered migration definitions.
+/// Return the single current schema definition for bootstrap diagnostics.
 #[must_use]
 pub fn known_migrations() -> &'static [Migration] {
-    &MIGRATIONS
+    &CURRENT_SCHEMA
 }
 
-/// Report for one migration runner execution.
+/// Schema initialization outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
-    /// Migration ids newly applied in this run.
+    /// Current schema identifier when newly initialized.
     pub applied: Vec<String>,
-    /// Migration ids already present and checksum-verified.
+    /// Current schema identifier when already initialized.
     pub skipped: Vec<String>,
 }
-
-/// Report for migration preflight validation.
+/// Read-only schema compatibility status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationPreflightReport {
-    /// Whether `schema_migrations` table exists.
+    /// Whether the current checksum metadata table exists.
     pub migrations_table_exists: bool,
-    /// Number of known migrations in binary.
+    /// Always one current schema definition.
     pub known_migrations: u64,
-    /// Number of applied migrations recorded in database.
+    /// One for a valid current index; zero for an empty database.
     pub applied_migrations: u64,
-    /// Number of pending migrations.
+    /// One for an empty database awaiting bootstrap, otherwise zero.
     pub pending_migrations: u64,
 }
 
-/// Validate migration metadata/checksums before attempting startup migration apply.
+/// Reject older/newer/non-Tao indexes without changing journal mode or schema.
 pub fn preflight_migrations(
     connection: &Connection,
 ) -> Result<MigrationPreflightReport, MigrationRunnerError> {
-    let known_total = known_migrations().len() as u64;
-    let migrations_table_exists: bool = connection
+    let epoch: u32 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|source| MigrationRunnerError::PreflightTableCheck { source })?;
+    let populated: bool = connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE substr(name,1,7)<>'sqlite_')",
             [],
             |row| row.get(0),
         )
         .map_err(|source| MigrationRunnerError::PreflightTableCheck { source })?;
-
-    if !migrations_table_exists {
+    if !populated && epoch == 0 {
         return Ok(MigrationPreflightReport {
             migrations_table_exists: false,
-            known_migrations: known_total,
+            known_migrations: 1,
             applied_migrations: 0,
-            pending_migrations: known_total,
+            pending_migrations: 1,
         });
     }
-
-    let applied_checksums = load_applied_checksums_connection(connection)?;
-    for migration in known_migrations() {
-        let expected_checksum = migration_checksum(migration.sql);
-        if let Some(recorded_checksum) = applied_checksums.get(migration.id)
-            && recorded_checksum != &expected_checksum
-        {
-            return Err(MigrationRunnerError::ChecksumMismatch {
-                migration_id: migration.id.to_string(),
-                expected_checksum,
-                recorded_checksum: recorded_checksum.clone(),
-            });
-        }
+    if epoch != CURRENT_FORMAT_EPOCH {
+        return Err(MigrationRunnerError::UnsupportedFormat {
+            found: epoch,
+            expected: CURRENT_FORMAT_EPOCH,
+        });
     }
-
-    let applied_total = applied_checksums.len() as u64;
-    let pending_total = known_migrations()
-        .iter()
-        .filter(|migration| !applied_checksums.contains_key(migration.id))
-        .count() as u64;
+    let checksums = load_applied_checksums(connection)?;
+    if checksums.len() != 1 || !checksums.contains_key(CURRENT_SCHEMA_ID) {
+        return Err(MigrationRunnerError::UnsupportedSchema {
+            migration_id: checksums
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "missing current schema metadata".into()),
+        });
+    }
+    let recorded_checksum = &checksums[CURRENT_SCHEMA_ID];
+    let expected_checksum = migration_checksum(CURRENT_SCHEMA_SQL);
+    if recorded_checksum != &expected_checksum {
+        return Err(MigrationRunnerError::ChecksumMismatch {
+            migration_id: CURRENT_SCHEMA_ID.into(),
+            expected_checksum,
+            recorded_checksum: recorded_checksum.clone(),
+        });
+    }
     Ok(MigrationPreflightReport {
         migrations_table_exists: true,
-        known_migrations: known_total,
-        applied_migrations: applied_total,
-        pending_migrations: pending_total,
+        known_migrations: 1,
+        applied_migrations: 1,
+        pending_migrations: 0,
     })
 }
 
-/// Apply forward-only migrations and enforce checksum guards.
+/// Initialize an empty database, or verify the existing current-format index.
 pub fn run_migrations(
     connection: &mut Connection,
 ) -> Result<MigrationReport, MigrationRunnerError> {
-    configure_connection_pragmas(connection)?;
-    preflight_migrations(connection)?;
-
-    let transaction = connection
-        .transaction()
-        .map_err(|source| MigrationRunnerError::BeginTransaction { source })?;
-
-    transaction
-        .execute_batch(CREATE_SCHEMA_MIGRATIONS_SQL)
-        .map_err(|source| MigrationRunnerError::EnsureMigrationsTable { source })?;
-
-    let applied_checksums = load_applied_checksums(&transaction)?;
-    let mut report = MigrationReport {
-        applied: Vec::new(),
-        skipped: Vec::new(),
-    };
-
-    for migration in known_migrations() {
-        let expected_checksum = migration_checksum(migration.sql);
-
-        if let Some(recorded_checksum) = applied_checksums.get(migration.id) {
-            if recorded_checksum != &expected_checksum {
-                return Err(MigrationRunnerError::ChecksumMismatch {
-                    migration_id: migration.id.to_string(),
-                    expected_checksum,
-                    recorded_checksum: recorded_checksum.clone(),
-                });
-            }
-
-            report.skipped.push(migration.id.to_string());
-            continue;
-        }
-
-        transaction.execute_batch(migration.sql).map_err(|source| {
-            MigrationRunnerError::ApplyMigration {
-                migration_id: migration.id.to_string(),
-                source,
-            }
-        })?;
-
-        transaction
-            .execute(
-                "INSERT INTO schema_migrations (id, checksum) VALUES (?1, ?2)",
-                params![migration.id, expected_checksum],
-            )
-            .map_err(|source| MigrationRunnerError::RecordMigration {
-                migration_id: migration.id.to_string(),
-                source,
-            })?;
-
-        report.applied.push(migration.id.to_string());
-    }
-
-    transaction
-        .commit()
-        .map_err(|source| MigrationRunnerError::CommitTransaction { source })?;
-
-    Ok(report)
+    initialize_schema(connection)
 }
-
-fn configure_connection_pragmas(connection: &Connection) -> Result<(), MigrationRunnerError> {
-    for pragma in SQLITE_PRAGMA_PROFILE {
+/// Initialize an empty connection using the same epoch/checksum contract.
+pub fn apply_initial_schema(connection: &Connection) -> Result<(), StorageSchemaError> {
+    initialize_schema(connection)
+        .map(|_| ())
+        .map_err(|source| StorageSchemaError::Runner {
+            source: Box::new(source),
+        })
+}
+fn initialize_schema(connection: &Connection) -> Result<MigrationReport, MigrationRunnerError> {
+    let preflight = preflight_migrations(connection)?;
+    for pragma in [
+        "PRAGMA foreign_keys=ON",
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA synchronous=NORMAL",
+        "PRAGMA temp_store=FILE",
+        "PRAGMA cache_size=-20000",
+        "PRAGMA wal_autocheckpoint=1000",
+        "PRAGMA busy_timeout=5000",
+    ] {
         connection
             .execute_batch(pragma)
             .map_err(|source| MigrationRunnerError::SetPragma { pragma, source })?;
     }
-
-    Ok(())
-}
-
-fn load_applied_checksums(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<HashMap<String, String>, MigrationRunnerError> {
-    let mut statement = transaction
-        .prepare("SELECT id, checksum FROM schema_migrations")
-        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-
-    let rows = statement
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let checksum: String = row.get(1)?;
-            Ok((id, checksum))
-        })
-        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-
-    let mut checksums = HashMap::new();
-    for row in rows {
-        let (id, checksum) =
-            row.map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-        checksums.insert(id, checksum);
+    if preflight.pending_migrations == 0 {
+        return Ok(MigrationReport {
+            applied: Vec::new(),
+            skipped: vec![CURRENT_SCHEMA_ID.into()],
+        });
     }
-
-    Ok(checksums)
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|source| MigrationRunnerError::BeginTransaction { source })?;
+    transaction
+        .execute_batch(CURRENT_SCHEMA_SQL)
+        .map_err(|source| MigrationRunnerError::ApplyMigration {
+            migration_id: CURRENT_SCHEMA_ID.into(),
+            source,
+        })?;
+    transaction
+        .execute(
+            "INSERT INTO schema_migrations(id,checksum) VALUES(?1,?2)",
+            params![CURRENT_SCHEMA_ID, migration_checksum(CURRENT_SCHEMA_SQL)],
+        )
+        .map_err(|source| MigrationRunnerError::RecordMigration {
+            migration_id: CURRENT_SCHEMA_ID.into(),
+            source,
+        })?;
+    transaction
+        .pragma_update(None, "user_version", CURRENT_FORMAT_EPOCH)
+        .map_err(|source| MigrationRunnerError::RecordMigration {
+            migration_id: CURRENT_SCHEMA_ID.into(),
+            source,
+        })?;
+    transaction
+        .commit()
+        .map_err(|source| MigrationRunnerError::CommitTransaction { source })?;
+    Ok(MigrationReport {
+        applied: vec![CURRENT_SCHEMA_ID.into()],
+        skipped: Vec::new(),
+    })
 }
-
-fn load_applied_checksums_connection(
+fn load_applied_checksums(
     connection: &Connection,
 ) -> Result<HashMap<String, String>, MigrationRunnerError> {
-    let mut statement = connection
-        .prepare("SELECT id, checksum FROM schema_migrations")
-        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-
-    let rows = statement
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let checksum: String = row.get(1)?;
-            Ok((id, checksum))
-        })
-        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-
-    let mut checksums = HashMap::new();
-    for row in rows {
-        let (id, checksum) =
-            row.map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?;
-        checksums.insert(id, checksum);
-    }
-
-    Ok(checksums)
+    connection
+        .prepare("SELECT id,checksum FROM schema_migrations")
+        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source })?
+        .map(|row| row.map_err(|source| MigrationRunnerError::LoadAppliedChecksums { source }))
+        .collect()
 }
-
 fn migration_checksum(sql: &str) -> String {
     blake3::hash(sql.as_bytes()).to_hex().to_string()
 }
 
-/// Storage schema initialization errors.
+/// Current schema initialization failure.
 #[derive(Debug, Error)]
 pub enum StorageSchemaError {
-    /// Running migration SQL failed.
-    #[error("failed to apply migration '{migration_id}': {source}")]
-    ApplyMigration {
-        /// Migration id.
-        migration_id: &'static str,
-        /// SQLite execution error.
+    /// Schema initialization or compatibility failure.
+    #[error("index schema initialization failed: {source}")]
+    Runner {
         #[source]
-        source: rusqlite::Error,
-    },
-    /// Persisting migration metadata failed.
-    #[error("failed to record migration '{migration_id}': {source}")]
-    RecordMigration {
-        /// Migration id.
-        migration_id: &'static str,
-        /// SQLite execution error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Stored checksum differs from current migration SQL checksum.
-    #[error(
-        "migration checksum mismatch for '{migration_id}': expected {expected_checksum}, got {recorded_checksum}"
-    )]
-    ChecksumMismatch {
-        /// Migration id.
-        migration_id: &'static str,
-        /// Current migration SQL checksum.
-        expected_checksum: String,
-        /// Checksum recorded in schema_migrations.
-        recorded_checksum: String,
+        source: Box<MigrationRunnerError>,
     },
 }
-
-/// Migration runner failures.
+/// Index format validation and initialization failures.
 #[derive(Debug, Error)]
 pub enum MigrationRunnerError {
-    /// Setting pragma values failed.
-    #[error("failed to configure sqlite pragma '{pragma}': {source}")]
-    SetPragma {
-        /// SQL pragma statement that failed.
-        pragma: &'static str,
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Checking migration table metadata during preflight failed.
-    #[error("failed to preflight schema_migrations table state: {source}")]
-    PreflightTableCheck {
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Opening migration transaction failed.
-    #[error("failed to begin migration transaction: {source}")]
-    BeginTransaction {
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Ensuring migration table exists failed.
-    #[error("failed to ensure schema_migrations table: {source}")]
-    EnsureMigrationsTable {
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Reading applied migration checksums failed.
-    #[error("failed to load applied migration checksums: {source}")]
-    LoadAppliedChecksums {
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Applying migration SQL failed.
-    #[error("failed to apply migration '{migration_id}': {source}")]
-    ApplyMigration {
-        /// Migration id.
-        migration_id: String,
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Persisting migration checksum failed.
-    #[error("failed to persist migration '{migration_id}' checksum: {source}")]
-    RecordMigration {
-        /// Migration id.
-        migration_id: String,
-        /// SQLite error.
-        #[source]
-        source: rusqlite::Error,
-    },
-    /// Stored checksum differs from current migration SQL checksum.
+    /// Existing index belongs to another format epoch.
     #[error(
-        "migration checksum mismatch for '{migration_id}': expected {expected_checksum}, got {recorded_checksum}"
+        "unsupported index format epoch {found} (expected {expected}); archive or remove the internal .tao index directory, then run vault reindex to build a fresh index; source vault files are unchanged"
+    )]
+    UnsupportedFormat {
+        /// Observed format epoch.
+        found: u32,
+        /// Supported format epoch.
+        expected: u32,
+    },
+    /// Metadata does not identify the sole current schema.
+    #[error(
+        "unsupported index schema '{migration_id}'; archive or remove the internal .tao index directory and run vault reindex"
+    )]
+    UnsupportedSchema {
+        /// Recorded schema identifier.
+        migration_id: String,
+    },
+    /// Connection setting failure.
+    #[error("failed to configure SQLite pragma '{pragma}': {source}")]
+    SetPragma {
+        /// Statement.
+        pragma: &'static str,
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Read-only epoch/schema inspection failed.
+    #[error("failed to inspect index format: {source}")]
+    PreflightTableCheck {
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Opening atomic bootstrap failed.
+    #[error("failed to begin schema initialization: {source}")]
+    BeginTransaction {
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Current format metadata could not be read.
+    #[error(
+        "failed to read current schema metadata: {source}; archive or remove the internal .tao index directory and run vault reindex"
+    )]
+    LoadAppliedChecksums {
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Current schema could not be created.
+    #[error("failed to initialize schema '{migration_id}': {source}")]
+    ApplyMigration {
+        /// Current schema identifier.
+        migration_id: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Current format metadata could not be saved.
+    #[error("failed to record schema '{migration_id}': {source}")]
+    RecordMigration {
+        /// Current schema identifier.
+        migration_id: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// Schema SQL differs from the recorded current format.
+    #[error(
+        "index schema checksum mismatch for '{migration_id}': expected {expected_checksum}, got {recorded_checksum}; archive or remove the internal .tao index directory and run vault reindex"
     )]
     ChecksumMismatch {
-        /// Migration id.
+        /// Current schema identifier.
         migration_id: String,
-        /// Current migration SQL checksum.
+        /// Current schema checksum.
         expected_checksum: String,
-        /// Checksum recorded in schema_migrations.
+        /// Stored schema checksum.
         recorded_checksum: String,
     },
-    /// Committing migration transaction failed.
-    #[error("failed to commit migration transaction: {source}")]
+    /// Atomic initialization commit failed.
+    #[error("failed to commit schema initialization: {source}")]
     CommitTransaction {
-        /// SQLite error.
         #[source]
         source: rusqlite::Error,
     },
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use rusqlite::{Connection, OptionalExtension, params};
-    use tempfile::tempdir;
-
-    use super::{
-        MIGRATION_0001_ID, MIGRATION_0002_ID, MIGRATION_0003_ID, MIGRATION_0004_ID,
-        MIGRATION_0005_ID, MIGRATION_0006_ID, MIGRATION_0007_ID, MIGRATION_0008_ID,
-        MIGRATION_0009_ID, MigrationRunnerError, apply_initial_schema, known_migrations,
-        migration_checksum, preflight_migrations, run_migrations,
-    };
-
-    #[test]
-    fn apply_initial_schema_creates_expected_tables() {
-        let connection = Connection::open_in_memory().expect("open in-memory database");
-        apply_initial_schema(&connection).expect("apply initial schema");
-
-        let mut statement = connection
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .expect("prepare table query");
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .expect("query tables");
-
-        let tables: HashSet<String> = rows.map(|row| row.expect("read table name")).collect();
-
-        let expected = [
-            "schema_migrations",
-            "files",
-            "links",
-            "properties",
-            "bases",
-            "render_cache",
-            "index_state",
-            "tasks",
-            "search_segments",
-            "search_segments_fts",
-            "search_aliases",
-        ];
-
-        for table in expected {
-            assert!(tables.contains(table), "expected table '{table}' to exist");
-        }
-    }
-
-    #[test]
-    fn apply_initial_schema_is_idempotent() {
-        let connection = Connection::open_in_memory().expect("open in-memory database");
-
-        apply_initial_schema(&connection).expect("apply initial schema once");
-        apply_initial_schema(&connection).expect("apply initial schema twice");
-    }
-
-    #[test]
-    fn apply_initial_schema_records_migrations_for_runner() {
-        let mut connection = Connection::open_in_memory().expect("open in-memory database");
-
-        apply_initial_schema(&connection).expect("apply initial schema");
-
-        let report = run_migrations(&mut connection).expect("run migrations after initial schema");
-        let migration_ids: Vec<String> = known_migrations()
-            .iter()
-            .map(|migration| migration.id.to_string())
-            .collect();
-
-        assert!(report.applied.is_empty());
-        assert_eq!(report.skipped, migration_ids);
-    }
-
-    #[test]
-    fn run_migrations_applies_pending_and_records_checksums() {
-        let mut connection = Connection::open_in_memory().expect("open in-memory database");
-        let report = run_migrations(&mut connection).expect("run migrations");
-
-        assert_eq!(
-            report.applied,
-            vec![
-                MIGRATION_0001_ID.to_string(),
-                MIGRATION_0002_ID.to_string(),
-                MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string(),
-                MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string(),
-                MIGRATION_0009_ID.to_string()
-            ]
-        );
-        assert!(report.skipped.is_empty());
-
-        let recorded_checksum: Option<String> = connection
-            .query_row(
-                "SELECT checksum FROM schema_migrations WHERE id = ?1",
-                params![MIGRATION_0001_ID],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("read checksum");
-
-        assert_eq!(
-            recorded_checksum,
-            Some(migration_checksum(super::MIGRATION_0001_SQL))
-        );
-    }
-
-    #[test]
-    fn preflight_reports_pending_migrations_before_first_apply() {
-        let connection = Connection::open_in_memory().expect("open in-memory database");
-        let report = preflight_migrations(&connection).expect("preflight migrations");
-        let known_total = known_migrations().len() as u64;
-
-        assert!(!report.migrations_table_exists);
-        assert_eq!(report.known_migrations, known_total);
-        assert_eq!(report.applied_migrations, 0);
-        assert_eq!(report.pending_migrations, known_total);
-    }
-
-    #[test]
-    fn preflight_does_not_count_unknown_migration_ids_as_known_applied() {
-        let connection = Connection::open_in_memory().expect("open in-memory database");
-        connection
-            .execute_batch(super::CREATE_SCHEMA_MIGRATIONS_SQL)
-            .expect("create schema_migrations table");
-        connection
-            .execute(
-                "INSERT INTO schema_migrations (id, checksum) VALUES (?1, ?2)",
-                params!["9999_future", "future-checksum"],
-            )
-            .expect("insert unknown migration row");
-
-        let report = preflight_migrations(&connection).expect("preflight migrations");
-        let known_total = known_migrations().len() as u64;
-
-        assert!(report.migrations_table_exists);
-        assert_eq!(report.known_migrations, known_total);
-        assert_eq!(report.applied_migrations, 1);
-        assert_eq!(report.pending_migrations, known_total);
-    }
-
-    #[test]
-    fn run_migrations_applies_sqlite_pragma_profile_for_file_database() {
-        let temp = tempdir().expect("create temp directory");
-        let db_path = temp.path().join("tao.sqlite");
-        let mut connection = Connection::open(db_path).expect("open sqlite database");
-
-        run_migrations(&mut connection).expect("run migrations");
-
-        let foreign_keys: i64 = connection
-            .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
-            .expect("read foreign_keys pragma");
-        assert_eq!(foreign_keys, 1);
-
-        let journal_mode: String = connection
-            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
-            .expect("read journal_mode pragma");
-        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-
-        let synchronous: i64 = connection
-            .query_row("PRAGMA synchronous;", [], |row| row.get(0))
-            .expect("read synchronous pragma");
-        assert_eq!(synchronous, 1);
-
-        let temp_store: i64 = connection
-            .query_row("PRAGMA temp_store;", [], |row| row.get(0))
-            .expect("read temp_store pragma");
-        assert_eq!(temp_store, 2);
-
-        let cache_size: i64 = connection
-            .query_row("PRAGMA cache_size;", [], |row| row.get(0))
-            .expect("read cache_size pragma");
-        assert_eq!(cache_size, -20_000);
-
-        let wal_autocheckpoint: i64 = connection
-            .query_row("PRAGMA wal_autocheckpoint;", [], |row| row.get(0))
-            .expect("read wal_autocheckpoint pragma");
-        assert_eq!(wal_autocheckpoint, 1_000);
-
-        let busy_timeout: i64 = connection
-            .query_row("PRAGMA busy_timeout;", [], |row| row.get(0))
-            .expect("read busy_timeout pragma");
-        assert_eq!(busy_timeout, 5_000);
-    }
-
-    #[test]
-    fn run_migrations_is_idempotent() {
-        let mut connection = Connection::open_in_memory().expect("open in-memory database");
-
-        let first = run_migrations(&mut connection).expect("run first migration pass");
-        let second = run_migrations(&mut connection).expect("run second migration pass");
-
-        assert_eq!(
-            first.applied,
-            vec![
-                MIGRATION_0001_ID.to_string(),
-                MIGRATION_0002_ID.to_string(),
-                MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string(),
-                MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string(),
-                MIGRATION_0009_ID.to_string()
-            ]
-        );
-        assert!(first.skipped.is_empty());
-        assert!(second.applied.is_empty());
-        assert_eq!(
-            second.skipped,
-            vec![
-                MIGRATION_0001_ID.to_string(),
-                MIGRATION_0002_ID.to_string(),
-                MIGRATION_0003_ID.to_string(),
-                MIGRATION_0004_ID.to_string(),
-                MIGRATION_0005_ID.to_string(),
-                MIGRATION_0006_ID.to_string(),
-                MIGRATION_0007_ID.to_string(),
-                MIGRATION_0008_ID.to_string(),
-                MIGRATION_0009_ID.to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn run_migrations_fails_on_checksum_mismatch() {
-        let mut connection = Connection::open_in_memory().expect("open in-memory database");
-        run_migrations(&mut connection).expect("run initial migration pass");
-
-        connection
-            .execute(
-                "UPDATE schema_migrations SET checksum = ?1 WHERE id = ?2",
-                params!["bad-checksum", MIGRATION_0001_ID],
-            )
-            .expect("tamper checksum");
-
-        let error = run_migrations(&mut connection).expect_err("checksum mismatch should fail");
-
-        match error {
-            MigrationRunnerError::ChecksumMismatch {
-                migration_id,
-                expected_checksum,
-                recorded_checksum,
-            } => {
-                assert_eq!(migration_id, MIGRATION_0001_ID);
-                assert_eq!(recorded_checksum, "bad-checksum");
-                assert_eq!(
-                    expected_checksum,
-                    migration_checksum(super::MIGRATION_0001_SQL)
-                );
-            }
-            other => panic!("unexpected error variant: {other:?}"),
-        }
-    }
-}
+mod publication_tests;

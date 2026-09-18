@@ -191,7 +191,7 @@ FROM tasks
 "#,
         );
         append_filters(&mut sql, &mut params, state, query, path);
-        sql.push_str("\nORDER BY file_path ASC, line_number ASC\nLIMIT ? OFFSET ?\n");
+        sql.push_str("\nORDER BY file_path ASC, line_number ASC, task_id ASC\nLIMIT ? OFFSET ?\n");
         params.push(Value::Integer(i64::from(limit)));
         params.push(Value::Integer(i64::from(offset)));
 
@@ -235,7 +235,7 @@ SELECT
   text,
   updated_at
 FROM tasks
-ORDER BY file_path ASC, line_number ASC
+ORDER BY file_path ASC, line_number ASC, task_id ASC
 "#,
             )
             .map_err(|source| TasksRepositoryError::Sql {
@@ -267,6 +267,15 @@ ORDER BY file_path ASC, line_number ASC
         if file_ids.is_empty() {
             return Ok(Vec::new());
         }
+        if file_ids.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut rows = Vec::new();
+            for chunk in file_ids.chunks(crate::SQL_PARAMETER_CHUNK) {
+                rows.extend(Self::list_for_file_ids_with_paths(connection, chunk)?);
+            }
+            rows.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+            rows.dedup_by(|a, b| a.task_id == b.task_id);
+            return Ok(rows);
+        }
 
         let placeholders = vec!["?"; file_ids.len()].join(", ");
         let sql = format!(
@@ -281,7 +290,7 @@ SELECT
   updated_at
 FROM tasks
 WHERE file_id IN ({placeholders})
-ORDER BY file_path ASC, line_number ASC
+ORDER BY file_path ASC, line_number ASC, task_id ASC
 "#
         );
         let mut statement =
@@ -353,8 +362,8 @@ fn append_filters(
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
     {
-        clauses.push("(text_lc LIKE ? OR file_path_lc LIKE ?)".to_string());
-        let pattern = format!("%{query}%");
+        clauses.push("(instr(text_lc, ?) > 0 OR instr(file_path_lc, ?) > 0)".to_string());
+        let pattern = query;
         params.push(Value::Text(pattern.clone()));
         params.push(Value::Text(pattern));
     }
@@ -364,8 +373,8 @@ fn append_filters(
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
     {
-        clauses.push("file_path_lc LIKE ?".to_string());
-        params.push(Value::Text(format!("%{path}%")));
+        clauses.push("instr(file_path_lc, ?) > 0".to_string());
+        params.push(Value::Text(path));
     }
 
     if !clauses.is_empty() {

@@ -229,6 +229,42 @@ WHERE normalized_path = ?1
             })
     }
 
+    /// Read one file row by case-policy-aware match key.
+    pub fn get_by_match_key(
+        connection: &Connection,
+        match_key: &str,
+    ) -> Result<Option<FileRecord>, FilesRepositoryError> {
+        let mut statement = connection
+            .prepare(
+                r#"
+SELECT
+  file_id,
+  normalized_path,
+  match_key,
+  absolute_path,
+  size_bytes,
+  modified_unix_ms,
+  hash_blake3,
+  is_markdown,
+  indexed_at
+FROM files
+WHERE match_key = ?1
+"#,
+            )
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "prepare_get_by_match_key",
+                source,
+            })?;
+
+        statement
+            .query_row(params![match_key], row_to_file_record)
+            .optional()
+            .map_err(|source| FilesRepositoryError::Sql {
+                operation: "get_by_match_key",
+                source,
+            })
+    }
+
     /// Delete one file row by file id.
     pub fn delete_by_id(
         connection: &Connection,
@@ -290,6 +326,15 @@ ORDER BY normalized_path ASC
     ) -> Result<Vec<FileRecord>, FilesRepositoryError> {
         if file_ids.is_empty() {
             return Ok(Vec::new());
+        }
+        if file_ids.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut rows = Vec::new();
+            for chunk in file_ids.chunks(crate::SQL_PARAMETER_CHUNK) {
+                rows.extend(Self::list_by_ids(connection, chunk)?);
+            }
+            rows.sort_by(|a, b| a.normalized_path.cmp(&b.normalized_path));
+            rows.dedup_by(|a, b| a.normalized_path == b.normalized_path);
+            return Ok(rows);
         }
 
         let placeholders = vec!["?"; file_ids.len()].join(", ");

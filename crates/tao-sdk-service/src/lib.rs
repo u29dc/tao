@@ -2,23 +2,17 @@
 
 mod base_executor;
 mod config;
-mod feature_flags;
+mod content;
 mod graph;
 mod health;
-#[cfg(test)]
-mod import_export;
 mod index_refresh;
 mod indexing;
 mod ingest;
-#[cfg(test)]
-mod note_crud;
+mod metadata_aggregation;
 mod property_query;
-#[cfg(test)]
-mod property_update;
+mod publication_lock;
 mod search;
 mod search_corpus;
-mod tracing_hooks;
-mod transactions;
 
 pub use base_executor::*;
 pub use config::{
@@ -26,7 +20,7 @@ pub use config::{
     SdkConfigFieldSources, SdkConfigFileInspection, SdkConfigInspection,
     SdkConfigInspectionService, SdkConfigLoader, SdkConfigOverrides, ensure_runtime_paths,
 };
-pub use feature_flags::{FeatureFlagParseError, FeatureFlagRegistry, SdkFeature};
+pub use content::*;
 pub use graph::*;
 pub use health::*;
 pub use index_refresh::*;
@@ -42,18 +36,11 @@ pub use indexing::{
     StaleCleanupService,
 };
 pub use ingest::{IngestedMarkdownNote, MarkdownIngestError, MarkdownIngestPipeline};
-#[cfg(test)]
-pub(crate) use note_crud::*;
+pub use metadata_aggregation::*;
 pub use property_query::*;
-#[cfg(test)]
-pub(crate) use property_update::*;
 pub use search::*;
 pub use search_corpus::*;
-pub use tracing_hooks::ServiceTraceContext;
-pub use transactions::{
-    SdkTransactionCoordinator, SdkTransactionError, StorageWriteError, StorageWriteService,
-};
+pub use tao_sdk_vault::{IndexCancellationScope, check_index_cancellation};
 
 #[cfg(test)]
-#[path = "service_tests.rs"]
 mod tests;

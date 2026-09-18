@@ -2,9 +2,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
-use rusqlite::Connection;
-use tao_sdk_storage::{FilesRepository, LinksRepository};
+use rusqlite::{Connection, params};
+use tao_sdk_storage::{
+    FilesRepository, IndexGenerationRepository, LinkEvidenceRepository, LinksRepository,
+};
 use thiserror::Error;
 
 /// One link graph edge enriched with source/target path metadata.
@@ -32,6 +35,8 @@ pub struct LinkGraphEdge {
     pub unresolved_reason: Option<String>,
     /// Link provenance source field.
     pub source_field: String,
+    /// Optional original occurrence and independent fragment-resolution evidence.
+    pub evidence: Option<serde_json::Value>,
 }
 
 /// One graph node row with resolved in/out degree counters.
@@ -117,7 +122,7 @@ pub struct GraphScopedInboundRequest {
 /// One connected component summary row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphComponentRow {
-    /// Number of markdown nodes in the component.
+    /// Number of included file nodes in the component.
     pub size: u64,
     /// Member paths (full list or bounded sample, depending on request).
     pub paths: Vec<String>,
@@ -169,6 +174,10 @@ pub struct GraphWalkStep {
 pub enum GraphWalkEdgeType {
     /// Wikilink edge from indexed markdown links.
     Wikilink,
+    /// Explicit Markdown destination.
+    Markdown,
+    /// Image or embedded asset reference.
+    Embed,
     /// Folder parent overlay edge.
     FolderParent,
     /// Folder sibling overlay edge.
@@ -212,6 +221,12 @@ pub struct GraphPathResult {
     pub explored_nodes: u32,
     /// Ordered path from source to target when found.
     pub path: Vec<String>,
+    /// Whether the result proves an answer without exhausting a work bound.
+    pub complete: bool,
+    /// Limit responsible for an incomplete result, if any.
+    pub truncation_reason: Option<String>,
+    /// Number of adjacency rows examined within the edge budget.
+    pub examined_edges: u64,
 }
 
 /// Link graph query service for outgoing, backlink, and unresolved edges.
@@ -233,7 +248,7 @@ impl BacklinkGraphService {
 
         let rows = LinksRepository::list_outgoing_with_paths(connection, &source_file.file_id)
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        Ok(map_link_edges(rows))
+        enrich_edges(connection, map_link_edges(rows))
     }
 
     /// List backlinks for one target note path.
@@ -250,7 +265,7 @@ impl BacklinkGraphService {
 
         let rows = LinksRepository::list_backlinks_with_paths(connection, &target_file.file_id)
             .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        Ok(map_link_edges(rows))
+        enrich_edges(connection, map_link_edges(rows))
     }
 
     /// List unresolved edges across vault.
@@ -258,23 +273,35 @@ impl BacklinkGraphService {
         &self,
         connection: &Connection,
     ) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
-        let rows = LinksRepository::list_unresolved_with_paths(connection)
-            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        Ok(map_link_edges(rows))
+        self.unresolved_links_page(connection, u32::MAX, 0)
+            .map(|(_, rows)| rows)
     }
 
-    /// List one unresolved edges window across vault.
+    /// List missing-document, invalid-fragment and pending-fragment occurrences.
     pub fn unresolved_links_page(
         &self,
         connection: &Connection,
         limit: u32,
         offset: u32,
     ) -> Result<(u64, Vec<LinkGraphEdge>), LinkGraphServiceError> {
-        let total = LinksRepository::count_unresolved(connection)
-            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        let rows = LinksRepository::list_unresolved_with_paths_window(connection, limit, offset)
-            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        Ok((total, map_link_edges(rows)))
+        // A resolved document may still have an invalid or pending fragment. Use
+        // the same predicate for the exact count and paged occurrence selection.
+        let predicate = "l.is_unresolved=1 OR e.fragment_status IN ('bad_anchor','bad_block','bad_page','pending')";
+        let total = connection.query_row(
+            &format!("SELECT COUNT(*) FROM links l LEFT JOIN link_evidence e ON e.link_id=l.link_id WHERE {predicate}"),
+            [], |row| row.get::<_, u64>(0),
+        ).map_err(graph_sql)?;
+        let sql = format!(
+            "{} LEFT JOIN link_evidence e ON e.link_id=l.link_id WHERE {predicate} ORDER BY l.link_id LIMIT ?1 OFFSET ?2",
+            graph_edge_select()
+        );
+        let mut statement = connection.prepare(&sql).map_err(graph_sql)?;
+        let rows = statement
+            .query_map(params![limit, offset], graph_edge_row)
+            .map_err(graph_sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(graph_sql)?;
+        Ok((total, enrich_edges(connection, rows)?))
     }
 
     /// List one deadends diagnostics window in deterministic path order.
@@ -391,49 +418,85 @@ impl BacklinkGraphService {
         include_members: bool,
         sample_size: usize,
     ) -> Result<(u64, Vec<GraphComponentRow>), LinkGraphServiceError> {
-        let markdown_files = FilesRepository::list_all(connection)
-            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-            .into_iter()
-            .filter(|file| file.is_markdown)
-            .map(|file| (file.file_id, file.normalized_path))
-            .collect::<Vec<_>>();
-        let mut paths_by_id = HashMap::with_capacity(markdown_files.len());
-        let mut ids = Vec::with_capacity(markdown_files.len());
-        for (file_id, path) in markdown_files {
-            ids.push(file_id.clone());
-            paths_by_id.insert(file_id, path);
+        let cache_allowed =
+            connection.is_autocommit() || connection.is_readonly("main").unwrap_or(false);
+        connection
+            .execute_batch("SAVEPOINT tao_graph_components")
+            .map_err(graph_sql)?;
+        let result = (|| {
+            let snapshot = component_snapshot(connection, mode, cache_allowed)?;
+            let total = snapshot.len() as u64;
+            let items = snapshot
+                .iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(|row| {
+                    let length = if include_members {
+                        row.paths.len()
+                    } else {
+                        sample_size.min(row.paths.len())
+                    };
+                    GraphComponentRow {
+                        size: row.size,
+                        paths: row.paths[..length].to_vec(),
+                        truncated: length < row.paths.len(),
+                    }
+                })
+                .collect();
+            Ok((total, items))
+        })();
+        let release = connection
+            .execute_batch("RELEASE tao_graph_components")
+            .map_err(graph_sql);
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => {
+                release?;
+                Ok(value)
+            }
         }
-        ids.sort();
-
-        let pairs = LinksRepository::list_resolved_pairs(connection)
-            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-        let components_by_ids = match mode {
-            GraphComponentMode::Weak => weak_components(&ids, &pairs),
-            GraphComponentMode::Strong => strong_components(&ids, &pairs),
-        };
-        let mut components = build_component_rows(
-            components_by_ids,
-            &paths_by_id,
-            include_members,
-            sample_size,
-        );
-
-        components.sort_by(|left, right| {
-            right
-                .size
-                .cmp(&left.size)
-                .then_with(|| left.paths.first().cmp(&right.paths.first()))
-        });
-        let total = u64::try_from(components.len()).unwrap_or(u64::MAX);
-        let items = components
-            .into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
-            .collect::<Vec<_>>();
-        Ok((total, items))
     }
 
-    /// Find a bounded undirected shortest path using frontier SQL lookups.
+    /// Return one bounded occurrence window. Self-links are one occurrence in all mode.
+    pub fn links_page(
+        &self,
+        connection: &Connection,
+        path: &str,
+        direction: GraphLinkDirection,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(u64, Vec<LinkGraphEdge>), LinkGraphServiceError> {
+        let Some(file) = FilesRepository::get_by_normalized_path(connection, path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok((0, Vec::new()));
+        };
+        let predicate = match direction {
+            GraphLinkDirection::All => "(l.source_file_id = ?1 OR l.resolved_file_id = ?1)",
+            GraphLinkDirection::Outgoing => "l.source_file_id = ?1",
+            GraphLinkDirection::Incoming => "l.resolved_file_id = ?1",
+        };
+        let total: u64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM links l WHERE {predicate}"),
+                [&file.file_id],
+                |row| row.get(0),
+            )
+            .map_err(graph_sql)?;
+        let query = format!(
+            "{} WHERE {predicate} ORDER BY l.link_id LIMIT ?2 OFFSET ?3",
+            graph_edge_select()
+        );
+        let mut statement = connection.prepare(&query).map_err(graph_sql)?;
+        let rows = statement
+            .query_map(params![file.file_id, limit, offset], graph_edge_row)
+            .map_err(graph_sql)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(graph_sql)?;
+        Ok((total, enrich_edges(connection, rows)?))
+    }
+
+    /// Find an undirected shortest path, bounded while retrieving adjacency rows.
     pub fn shortest_path(
         &self,
         connection: &Connection,
@@ -442,329 +505,281 @@ impl BacklinkGraphService {
         if request.max_nodes == 0 {
             return Err(LinkGraphServiceError::TraversalLimit { max_nodes: 0 });
         }
-
-        let Some(from_file) =
-            FilesRepository::get_by_normalized_path(connection, &request.from_path)
-                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-        else {
-            return Ok(GraphPathResult {
-                found: false,
-                explored_nodes: 0,
-                path: Vec::new(),
-            });
+        let from = FilesRepository::get_by_normalized_path(connection, &request.from_path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?;
+        let to = FilesRepository::get_by_normalized_path(connection, &request.to_path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?;
+        let (Some(from), Some(to)) = (from, to) else {
+            return Ok(path_outcome(Vec::new(), 0, 0, None));
         };
-        let Some(to_file) = FilesRepository::get_by_normalized_path(connection, &request.to_path)
-            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-        else {
-            return Ok(GraphPathResult {
-                found: false,
-                explored_nodes: 0,
-                path: Vec::new(),
-            });
-        };
-
-        if from_file.file_id == to_file.file_id {
-            return Ok(GraphPathResult {
-                found: true,
-                explored_nodes: 1,
-                path: vec![from_file.normalized_path],
-            });
+        if from.file_id == to.file_id {
+            return Ok(path_outcome(vec![from.normalized_path], 1, 0, None));
         }
-
-        let from_id = from_file.file_id;
-        let to_id = to_file.file_id;
-        let mut path_by_id = HashMap::<String, String>::new();
-        path_by_id.insert(from_id.clone(), from_file.normalized_path);
-        path_by_id.insert(to_id.clone(), to_file.normalized_path);
-
-        let mut frontier = vec![from_id.clone()];
-        let mut depth_by_id = HashMap::<String, u32>::new();
-        let mut parent_by_id = HashMap::<String, String>::new();
-        depth_by_id.insert(from_id.clone(), 0);
-        let mut explored_nodes = 1_u32;
-
-        for depth in 0..request.max_depth {
-            if frontier.is_empty() || depth_by_id.contains_key(&to_id) {
-                break;
+        let max_edges = u64::from(request.max_nodes)
+            .saturating_mul(16)
+            .clamp(64, 1_000_000);
+        let mut examined = 0u64;
+        let mut paths = HashMap::from([
+            (from.file_id.clone(), from.normalized_path),
+            (to.file_id.clone(), to.normalized_path),
+        ]);
+        let mut parents = HashMap::<String, String>::new();
+        let mut seen = HashSet::from([from.file_id.clone()]);
+        let mut frontier = VecDeque::from([(from.file_id.clone(), 0u32)]);
+        let mut depth_limited = false;
+        while let Some((current, depth)) = frontier.pop_front() {
+            if depth >= request.max_depth {
+                depth_limited = true;
+                continue;
             }
-
-            let outgoing =
-                LinksRepository::list_outgoing_for_sources_with_paths(connection, &frontier, false)
-                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-            let incoming =
-                LinksRepository::list_incoming_for_targets_with_paths(connection, &frontier)
-                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-            let mut next_frontier = Vec::<String>::new();
-            let next_depth = depth + 1;
-
-            for edge in outgoing {
-                let Some(target_id) = edge.resolved_file_id else {
-                    continue;
-                };
-                if depth_by_id.contains_key(&target_id) {
-                    continue;
+            // The exact target lookup avoids spending a tiny node budget on unrelated
+            // hub neighbors before recognizing a known one-hop shortest path.
+            let direct: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM links WHERE source_file_id=?1 AND resolved_file_id=?2 AND is_unresolved=0 UNION ALL SELECT 1 FROM links WHERE source_file_id=?2 AND resolved_file_id=?1 AND is_unresolved=0)", params![current, to.file_id], |row| row.get(0)).map_err(graph_sql)?;
+            if direct {
+                if seen.len() >= request.max_nodes as usize {
+                    return Ok(path_outcome(
+                        Vec::new(),
+                        seen.len(),
+                        examined,
+                        Some("max_nodes"),
+                    ));
                 }
-                explored_nodes = explored_nodes.saturating_add(1);
-                if explored_nodes > request.max_nodes {
-                    return Err(LinkGraphServiceError::TraversalLimit {
-                        max_nodes: request.max_nodes,
-                    });
-                }
-                path_by_id.insert(edge.source_file_id.clone(), edge.source_path);
-                if let Some(path) = edge.resolved_path {
-                    path_by_id.insert(target_id.clone(), path);
-                }
-                depth_by_id.insert(target_id.clone(), next_depth);
-                parent_by_id.insert(target_id.clone(), edge.source_file_id);
-                next_frontier.push(target_id);
+                parents.insert(to.file_id.clone(), current);
+                seen.insert(to.file_id.clone());
+                return Ok(path_outcome(
+                    reconstruct_path(&from.file_id, &to.file_id, &parents, &paths),
+                    seen.len(),
+                    examined,
+                    None,
+                ));
             }
-
-            for edge in incoming {
-                let source_id = edge.source_file_id;
-                if depth_by_id.contains_key(&source_id) {
-                    continue;
+            for direction in [GraphLinkDirection::Outgoing, GraphLinkDirection::Incoming] {
+                let remaining = max_edges.saturating_sub(examined);
+                if remaining == 0 {
+                    return Ok(path_outcome(
+                        Vec::new(),
+                        seen.len(),
+                        examined,
+                        Some("max_edges"),
+                    ));
                 }
-                explored_nodes = explored_nodes.saturating_add(1);
-                if explored_nodes > request.max_nodes {
-                    return Err(LinkGraphServiceError::TraversalLimit {
-                        max_nodes: request.max_nodes,
-                    });
-                }
-                if let Some(target_id) = edge.resolved_file_id {
-                    if let Some(path) = edge.resolved_path {
-                        path_by_id.insert(target_id.clone(), path);
+                let edges =
+                    adjacency_window(connection, &current, direction, false, remaining + 1)?;
+                for edge in edges {
+                    if examined >= max_edges {
+                        return Ok(path_outcome(
+                            Vec::new(),
+                            seen.len(),
+                            examined,
+                            Some("max_edges"),
+                        ));
                     }
-                    parent_by_id.insert(source_id.clone(), target_id);
+                    examined += 1;
+                    let (next, next_path) = match direction {
+                        GraphLinkDirection::Outgoing => {
+                            let (Some(id), Some(path)) =
+                                (edge.resolved_file_id, edge.resolved_path)
+                            else {
+                                continue;
+                            };
+                            (id, path)
+                        }
+                        _ => (edge.source_file_id, edge.source_path),
+                    };
+                    if seen.contains(&next) {
+                        continue;
+                    }
+                    if seen.len() >= request.max_nodes as usize {
+                        return Ok(path_outcome(
+                            Vec::new(),
+                            seen.len(),
+                            examined,
+                            Some("max_nodes"),
+                        ));
+                    }
+                    paths.insert(next.clone(), next_path);
+                    seen.insert(next.clone());
+                    parents.insert(next.clone(), current.clone());
+                    if next == to.file_id {
+                        return Ok(path_outcome(
+                            reconstruct_path(&from.file_id, &to.file_id, &parents, &paths),
+                            seen.len(),
+                            examined,
+                            None,
+                        ));
+                    }
+                    frontier.push_back((next, depth + 1));
                 }
-                path_by_id.insert(source_id.clone(), edge.source_path);
-                depth_by_id.insert(source_id.clone(), next_depth);
-                next_frontier.push(source_id);
             }
-
-            next_frontier.sort();
-            next_frontier.dedup();
-            frontier = next_frontier;
         }
-
-        if !depth_by_id.contains_key(&to_id) {
-            return Ok(GraphPathResult {
-                found: false,
-                explored_nodes,
-                path: Vec::new(),
-            });
-        }
-
-        let mut path_ids = vec![to_id.clone()];
-        let mut cursor = to_id;
-        while let Some(parent) = parent_by_id.get(&cursor).cloned() {
-            path_ids.push(parent.clone());
-            if parent == from_id {
-                break;
-            }
-            cursor = parent;
-        }
-        path_ids.reverse();
-        let path = path_ids
-            .iter()
-            .filter_map(|file_id| path_by_id.get(file_id).cloned())
-            .collect::<Vec<_>>();
-
-        Ok(GraphPathResult {
-            found: !path.is_empty(),
-            explored_nodes,
-            path,
-        })
+        Ok(path_outcome(
+            Vec::new(),
+            seen.len(),
+            examined,
+            depth_limited.then_some("max_depth"),
+        ))
     }
 
-    /// Walk graph neighbors from one root path using frontier SQL lookups.
+    /// Compatibility adapter; use `walk_bounded` when completeness evidence matters.
     pub fn walk(
         &self,
         connection: &Connection,
         request: &GraphWalkRequest,
     ) -> Result<Vec<GraphWalkStep>, LinkGraphServiceError> {
-        if request.depth == 0 || request.limit == 0 {
-            return Ok(Vec::new());
-        }
+        Ok(self.walk_bounded(connection, request)?.items)
+    }
 
-        let Some(start_file) =
-            FilesRepository::get_by_normalized_path(connection, &request.path)
-                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-        else {
-            return Ok(Vec::new());
+    /// Walk edge occurrences with bounded adjacency retrieval and explicit completeness.
+    pub fn walk_bounded(
+        &self,
+        connection: &Connection,
+        request: &GraphWalkRequest,
+    ) -> Result<GraphWalkResult, LinkGraphServiceError> {
+        let mut result = GraphWalkResult {
+            items: Vec::new(),
+            complete: true,
+            truncation_reason: None,
+            examined_edges: 0,
+            discovered_nodes: 0,
         };
-        let mut path_by_id = HashMap::<String, String>::new();
-        path_by_id.insert(
-            start_file.file_id.clone(),
-            start_file.normalized_path.clone(),
-        );
-        let mut folder_members = HashMap::<String, Vec<String>>::new();
-        if request.include_folders {
-            path_by_id = FilesRepository::list_all(connection)
-                .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
-                .into_iter()
-                .filter(|row| row.is_markdown)
-                .map(|row| (row.file_id, row.normalized_path))
-                .collect::<HashMap<_, _>>();
-            for (file_id, path) in &path_by_id {
-                folder_members
-                    .entry(note_folder(path).to_string())
-                    .or_default()
-                    .push(file_id.clone());
-            }
-            for members in folder_members.values_mut() {
-                members.sort();
-                members.dedup();
-            }
+        let Some(start) = FilesRepository::get_by_normalized_path(connection, &request.path)
+            .map_err(|source| LinkGraphServiceError::FilesRepository { source })?
+        else {
+            return Ok(result);
+        };
+        result.discovered_nodes = 1;
+        if request.depth == 0 {
+            result.complete = false;
+            result.truncation_reason = Some("max_depth".into());
+            return Ok(result);
         }
-
-        let mut steps = Vec::<GraphWalkStep>::new();
-        let mut frontier = vec![start_file.file_id];
-        let mut visited_depth = HashMap::<String, u32>::new();
-        visited_depth.insert(frontier[0].clone(), 0);
-        let hard_limit = request.limit as usize;
-
-        for depth in 0..request.depth {
-            if frontier.is_empty() || steps.len() >= hard_limit {
-                break;
+        if request.limit == 0 {
+            result.complete = false;
+            result.truncation_reason = Some("limit".into());
+            return Ok(result);
+        }
+        let max_edges = u64::from(request.limit)
+            .saturating_mul(16)
+            .clamp(64, 1_000_000);
+        let mut seen_nodes = HashSet::from([start.file_id.clone()]);
+        let mut seen_edges = HashSet::<String>::new();
+        let mut frontier = VecDeque::from([(start.file_id, start.normalized_path, 0u32)]);
+        let mut depth_limited = false;
+        while let Some((current, current_path, depth)) = frontier.pop_front() {
+            if depth >= request.depth {
+                depth_limited = true;
+                continue;
             }
-
-            let outgoing = LinksRepository::list_outgoing_for_sources_with_paths(
-                connection,
-                &frontier,
-                request.include_unresolved,
-            )
-            .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-            let incoming =
-                LinksRepository::list_incoming_for_targets_with_paths(connection, &frontier)
-                    .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
-
-            let mut next_frontier = Vec::<String>::new();
-            let next_depth = depth + 1;
-
-            for edge in outgoing {
-                if steps.len() >= hard_limit {
-                    break;
+            for direction in [GraphLinkDirection::Outgoing, GraphLinkDirection::Incoming] {
+                let remaining_work = max_edges.saturating_sub(result.examined_edges);
+                if remaining_work == 0 {
+                    return Ok(result.truncate("max_edges"));
                 }
-                let resolved = !edge.is_unresolved && edge.resolved_file_id.is_some();
-                steps.push(GraphWalkStep {
-                    depth: next_depth,
-                    direction: GraphWalkDirection::Outgoing,
-                    link_id: edge.link_id,
-                    source_path: edge.source_path,
-                    target_path: edge.resolved_path,
-                    raw_target: edge.raw_target,
-                    resolved,
-                    edge_type: GraphWalkEdgeType::Wikilink,
-                });
-
-                if let Some(target_id) = edge.resolved_file_id {
-                    let should_visit = visited_depth
-                        .get(&target_id)
-                        .map(|seen_depth| next_depth < *seen_depth)
-                        .unwrap_or(true);
-                    if should_visit {
-                        visited_depth.insert(target_id.clone(), next_depth);
-                        next_frontier.push(target_id);
+                let remaining_items = (request.limit as usize).saturating_sub(result.items.len());
+                // Already emitted edges can appear from the opposite end; bound both
+                // examined work and allocation, without pretending the output cap is work.
+                let fetch_limit =
+                    remaining_work.min((remaining_items + seen_edges.len() + 1) as u64);
+                let edges = adjacency_window(
+                    connection,
+                    &current,
+                    direction,
+                    request.include_unresolved,
+                    fetch_limit + 1,
+                )?;
+                for edge in edges {
+                    if result.examined_edges >= max_edges {
+                        return Ok(result.truncate("max_edges"));
                     }
-                }
-            }
-
-            for edge in incoming {
-                if steps.len() >= hard_limit {
-                    break;
-                }
-                steps.push(GraphWalkStep {
-                    depth: next_depth,
-                    direction: GraphWalkDirection::Incoming,
-                    link_id: edge.link_id,
-                    source_path: edge.source_path,
-                    target_path: edge.resolved_path,
-                    raw_target: edge.raw_target,
-                    resolved: true,
-                    edge_type: GraphWalkEdgeType::Wikilink,
-                });
-                let source_id = edge.source_file_id;
-                let should_visit = visited_depth
-                    .get(&source_id)
-                    .map(|seen_depth| next_depth < *seen_depth)
-                    .unwrap_or(true);
-                if should_visit {
-                    visited_depth.insert(source_id.clone(), next_depth);
-                    next_frontier.push(source_id);
+                    result.examined_edges += 1;
+                    if !seen_edges.insert(edge.link_id.clone()) {
+                        continue;
+                    }
+                    if result.items.len() >= request.limit as usize {
+                        return Ok(result.truncate("limit"));
+                    }
+                    let next = match direction {
+                        GraphLinkDirection::Outgoing => edge
+                            .resolved_file_id
+                            .clone()
+                            .zip(edge.resolved_path.clone()),
+                        _ => Some((edge.source_file_id.clone(), edge.source_path.clone())),
+                    };
+                    let edge_type = if edge.source_field.ends_with(":embed") {
+                        GraphWalkEdgeType::Embed
+                    } else if edge.source_field.ends_with(":markdown") {
+                        GraphWalkEdgeType::Markdown
+                    } else {
+                        GraphWalkEdgeType::Wikilink
+                    };
+                    result.items.push(GraphWalkStep {
+                        depth: depth + 1,
+                        direction: if direction == GraphLinkDirection::Outgoing {
+                            GraphWalkDirection::Outgoing
+                        } else {
+                            GraphWalkDirection::Incoming
+                        },
+                        link_id: edge.link_id,
+                        source_path: edge.source_path,
+                        target_path: edge.resolved_path,
+                        raw_target: edge.raw_target,
+                        resolved: !edge.is_unresolved,
+                        edge_type,
+                    });
+                    if let Some((id, path)) = next
+                        && seen_nodes.insert(id.clone())
+                    {
+                        result.discovered_nodes = seen_nodes.len() as u64;
+                        frontier.push_back((id, path, depth + 1));
+                    }
                 }
             }
             if request.include_folders {
-                for source_id in &frontier {
-                    if steps.len() >= hard_limit {
-                        break;
+                // Folder overlay is a derived relation over all included files. The
+                // SQL window avoids loading a whole vault/folder map for a short walk.
+                for (id, path, edge_type) in folder_window(
+                    connection,
+                    &current,
+                    &current_path,
+                    u64::from(request.limit).saturating_add(1),
+                )? {
+                    if result.examined_edges >= max_edges {
+                        return Ok(result.truncate("max_edges"));
                     }
-                    let Some(source_path) = path_by_id.get(source_id) else {
+                    result.examined_edges += 1;
+                    let link_id = format!(
+                        "folder:{current}:{id}:{}",
+                        graph_walk_edge_type_label(&edge_type)
+                    );
+                    if !seen_edges.insert(link_id.clone()) {
                         continue;
-                    };
-                    let source_folder = note_folder(source_path).to_string();
-                    let mut folder_targets = Vec::<(String, GraphWalkEdgeType)>::new();
-
-                    if let Some(parent_folder) = parent_folder(&source_folder)
-                        && let Some(parent_members) = folder_members.get(parent_folder)
-                    {
-                        for target_id in parent_members {
-                            if target_id != source_id {
-                                folder_targets
-                                    .push((target_id.clone(), GraphWalkEdgeType::FolderParent));
-                            }
-                        }
                     }
-                    if let Some(sibling_members) = folder_members.get(&source_folder) {
-                        for target_id in sibling_members {
-                            if target_id != source_id {
-                                folder_targets
-                                    .push((target_id.clone(), GraphWalkEdgeType::FolderSibling));
-                            }
-                        }
+                    if result.items.len() >= request.limit as usize {
+                        return Ok(result.truncate("limit"));
                     }
-
-                    folder_targets.sort_by(|left, right| left.0.cmp(&right.0));
-                    folder_targets.dedup();
-
-                    for (target_id, edge_type) in folder_targets {
-                        if steps.len() >= hard_limit {
-                            break;
-                        }
-                        let Some(target_path) = path_by_id.get(&target_id).cloned() else {
-                            continue;
-                        };
-                        let link_id = format!(
-                            "folder:{source_id}:{target_id}:{}",
-                            graph_walk_edge_type_label(&edge_type)
-                        );
-                        steps.push(GraphWalkStep {
-                            depth: next_depth,
-                            direction: GraphWalkDirection::Outgoing,
-                            link_id,
-                            source_path: source_path.clone(),
-                            target_path: Some(target_path.clone()),
-                            raw_target: target_path,
-                            resolved: true,
-                            edge_type,
-                        });
-                        let should_visit = visited_depth
-                            .get(&target_id)
-                            .map(|seen_depth| next_depth < *seen_depth)
-                            .unwrap_or(true);
-                        if should_visit {
-                            visited_depth.insert(target_id.clone(), next_depth);
-                            next_frontier.push(target_id);
-                        }
+                    result.items.push(GraphWalkStep {
+                        depth: depth + 1,
+                        direction: GraphWalkDirection::Outgoing,
+                        link_id,
+                        source_path: current_path.clone(),
+                        target_path: Some(path.clone()),
+                        raw_target: path.clone(),
+                        resolved: true,
+                        edge_type,
+                    });
+                    if seen_nodes.insert(id.clone()) {
+                        result.discovered_nodes = seen_nodes.len() as u64;
+                        frontier.push_back((id, path, depth + 1));
                     }
                 }
             }
-
-            next_frontier.sort();
-            next_frontier.dedup();
-            frontier = next_frontier;
+            result.discovered_nodes = seen_nodes.len() as u64;
         }
-
-        Ok(steps)
+        result.discovered_nodes = seen_nodes.len() as u64;
+        if depth_limited {
+            result = result.truncate("max_depth");
+        }
+        Ok(result)
     }
 }
 
@@ -933,6 +948,8 @@ fn parent_folder(folder: &str) -> Option<&str> {
 fn graph_walk_edge_type_label(edge_type: &GraphWalkEdgeType) -> &'static str {
     match edge_type {
         GraphWalkEdgeType::Wikilink => "wikilink",
+        GraphWalkEdgeType::Markdown => "markdown",
+        GraphWalkEdgeType::Embed => "embed",
         GraphWalkEdgeType::FolderParent => "folder-parent",
         GraphWalkEdgeType::FolderSibling => "folder-sibling",
     }
@@ -952,6 +969,7 @@ fn map_link_edges(rows: Vec<tao_sdk_storage::LinkWithPaths>) -> Vec<LinkGraphEdg
             is_unresolved: row.is_unresolved,
             unresolved_reason: row.unresolved_reason,
             source_field: row.source_field,
+            evidence: None,
         })
         .collect()
 }
@@ -984,10 +1002,673 @@ pub enum LinkGraphServiceError {
         #[source]
         source: tao_sdk_storage::LinksRepositoryError,
     },
+    /// Bounded graph SQL or evidence decoding failed.
+    #[error("graph query failed: {source}")]
+    Sql {
+        /// SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+    /// The graph exceeds a supported preparation budget.
+    #[error("graph {resource} exceeds the supported work limit of {limit}")]
+    ResourceLimit {
+        /// Resource being bounded.
+        resource: &'static str,
+        /// Maximum supported amount.
+        limit: u64,
+    },
     /// Traversal exceeded caller-provided bounds.
     #[error("graph traversal aborted after exploring {max_nodes} nodes; increase --max-nodes")]
     TraversalLimit {
         /// Maximum allowed discovered nodes.
         max_nodes: u32,
     },
+}
+
+/// Direction selector for occurrence windows and bounded adjacency retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphLinkDirection {
+    /// All incoming/outgoing occurrences, with self-links returned once.
+    All,
+    /// Source occurrences, including unresolved targets.
+    Outgoing,
+    /// Incoming references to a known file.
+    Incoming,
+}
+
+/// A bounded walk describes returned evidence without inventing an exact global total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphWalkResult {
+    /// Unique edge occurrences in traversal order.
+    pub items: Vec<GraphWalkStep>,
+    /// Whether the traversal exhausted the reachable selected graph.
+    pub complete: bool,
+    /// Output/work/depth bound preventing a complete traversal.
+    pub truncation_reason: Option<String>,
+    /// Adjacency rows actually examined.
+    pub examined_edges: u64,
+    /// Discovered file nodes.
+    pub discovered_nodes: u64,
+}
+impl GraphWalkResult {
+    fn truncate(mut self, reason: &str) -> Self {
+        self.complete = false;
+        self.truncation_reason = Some(reason.to_string());
+        self
+    }
+}
+
+fn graph_sql(source: rusqlite::Error) -> LinkGraphServiceError {
+    LinkGraphServiceError::Sql { source }
+}
+fn graph_edge_select() -> &'static str {
+    "SELECT l.link_id,l.source_file_id,sf.normalized_path source_path,l.raw_target,l.resolved_file_id,tf.normalized_path resolved_path,l.heading_slug,l.block_id,l.is_unresolved,l.unresolved_reason,l.source_field FROM links l JOIN files sf ON sf.file_id=l.source_file_id LEFT JOIN files tf ON tf.file_id=l.resolved_file_id"
+}
+fn graph_edge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LinkGraphEdge> {
+    Ok(LinkGraphEdge {
+        link_id: row.get("link_id")?,
+        source_file_id: row.get("source_file_id")?,
+        source_path: row.get("source_path")?,
+        raw_target: row.get("raw_target")?,
+        resolved_file_id: row.get("resolved_file_id")?,
+        resolved_path: row.get("resolved_path")?,
+        heading_slug: row.get("heading_slug")?,
+        block_id: row.get("block_id")?,
+        is_unresolved: row.get("is_unresolved")?,
+        unresolved_reason: row.get("unresolved_reason")?,
+        source_field: row.get("source_field")?,
+        evidence: None,
+    })
+}
+fn enrich_edges(
+    connection: &Connection,
+    mut edges: Vec<LinkGraphEdge>,
+) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
+    for edge in &mut edges {
+        if let Some(evidence) =
+            LinkEvidenceRepository::get_by_link_id(connection, &edge.link_id).map_err(graph_sql)?
+        {
+            edge.evidence = Some(
+                serde_json::json!({"source_span_available":evidence.line > 0,"source_start":(evidence.line > 0).then_some(evidence.source_start),"source_end":(evidence.line > 0).then_some(evidence.source_end),"line":(evidence.line > 0).then_some(evidence.line),"end_line":(evidence.line > 0).then_some(evidence.end_line),"raw_expression":evidence.raw_expression,"syntax":evidence.syntax,"fragment":serde_json::from_str::<serde_json::Value>(&evidence.fragment_json).unwrap_or(serde_json::Value::Null),"fragment_status":evidence.fragment_status,"resolution_rule":evidence.resolution_rule,"candidates":serde_json::from_str::<serde_json::Value>(&evidence.candidates_json).unwrap_or(serde_json::Value::Null)}),
+            );
+        }
+    }
+    Ok(edges)
+}
+fn adjacency_window(
+    connection: &Connection,
+    id: &str,
+    direction: GraphLinkDirection,
+    include_unresolved: bool,
+    limit: u64,
+) -> Result<Vec<LinkGraphEdge>, LinkGraphServiceError> {
+    let predicate = if direction == GraphLinkDirection::Outgoing {
+        "l.source_file_id=?1"
+    } else {
+        "l.resolved_file_id=?1"
+    };
+    let resolved = if include_unresolved {
+        ""
+    } else {
+        " AND l.is_unresolved=0"
+    };
+    let query = format!(
+        "{} WHERE {predicate}{resolved} ORDER BY l.link_id LIMIT ?2",
+        graph_edge_select()
+    );
+    let mut statement = connection.prepare_cached(&query).map_err(graph_sql)?;
+    statement
+        .query_map(params![id, limit], graph_edge_row)
+        .map_err(graph_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(graph_sql)
+}
+fn folder_window(
+    connection: &Connection,
+    id: &str,
+    path: &str,
+    limit: u64,
+) -> Result<Vec<(String, String, GraphWalkEdgeType)>, LinkGraphServiceError> {
+    let folder = note_folder(path);
+    let parent = parent_folder(folder);
+    // instr/substr compare literal directory prefixes: '_' and '%' remain filenames.
+    let mut statement = connection.prepare_cached("SELECT file_id,normalized_path FROM files WHERE file_id<>?1 AND ((substr(normalized_path,1,length(?2))=?2 AND instr(substr(normalized_path,length(?2)+1),'/')=0) OR (?3 IS NOT NULL AND substr(normalized_path,1,length(?3))=?3 AND instr(substr(normalized_path,length(?3)+1),'/')=0)) ORDER BY normalized_path LIMIT ?4").map_err(graph_sql)?;
+    let prefix = if folder.is_empty() {
+        String::new()
+    } else {
+        format!("{folder}/")
+    };
+    let parent_prefix = parent.map(|parent| {
+        if parent.is_empty() {
+            String::new()
+        } else {
+            format!("{parent}/")
+        }
+    });
+    statement
+        .query_map(params![id, prefix, parent_prefix, limit], |row| {
+            let target: String = row.get(1)?;
+            let kind = if note_folder(&target) == folder {
+                GraphWalkEdgeType::FolderSibling
+            } else {
+                GraphWalkEdgeType::FolderParent
+            };
+            Ok((row.get(0)?, target, kind))
+        })
+        .map_err(graph_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(graph_sql)
+}
+fn path_outcome(
+    path: Vec<String>,
+    nodes: usize,
+    examined_edges: u64,
+    reason: Option<&str>,
+) -> GraphPathResult {
+    GraphPathResult {
+        found: !path.is_empty(),
+        explored_nodes: u32::try_from(nodes).unwrap_or(u32::MAX),
+        path,
+        complete: reason.is_none(),
+        truncation_reason: reason.map(str::to_string),
+        examined_edges,
+    }
+}
+fn reconstruct_path(
+    from: &str,
+    to: &str,
+    parents: &HashMap<String, String>,
+    paths: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut ids = vec![to];
+    let mut current = to;
+    while current != from {
+        let Some(parent) = parents.get(current) else {
+            return Vec::new();
+        };
+        ids.push(parent);
+        current = parent;
+    }
+    ids.reverse();
+    ids.into_iter()
+        .filter_map(|id| paths.get(id).cloned())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComponentCacheKey {
+    database: String,
+    file_identity: String,
+    generation: i64,
+    strong: bool,
+}
+type ComponentCacheEntry = (ComponentCacheKey, Arc<Vec<GraphComponentRow>>);
+static COMPONENT_CACHE: OnceLock<Mutex<VecDeque<ComponentCacheEntry>>> = OnceLock::new();
+
+fn component_snapshot(
+    connection: &Connection,
+    mode: GraphComponentMode,
+    cache_allowed: bool,
+) -> Result<Arc<Vec<GraphComponentRow>>, LinkGraphServiceError> {
+    const MAX_COMPONENT_FILES: u64 = 100_000;
+    const MAX_COMPONENT_EDGES: u64 = 1_000_000;
+    let generation = IndexGenerationRepository::get(connection).map_err(graph_sql)?;
+    if generation.files_total > MAX_COMPONENT_FILES {
+        return Err(LinkGraphServiceError::ResourceLimit {
+            resource: "nodes",
+            limit: MAX_COMPONENT_FILES,
+        });
+    }
+    let cache_key = connection
+        .path()
+        .filter(|_| cache_allowed)
+        .filter(|path| !path.is_empty())
+        .and_then(|path| {
+            let metadata = std::fs::metadata(path).ok()?;
+            #[cfg(unix)]
+            let file_identity = {
+                use std::os::unix::fs::MetadataExt;
+                format!("{}:{}", metadata.dev(), metadata.ino())
+            };
+            #[cfg(not(unix))]
+            let file_identity = format!("{:?}", metadata.created().ok());
+            Some(ComponentCacheKey {
+                database: path.to_string(),
+                file_identity,
+                generation: generation.canonical_generation,
+                strong: matches!(mode, GraphComponentMode::Strong),
+            })
+        });
+    let cache = COMPONENT_CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    if let Some(key) = &cache_key
+        && let Ok(mut entries) = cache.lock()
+        && let Some(position) = entries.iter().position(|(old, _)| old == key)
+    {
+        let entry = entries.remove(position).expect("position came from cache");
+        let snapshot = Arc::clone(&entry.1);
+        entries.push_back(entry);
+        return Ok(snapshot);
+    }
+    let edge_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM links WHERE resolved_file_id IS NOT NULL AND is_unresolved=0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(graph_sql)?;
+    if edge_count > MAX_COMPONENT_EDGES {
+        return Err(LinkGraphServiceError::ResourceLimit {
+            resource: "edges",
+            limit: MAX_COMPONENT_EDGES,
+        });
+    }
+    let mut statement = connection
+        .prepare("SELECT file_id,normalized_path FROM files ORDER BY file_id")
+        .map_err(graph_sql)?;
+    let files = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(graph_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(graph_sql)?;
+    let paths = files.into_iter().collect::<HashMap<_, _>>();
+    let mut ids = paths.keys().cloned().collect::<Vec<_>>();
+    ids.sort();
+    let pairs = LinksRepository::list_resolved_pairs(connection)
+        .map_err(|source| LinkGraphServiceError::LinksRepository { source })?;
+    let members = match mode {
+        GraphComponentMode::Weak => weak_components(&ids, &pairs),
+        GraphComponentMode::Strong => strong_components(&ids, &pairs),
+    };
+    let mut rows = build_component_rows(members, &paths, true, usize::MAX);
+    rows.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.paths.first().cmp(&right.paths.first()))
+    });
+    let snapshot = Arc::new(rows);
+    // Four bounded generation snapshots at most; large snapshots remain request-local.
+    let bytes = snapshot
+        .iter()
+        .flat_map(|row| &row.paths)
+        .map(String::len)
+        .sum::<usize>();
+    if bytes <= 8 * 1024 * 1024
+        && let Some(key) = cache_key
+        && let Ok(mut entries) = cache.lock()
+    {
+        entries.retain(|(old, _)| old.database != key.database || old.strong != key.strong);
+        entries.push_back((key, Arc::clone(&snapshot)));
+        while entries.len() > 4 {
+            entries.pop_front();
+        }
+    }
+    Ok(snapshot)
+}
+
+/// Revalidate incoming physical PDF-page references inside the caller's publication
+/// transaction. Unknown page counts remain pending without clearing file resolution.
+pub fn revalidate_pdf_page_links(
+    connection: &Connection,
+    file_id: &str,
+    page_count: Option<u32>,
+) -> rusqlite::Result<usize> {
+    let status = "CASE WHEN json_extract(fragment_json,'$.kind')='invalid_page' THEN 'bad_page' WHEN ?2 IS NULL THEN 'pending' WHEN json_extract(fragment_json,'$.value') BETWEEN 1 AND ?2 THEN 'resolved' ELSE 'bad_page' END";
+    connection.execute(
+        &format!("UPDATE link_evidence SET fragment_status={status} WHERE link_id IN (SELECT link_id FROM links WHERE resolved_file_id=?1) AND json_extract(fragment_json,'$.kind') IN ('page','invalid_page') AND fragment_status IS NOT ({status})"),
+        params![file_id,page_count],
+    )
+}
+
+#[cfg(test)]
+mod correctness_tests {
+    use super::*;
+    use tao_sdk_storage::{FileRecordInput, LinkEvidenceInput, LinkRecordInput, run_migrations};
+
+    fn database() -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&mut connection).unwrap();
+        connection
+    }
+    fn file(connection: &Connection, path: &str) {
+        FilesRepository::insert(
+            connection,
+            &FileRecordInput {
+                file_id: path.into(),
+                normalized_path: path.into(),
+                match_key: path.into(),
+                absolute_path: format!("/fixture/{path}"),
+                size_bytes: 1,
+                modified_unix_ms: 1,
+                hash_blake3: path.into(),
+                is_markdown: path.ends_with(".md"),
+            },
+        )
+        .unwrap();
+    }
+    fn edge(connection: &Connection, id: &str, source: &str, target: Option<&str>, field: &str) {
+        LinksRepository::insert(
+            connection,
+            &LinkRecordInput {
+                link_id: id.into(),
+                source_file_id: source.into(),
+                raw_target: target.unwrap_or("missing.md").into(),
+                resolved_file_id: target.map(str::to_string),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: target.is_none(),
+                unresolved_reason: target.is_none().then(|| "missing-note".into()),
+                source_field: field.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn all_file_components_include_attachment_members_and_consistent_sizes() {
+        let c = database();
+        for path in ["a.md", "b.md", "image.png"] {
+            file(&c, path);
+        }
+        edge(&c, "a-image", "a.md", Some("image.png"), "body:embed");
+        edge(&c, "b-image", "b.md", Some("image.png"), "body:embed");
+        let (total, rows) = BacklinkGraphService
+            .components_page(&c, GraphComponentMode::Weak, 10, 0, true, 10)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].size, 3);
+        assert_eq!(rows[0].paths, ["a.md", "b.md", "image.png"]);
+        assert!(!rows[0].truncated);
+        let (_, strong) = BacklinkGraphService
+            .components_page(&c, GraphComponentMode::Strong, 10, 0, true, 10)
+            .unwrap();
+        assert_eq!(strong.len(), 3);
+        assert!(strong.iter().all(|row| row.paths.len() as u64 == row.size));
+    }
+
+    #[test]
+    fn one_hop_target_survives_a_tiny_budget_and_unrelated_neighbors() {
+        let c = database();
+        for path in ["a.md", "b.md", "c.md", "z.md"] {
+            file(&c, path);
+        }
+        edge(&c, "1", "a.md", Some("b.md"), "body");
+        edge(&c, "2", "a.md", Some("c.md"), "body");
+        edge(&c, "3", "a.md", Some("z.md"), "body");
+        let result = BacklinkGraphService
+            .shortest_path(
+                &c,
+                &GraphPathRequest {
+                    from_path: "a.md".into(),
+                    to_path: "z.md".into(),
+                    max_depth: 1,
+                    max_nodes: 2,
+                },
+            )
+            .unwrap();
+        assert!(result.found && result.complete);
+        assert_eq!(result.path, ["a.md", "z.md"]);
+        assert_eq!(result.explored_nodes, 2);
+        let limited = BacklinkGraphService
+            .shortest_path(
+                &c,
+                &GraphPathRequest {
+                    from_path: "a.md".into(),
+                    to_path: "z.md".into(),
+                    max_depth: 0,
+                    max_nodes: 2,
+                },
+            )
+            .unwrap();
+        assert!(!limited.complete);
+        assert_eq!(limited.truncation_reason.as_deref(), Some("max_depth"));
+    }
+
+    #[test]
+    fn occurrence_windows_include_unresolved_duplicates_and_provenance() {
+        let c = database();
+        file(&c, "a.md");
+        file(&c, "b.md");
+        edge(&c, "1", "a.md", Some("b.md"), "body");
+        edge(&c, "2", "a.md", Some("b.md"), "body");
+        edge(&c, "3", "a.md", None, "body:markdown");
+        LinkEvidenceRepository::upsert(
+            &c,
+            &LinkEvidenceInput {
+                link_id: "2".into(),
+                source_start: 10,
+                source_end: 15,
+                line: 2,
+                end_line: 2,
+                raw_expression: "[[b]]".into(),
+                syntax: "wiki".into(),
+                fragment_json: "null".into(),
+                fragment_status: "not_requested".into(),
+                resolution_rule: "wiki_discovery".into(),
+                candidates_json: "[\"b.md\"]".into(),
+            },
+        )
+        .unwrap();
+        let (total, rows) = BacklinkGraphService
+            .links_page(&c, "a.md", GraphLinkDirection::All, 1, 1)
+            .unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].link_id, "2");
+        assert_eq!(rows[0].evidence.as_ref().unwrap()["line"], 2);
+        let (_, last) = BacklinkGraphService
+            .links_page(&c, "a.md", GraphLinkDirection::Outgoing, 1, 2)
+            .unwrap();
+        assert!(last[0].is_unresolved);
+    }
+
+    #[test]
+    fn component_cache_invalidates_across_committed_topology_generations() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let temp = tempfile::tempdir_in(fixture_root).unwrap();
+        let database_path = temp.path().join("graph.sqlite");
+        let mut c = Connection::open(&database_path).unwrap();
+        run_migrations(&mut c).unwrap();
+        file(&c, "a.md");
+        file(&c, "b.md");
+        edge(&c, "1", "a.md", Some("b.md"), "body");
+        assert_eq!(
+            BacklinkGraphService
+                .components_page(&c, GraphComponentMode::Weak, 10, 0, true, 10)
+                .unwrap()
+                .0,
+            1
+        );
+        c.execute("DELETE FROM links", []).unwrap();
+        let second = Connection::open(&database_path).unwrap();
+        assert_eq!(
+            BacklinkGraphService
+                .components_page(&second, GraphComponentMode::Weak, 10, 0, true, 10)
+                .unwrap()
+                .0,
+            2
+        );
+    }
+
+    #[test]
+    fn component_cache_never_publishes_rolled_back_write_snapshots() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let temp = tempfile::tempdir_in(fixture_root).unwrap();
+        let mut c = Connection::open(temp.path().join("graph.sqlite")).unwrap();
+        run_migrations(&mut c).unwrap();
+        for name in ["a.md", "b.md", "c.md"] {
+            file(&c, name);
+        }
+        c.execute_batch("BEGIN").unwrap();
+        edge(&c, "temporary", "a.md", Some("b.md"), "body");
+        let (_, inside) = BacklinkGraphService
+            .components_page(&c, GraphComponentMode::Weak, 10, 0, true, 10)
+            .unwrap();
+        assert_eq!(inside[0].paths, ["a.md", "b.md"]);
+        c.execute_batch("ROLLBACK").unwrap();
+        edge(&c, "committed", "a.md", Some("c.md"), "body");
+        let (_, committed) = BacklinkGraphService
+            .components_page(&c, GraphComponentMode::Weak, 10, 0, true, 10)
+            .unwrap();
+        assert_eq!(committed[0].paths, ["a.md", "c.md"]);
+    }
+
+    #[test]
+    fn walk_bounds_work_and_reports_real_link_kinds() {
+        let c = database();
+        file(&c, "source.md");
+        for index in 0..200 {
+            let path = format!("target-{index:03}.pdf");
+            file(&c, &path);
+            edge(
+                &c,
+                &format!("edge-{index:03}"),
+                "source.md",
+                Some(&path),
+                "body:embed",
+            );
+        }
+        let result = BacklinkGraphService
+            .walk_bounded(
+                &c,
+                &GraphWalkRequest {
+                    path: "source.md".into(),
+                    depth: 8,
+                    limit: 3,
+                    include_unresolved: false,
+                    include_folders: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(result.items.len(), 3);
+        assert!(!result.complete);
+        assert_eq!(result.truncation_reason.as_deref(), Some("limit"));
+        assert!(result.examined_edges <= 4);
+        assert!(
+            result
+                .items
+                .iter()
+                .all(|item| item.edge_type == GraphWalkEdgeType::Embed)
+        );
+    }
+
+    #[test]
+    fn walk_emits_each_occurrence_once_across_both_endpoints() {
+        let c = database();
+        file(&c, "a.md");
+        file(&c, "b.md");
+        edge(&c, "1", "a.md", Some("b.md"), "body:markdown");
+        let result = BacklinkGraphService
+            .walk_bounded(
+                &c,
+                &GraphWalkRequest {
+                    path: "a.md".into(),
+                    depth: 8,
+                    limit: 10,
+                    include_unresolved: false,
+                    include_folders: false,
+                },
+            )
+            .unwrap();
+        assert!(result.complete);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].edge_type, GraphWalkEdgeType::Markdown);
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+    #[test]
+    fn page_status_follows_physical_count_without_removing_document_edges() {
+        let mut c = Connection::open_in_memory().unwrap();
+        tao_sdk_storage::run_migrations(&mut c).unwrap();
+        for (id, markdown) in [("note.md", true), ("paper.pdf", false)] {
+            FilesRepository::insert(
+                &c,
+                &tao_sdk_storage::FileRecordInput {
+                    file_id: id.into(),
+                    normalized_path: id.into(),
+                    match_key: id.into(),
+                    absolute_path: format!("/fixture/{id}"),
+                    size_bytes: 1,
+                    modified_unix_ms: 1,
+                    hash_blake3: id.into(),
+                    is_markdown: markdown,
+                },
+            )
+            .unwrap();
+        }
+        LinksRepository::insert(
+            &c,
+            &tao_sdk_storage::LinkRecordInput {
+                link_id: "page".into(),
+                source_file_id: "note.md".into(),
+                raw_target: "paper.pdf".into(),
+                resolved_file_id: Some("paper.pdf".into()),
+                heading_slug: None,
+                block_id: None,
+                is_unresolved: false,
+                unresolved_reason: None,
+                source_field: "body:markdown".into(),
+            },
+        )
+        .unwrap();
+        LinkEvidenceRepository::upsert(
+            &c,
+            &tao_sdk_storage::LinkEvidenceInput {
+                link_id: "page".into(),
+                source_start: 0,
+                source_end: 20,
+                line: 1,
+                end_line: 1,
+                raw_expression: "[x](paper.pdf#page=2)".into(),
+                syntax: "markdown".into(),
+                fragment_json: r#"{"kind":"page","value":2}"#.into(),
+                fragment_status: "pending".into(),
+                resolution_rule: "source_relative".into(),
+                candidates_json: "[]".into(),
+            },
+        )
+        .unwrap();
+        for (count, status) in [
+            (Some(2), "resolved"),
+            (Some(1), "bad_page"),
+            (None, "pending"),
+        ] {
+            assert_eq!(
+                revalidate_pdf_page_links(&c, "paper.pdf", count).unwrap(),
+                1
+            );
+            assert_eq!(
+                revalidate_pdf_page_links(&c, "paper.pdf", count).unwrap(),
+                0
+            );
+            let (audit_total, audit_rows) = BacklinkGraphService
+                .unresolved_links_page(&c, 10, 0)
+                .unwrap();
+            assert_eq!(audit_total, u64::from(status != "resolved"));
+            if let Some(issue) = audit_rows.first() {
+                assert!(!issue.is_unresolved);
+                assert_eq!(issue.resolved_path.as_deref(), Some("paper.pdf"));
+                assert_eq!(issue.evidence.as_ref().unwrap()["fragment_status"], status);
+            }
+            assert_eq!(
+                LinkEvidenceRepository::get_by_link_id(&c, "page")
+                    .unwrap()
+                    .unwrap()
+                    .fragment_status,
+                status
+            );
+        }
+        assert_eq!(
+            BacklinkGraphService
+                .links_page(&c, "paper.pdf", GraphLinkDirection::Incoming, 10, 0)
+                .unwrap()
+                .0,
+            1
+        );
+    }
 }

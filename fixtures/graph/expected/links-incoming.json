@@ -1,0 +1,183 @@
+{
+  "complete": true,
+  "direction": "incoming",
+  "items": [
+    {
+      "block_id": null,
+      "direction": "incoming",
+      "evidence": {
+        "candidates": [
+          "notes/beta.md"
+        ],
+        "end_line": 11,
+        "fragment": {
+          "kind": "heading",
+          "value": "Missing Heading"
+        },
+        "fragment_status": "bad_anchor",
+        "line": 11,
+        "raw_expression": "[[beta#Missing Heading]]",
+        "resolution_rule": "wiki_discovery",
+        "source_end": 147,
+        "source_span_available": true,
+        "source_start": 123,
+        "syntax": "wiki"
+      },
+      "heading_slug": "missing-heading",
+      "is_unresolved": false,
+      "issue_scope": "fragment",
+      "issue_status": "broken",
+      "link_id": "link_22c767894c94844d",
+      "path": "notes/root.md",
+      "raw_target": "beta",
+      "resolved_file_id": "file_de83f2b75a6c605e",
+      "resolved_path": "notes/beta.md",
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": null
+    },
+    {
+      "block_id": null,
+      "direction": "incoming",
+      "evidence": {
+        "candidates": [
+          "notes/beta.md"
+        ],
+        "end_line": 9,
+        "fragment": {
+          "kind": "heading",
+          "value": "Target Heading"
+        },
+        "fragment_status": "resolved",
+        "line": 9,
+        "raw_expression": "[[beta#Target Heading]]",
+        "resolution_rule": "wiki_discovery",
+        "source_end": 104,
+        "source_span_available": true,
+        "source_start": 81,
+        "syntax": "wiki"
+      },
+      "heading_slug": "target-heading",
+      "is_unresolved": false,
+      "issue_scope": null,
+      "issue_status": null,
+      "link_id": "link_3fe047cc31819b15",
+      "path": "notes/root.md",
+      "raw_target": "beta",
+      "resolved_file_id": "file_de83f2b75a6c605e",
+      "resolved_path": "notes/beta.md",
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": null
+    },
+    {
+      "block_id": "block-a",
+      "direction": "incoming",
+      "evidence": {
+        "candidates": [
+          "notes/beta.md"
+        ],
+        "end_line": 10,
+        "fragment": {
+          "kind": "block",
+          "value": "block-a"
+        },
+        "fragment_status": "resolved",
+        "line": 10,
+        "raw_expression": "[[beta#^block-a]]",
+        "resolution_rule": "wiki_discovery",
+        "source_end": 122,
+        "source_span_available": true,
+        "source_start": 105,
+        "syntax": "wiki"
+      },
+      "heading_slug": null,
+      "is_unresolved": false,
+      "issue_scope": null,
+      "issue_status": null,
+      "link_id": "link_c6eaf62a5316eb76",
+      "path": "notes/root.md",
+      "raw_target": "beta",
+      "resolved_file_id": "file_de83f2b75a6c605e",
+      "resolved_path": "notes/beta.md",
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": null
+    },
+    {
+      "block_id": null,
+      "direction": "incoming",
+      "evidence": {
+        "candidates": [
+          "notes/beta.md"
+        ],
+        "end_line": 3,
+        "fragment": null,
+        "fragment_status": "not_requested",
+        "line": 3,
+        "raw_expression": "[[beta]]",
+        "resolution_rule": "wiki_discovery",
+        "source_end": 17,
+        "source_span_available": true,
+        "source_start": 9,
+        "syntax": "wiki"
+      },
+      "heading_slug": null,
+      "is_unresolved": false,
+      "issue_scope": null,
+      "issue_status": null,
+      "link_id": "link_d82fb97752573324",
+      "path": "notes/alpha.md",
+      "raw_target": "beta",
+      "resolved_file_id": "file_de83f2b75a6c605e",
+      "resolved_path": "notes/beta.md",
+      "source_field": "body",
+      "source_file_id": "file_28d0be4d425c8898",
+      "source_path": "notes/alpha.md",
+      "unresolved_reason": null
+    },
+    {
+      "block_id": "missing-block",
+      "direction": "incoming",
+      "evidence": {
+        "candidates": [
+          "notes/beta.md"
+        ],
+        "end_line": 12,
+        "fragment": {
+          "kind": "block",
+          "value": "missing-block"
+        },
+        "fragment_status": "bad_block",
+        "line": 12,
+        "raw_expression": "[[beta#^missing-block]]",
+        "resolution_rule": "wiki_discovery",
+        "source_end": 171,
+        "source_span_available": true,
+        "source_start": 148,
+        "syntax": "wiki"
+      },
+      "heading_slug": null,
+      "is_unresolved": false,
+      "issue_scope": "fragment",
+      "issue_status": "broken",
+      "link_id": "link_f93cf3f0a594e22d",
+      "path": "notes/root.md",
+      "raw_target": "beta",
+      "resolved_file_id": "file_de83f2b75a6c605e",
+      "resolved_path": "notes/beta.md",
+      "source_field": "body",
+      "source_file_id": "file_654c8e839467c8ce",
+      "source_path": "notes/root.md",
+      "unresolved_reason": null
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "path": "notes/beta.md",
+  "representation": "edge_occurrences",
+  "total": 5
+}

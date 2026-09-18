@@ -1,6 +1,9 @@
 use rusqlite::{Connection, params, params_from_iter, types::Value};
 use thiserror::Error;
 
+/// Fixed-point precision preserves FTS5's small positive IDF floor for common terms.
+pub const SEARCH_RANK_SCALE: i64 = 1_000_000_000_000;
+
 /// Input payload for one unified search segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSegmentInput {
@@ -109,6 +112,8 @@ pub struct SearchSegmentQuery {
     pub surfaces: Vec<String>,
     /// Optional path scope.
     pub scope: Option<String>,
+    /// Match scope using Unicode-folded canonical paths.
+    pub scope_case_insensitive: bool,
     /// Extension filters. Empty means all extensions.
     pub extensions: Vec<String>,
     /// Max rows to return.
@@ -120,6 +125,57 @@ pub struct SearchSegmentQuery {
 pub struct SearchSegmentRepository;
 
 impl SearchSegmentRepository {
+    /// Inspect required derived objects without reading source rows or changing state.
+    pub fn schema_complete(connection: &Connection) -> Result<bool, SearchSegmentRepositoryError> {
+        connection.query_row("SELECT COUNT(*)=13 FROM sqlite_schema WHERE name IN ('derived_dirty_files','search_segments','search_aliases','search_segments_fts','search_segments_fts_ai','search_segments_fts_au','search_segments_fts_ad','count_search_segments_insert','count_search_segments_delete','count_search_aliases_insert','count_search_aliases_delete','mark_search_segments_update','mark_search_aliases_update')",[],|row|row.get(0)).map_err(|source| SearchSegmentRepositoryError::Sql { operation:"inspect_derived_schema",source })
+    }
+
+    /// Recreate only reproducible derived objects inside the caller's publication transaction.
+    pub fn repair_schema(connection: &Connection) -> Result<(), SearchSegmentRepositoryError> {
+        connection.execute_batch("DROP TRIGGER IF EXISTS search_segments_fts_ai; DROP TRIGGER IF EXISTS search_segments_fts_au; DROP TRIGGER IF EXISTS search_segments_fts_ad; DROP TABLE IF EXISTS search_segments_fts; DROP TABLE IF EXISTS search_segments; DROP TABLE IF EXISTS search_aliases; DROP TABLE IF EXISTS derived_dirty_files;").map_err(|source| SearchSegmentRepositoryError::Sql { operation:"clear_damaged_derived_schema",source })?;
+        connection
+            .execute_batch(crate::SEARCH_SCHEMA_SQL)
+            .map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "recreate_derived_schema",
+                source,
+            })?;
+        connection.execute("UPDATE index_generations SET segments_total=0,aliases_total=0,search_generation=-1 WHERE singleton=1",[]).map_err(|source| SearchSegmentRepositoryError::Sql { operation:"reset_derived_counters",source })?;
+        Ok(())
+    }
+
+    /// Verify a consistent read-only source snapshot. Uses memory proportional to database size.
+    pub fn check_integrity_read_only(
+        connection: &Connection,
+    ) -> Result<(), SearchSegmentRepositoryError> {
+        let mut snapshot =
+            Connection::open_in_memory().map_err(|source| SearchSegmentRepositoryError::Sql {
+                operation: "open_integrity_snapshot",
+                source,
+            })?;
+        {
+            let backup =
+                rusqlite::backup::Backup::new(connection, &mut snapshot).map_err(|source| {
+                    SearchSegmentRepositoryError::Sql {
+                        operation: "create_integrity_snapshot",
+                        source,
+                    }
+                })?;
+            backup
+                .run_to_completion(256, std::time::Duration::ZERO, None)
+                .map_err(|source| SearchSegmentRepositoryError::Sql {
+                    operation: "copy_integrity_snapshot",
+                    source,
+                })?;
+        }
+        Self::check_integrity(&snapshot)
+    }
+
+    /// Verify FTS postings against their external content, without changing source rows.
+    pub fn check_integrity(connection: &Connection) -> Result<(), SearchSegmentRepositoryError> {
+        connection.execute("INSERT INTO search_segments_fts(search_segments_fts,rank) VALUES('integrity-check',1)", []).map_err(|source| SearchSegmentRepositoryError::Sql { operation: "fts_integrity_check", source })?;
+        Ok(())
+    }
+
     /// Insert a batch of unified search segments.
     pub fn insert_many(
         connection: &Connection,
@@ -272,6 +328,33 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?
         connection: &Connection,
         query: &SearchSegmentQuery,
     ) -> Result<Vec<SearchSegmentCandidate>, SearchSegmentRepositoryError> {
+        Self::query_candidates_internal(connection, query, false, false)
+    }
+
+    /// Retrieve one strongest segment per canonical file before applying the window.
+    pub fn query_candidates_distinct(
+        connection: &Connection,
+        query: &SearchSegmentQuery,
+    ) -> Result<Vec<SearchSegmentCandidate>, SearchSegmentRepositoryError> {
+        Self::query_candidates_internal(connection, query, true, false)
+    }
+
+    /// Apply the connection's deterministic tao_search_rank scorer before any candidate limit.
+    /// The search service registers that function using its shared ranking policy.
+    pub fn query_scored_candidates(
+        connection: &Connection,
+        query: &SearchSegmentQuery,
+        distinct: bool,
+    ) -> Result<Vec<SearchSegmentCandidate>, SearchSegmentRepositoryError> {
+        Self::query_candidates_internal(connection, query, distinct, true)
+    }
+
+    fn query_candidates_internal(
+        connection: &Connection,
+        query: &SearchSegmentQuery,
+        distinct: bool,
+        scored: bool,
+    ) -> Result<Vec<SearchSegmentCandidate>, SearchSegmentRepositoryError> {
         let mut clauses = vec!["search_segments_fts MATCH ?".to_string()];
         let mut params = vec![Value::Text(query.fts_query.clone())];
 
@@ -284,11 +367,14 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?
         }
 
         if let Some(scope) = query.scope.as_ref().filter(|scope| !scope.is_empty()) {
-            clauses.push(
-                "(s.normalized_path = ? OR s.normalized_path LIKE ? ESCAPE '\\')".to_string(),
-            );
+            let column = if query.scope_case_insensitive {
+                "s.normalized_path_lc"
+            } else {
+                "s.normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.clone()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
 
         if !query.extensions.is_empty() {
@@ -301,7 +387,7 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?
 
         let sql = format!(
             r#"
-SELECT
+WITH matches AS MATERIALIZED (SELECT
   s.segment_id,
   s.surface,
   s.file_id,
@@ -312,14 +398,26 @@ SELECT
   s.label,
   s.weight,
   s.updated_at,
-  CAST((0 - bm25(search_segments_fts, 5.0, 6.0, 7.0, 0.8, 3.0, 2.0, 1.5, 2.5)) * 1000000 AS INTEGER) AS rank_score
+  CAST((0 - bm25(search_segments_fts, 5.0, 6.0, 7.0, 0.8, 3.0, 2.0, 1.5, 2.5)) * {SEARCH_RANK_SCALE} AS INTEGER) AS rank_score
 FROM search_segments_fts
 JOIN search_segments s ON s.rowid = search_segments_fts.rowid
-WHERE {}
-ORDER BY (s.weight + rank_score) DESC, s.normalized_path ASC, s.segment_id ASC
+WHERE {}), scored AS MATERIALIZED (
+ SELECT *, {} AS final_score FROM matches
+), ranked AS (
+ SELECT *, ROW_NUMBER() OVER (PARTITION BY normalized_path ORDER BY final_score DESC, segment_id ASC) AS file_rank FROM scored
+)
+SELECT * FROM ranked
+{}
+ORDER BY final_score DESC, normalized_path ASC, segment_id ASC
 LIMIT ?
 "#,
-            clauses.join(" AND ")
+            clauses.join(" AND "),
+            if scored {
+                "tao_search_rank(normalized_path,CASE WHEN surface IN ('docs','files') OR (surface='bases' AND field='base') THEN label ELSE '' END,surface,field,weight,rank_score)"
+            } else {
+                "weight+MIN(rank_score,500)"
+            },
+            if distinct { "WHERE file_rank=1" } else { "" }
         );
         params.push(Value::Integer(i64::from(query.limit)));
 
@@ -353,6 +451,15 @@ LIMIT ?
     ) -> Result<Vec<SearchSegmentMatch>, SearchSegmentRepositoryError> {
         if segment_ids.is_empty() {
             return Ok(Vec::new());
+        }
+        if segment_ids.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut rows = Vec::new();
+            for chunk in segment_ids.chunks(crate::SQL_PARAMETER_CHUNK) {
+                rows.extend(Self::hydrate_by_segment_ids(connection, chunk)?);
+            }
+            rows.sort_by(|a, b| a.segment_id.cmp(&b.segment_id));
+            rows.dedup_by(|a, b| a.segment_id == b.segment_id);
+            return Ok(rows);
         }
 
         let placeholders = vec!["?"; segment_ids.len()].join(", ");
@@ -398,10 +505,14 @@ WHERE segment_id IN ({placeholders})
         .collect()
     }
 
-    /// List all materialized document search segments in deterministic path order.
-    pub fn list_docs(
+    /// Fetch a bounded Markdown document page in canonical path order.
+    pub fn list_docs_page(
         connection: &Connection,
+        limit: u32,
+        offset: u64,
     ) -> Result<Vec<SearchSegmentMatch>, SearchSegmentRepositoryError> {
+        let limit = limit.clamp(1, 1000);
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let mut statement = connection
             .prepare(
                 r#"
@@ -419,8 +530,9 @@ SELECT
   updated_at,
   0 AS rank_score
 FROM search_segments
-WHERE surface = 'docs'
+WHERE surface = 'docs' AND extension IN ('md', 'markdown')
 ORDER BY normalized_path ASC
+LIMIT ?1 OFFSET ?2
 "#,
             )
             .map_err(|source| SearchSegmentRepositoryError::Sql {
@@ -428,7 +540,7 @@ ORDER BY normalized_path ASC
                 source,
             })?;
         let rows = statement
-            .query_map([], row_to_segment_match)
+            .query_map(params![limit, offset], row_to_segment_match)
             .map_err(|source| SearchSegmentRepositoryError::Sql {
                 operation: "list_docs",
                 source,
@@ -459,11 +571,14 @@ ORDER BY normalized_path ASC
             params.extend(query.surfaces.iter().cloned().map(Value::Text));
         }
         if let Some(scope) = query.scope.as_ref().filter(|scope| !scope.is_empty()) {
-            clauses.push(
-                "(s.normalized_path = ? OR s.normalized_path LIKE ? ESCAPE '\\')".to_string(),
-            );
+            let column = if query.scope_case_insensitive {
+                "s.normalized_path_lc"
+            } else {
+                "s.normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.clone()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
         if !query.extensions.is_empty() {
             clauses.push(format!(
@@ -506,11 +621,14 @@ WHERE {}
             params.extend(query.surfaces.iter().cloned().map(Value::Text));
         }
         if let Some(scope) = query.scope.as_ref().filter(|scope| !scope.is_empty()) {
-            clauses.push(
-                "(s.normalized_path = ? OR s.normalized_path LIKE ? ESCAPE '\\')".to_string(),
-            );
+            let column = if query.scope_case_insensitive {
+                "s.normalized_path_lc"
+            } else {
+                "s.normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.clone()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
         if !query.extensions.is_empty() {
             clauses.push(format!(
@@ -563,6 +681,16 @@ ORDER BY s.normalized_path ASC
         if paths.is_empty() {
             return Ok(0);
         }
+        if paths.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut paths = paths.to_vec();
+            paths.sort();
+            paths.dedup();
+            let mut count = 0;
+            for chunk in paths.chunks(crate::SQL_PARAMETER_CHUNK) {
+                count += Self::count_matching_paths_subset(connection, query, chunk)?;
+            }
+            return Ok(count);
+        }
 
         let mut clauses = vec![
             "search_segments_fts MATCH ?".to_string(),
@@ -582,11 +710,14 @@ ORDER BY s.normalized_path ASC
             params.extend(query.surfaces.iter().cloned().map(Value::Text));
         }
         if let Some(scope) = query.scope.as_ref().filter(|scope| !scope.is_empty()) {
-            clauses.push(
-                "(s.normalized_path = ? OR s.normalized_path LIKE ? ESCAPE '\\')".to_string(),
-            );
+            let column = if query.scope_case_insensitive {
+                "s.normalized_path_lc"
+            } else {
+                "s.normalized_path"
+            };
+            clauses.push(format!("({column} = ? OR instr({column}, ?) = 1)"));
             params.push(Value::Text(scope.clone()));
-            params.push(Value::Text(format!("{}/%", escape_like(scope))));
+            params.push(Value::Text(format!("{scope}/")));
         }
         if !query.extensions.is_empty() {
             clauses.push(format!(
@@ -695,13 +826,6 @@ fn row_to_segment_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchS
     })
 }
 
-fn escape_like(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 /// Search segment repository operation failures.
 #[derive(Debug, Error)]
 pub enum SearchSegmentRepositoryError {
@@ -764,6 +888,7 @@ mod tests {
                 fts_query: "\"needle\"*".to_string(),
                 surfaces: Vec::new(),
                 scope: None,
+                scope_case_insensitive: false,
                 extensions: Vec::new(),
                 limit: 10,
             },
@@ -784,6 +909,7 @@ mod tests {
                 fts_query: "\"needle\"*".to_string(),
                 surfaces: Vec::new(),
                 scope: None,
+                scope_case_insensitive: false,
                 extensions: Vec::new(),
                 limit: 10,
             },
@@ -797,6 +923,7 @@ mod tests {
                 fts_query: "\"replacement\"*".to_string(),
                 surfaces: Vec::new(),
                 scope: None,
+                scope_case_insensitive: false,
                 extensions: Vec::new(),
                 limit: 10,
             },
@@ -809,6 +936,7 @@ mod tests {
                 fts_query: "\"replacement\"*".to_string(),
                 surfaces: Vec::new(),
                 scope: None,
+                scope_case_insensitive: false,
                 extensions: Vec::new(),
                 limit: 10,
             },
@@ -837,6 +965,7 @@ mod tests {
                 fts_query: "\"replacement\"*".to_string(),
                 surfaces: Vec::new(),
                 scope: None,
+                scope_case_insensitive: false,
                 extensions: Vec::new(),
                 limit: 10,
             },

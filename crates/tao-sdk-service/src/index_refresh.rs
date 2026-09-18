@@ -8,9 +8,9 @@ use tao_sdk_vault::{CasePolicy, PathCanonicalizationService};
 use thiserror::Error;
 
 use crate::{
-    CURRENT_LINK_RESOLUTION_VERSION, FullIndexService, LINK_RESOLUTION_VERSION_STATE_KEY,
-    ReconciliationScanMode, ReconciliationScannerService, SearchCorpusRefreshMode,
-    SearchCorpusService,
+    CURRENT_LINK_RESOLUTION_VERSION, CoalescedBatchIndexService, FullIndexService,
+    LINK_RESOLUTION_VERSION_STATE_KEY, ReconciliationScanMode, ReconciliationScannerService,
+    SearchCorpusRefreshMode, SearchCorpusService,
 };
 
 const DEFAULT_MAX_BATCH_SIZE: usize = 128;
@@ -146,6 +146,8 @@ impl IndexRefreshService {
         })?;
         let rebuild_reason = if index_requires_full_rebuild(connection)? {
             Some(REASON_LINK_RESOLUTION_VERSION_MISMATCH)
+        } else if index_case_policy_changed(connection, case_policy)? {
+            Some("index_case_policy_changed")
         } else if inconsistent_paths > 0 {
             Some(REASON_FILE_PATH_MISMATCH)
         } else {
@@ -164,7 +166,7 @@ impl IndexRefreshService {
         })
     }
 
-    /// Execute the required refresh action.
+    /// Execute a coherent refresh, rescanning after bounded concurrent-publication conflicts.
     pub fn refresh(
         &self,
         vault_root: &Path,
@@ -172,9 +174,40 @@ impl IndexRefreshService {
         case_policy: CasePolicy,
         options: IndexRefreshOptions,
     ) -> Result<IndexRefreshOutcome, IndexRefreshError> {
-        let status = self.inspect(vault_root, connection, case_policy, options.scan_mode)?;
+        let _publication = crate::publication_lock::PublicationGuard::acquire(connection)
+            .map_err(|source| IndexRefreshError::PublicationCoordination { source })?;
+        for attempt in 0..3 {
+            let result = self.refresh_once(vault_root, connection, case_policy, options);
+            let conflict = matches!(&result,Err(IndexRefreshError::FullRebuild{source}) if matches!(source.as_ref(),crate::FullIndexError::ConcurrentPublication{..}));
+            if !conflict || attempt == 2 {
+                return result;
+            }
+        }
+        unreachable!("bounded refresh loop always returns")
+    }
 
-        if let Some(reason) = status.rebuild_reason {
+    fn refresh_once(
+        &self,
+        vault_root: &Path,
+        connection: &mut Connection,
+        case_policy: CasePolicy,
+        options: IndexRefreshOptions,
+    ) -> Result<IndexRefreshOutcome, IndexRefreshError> {
+        if options.max_batch_size == 0 {
+            return Err(IndexRefreshError::ScanDrift {
+                source: Box::new(crate::ReconciliationScanError::InvalidBatchSize { value: 0 }),
+            });
+        }
+        let rebuild_reason = if index_requires_full_rebuild(connection)? {
+            Some(REASON_LINK_RESOLUTION_VERSION_MISMATCH)
+        } else if index_case_policy_changed(connection, case_policy)? {
+            Some("index_case_policy_changed")
+        } else if count_inconsistent_file_rows(vault_root, connection, case_policy)? > 0 {
+            Some(REASON_FILE_PATH_MISMATCH)
+        } else {
+            None
+        };
+        if let Some(reason) = rebuild_reason {
             let rebuild = FullIndexService::default()
                 .rebuild(vault_root, connection, case_policy)
                 .map_err(|source| IndexRefreshError::FullRebuild {
@@ -183,7 +216,7 @@ impl IndexRefreshService {
             return Ok(IndexRefreshOutcome {
                 mode: IndexRefreshMode::FullRebuild,
                 reason: Some(reason),
-                drift_paths: status.drift_paths,
+                drift_paths: rebuild.indexed_files,
                 batches_applied: 1,
                 upserted_files: rebuild.indexed_files,
                 removed_files: 0,
@@ -192,22 +225,29 @@ impl IndexRefreshService {
             });
         }
 
-        if status.drift_paths > 0 {
-            let reconcile = ReconciliationScannerService::default()
-                .scan_and_repair_with_mode(
+        let plan = ReconciliationScannerService::default()
+            .plan(vault_root, connection, case_policy, options.scan_mode)
+            .map_err(|source| IndexRefreshError::ScanDrift {
+                source: Box::new(source),
+            })?;
+        let drift_paths = plan.drift_paths();
+        if drift_paths > 0 {
+            let reconcile = CoalescedBatchIndexService::default()
+                .apply_plan(
                     vault_root,
                     connection,
-                    case_policy,
+                    plan.changes,
+                    Some(plan.generation),
                     options.max_batch_size,
-                    options.scan_mode,
+                    case_policy,
                 )
-                .map_err(|source| IndexRefreshError::ScanDrift {
+                .map_err(|source| IndexRefreshError::FullRebuild {
                     source: Box::new(source),
                 })?;
             return Ok(IndexRefreshOutcome {
                 mode: IndexRefreshMode::Reconcile,
                 reason: None,
-                drift_paths: reconcile.drift_paths,
+                drift_paths,
                 batches_applied: reconcile.batches_applied,
                 upserted_files: reconcile.upserted_files,
                 removed_files: reconcile.removed_files,
@@ -216,6 +256,11 @@ impl IndexRefreshService {
                 search_corpus_refresh: reconcile.search_corpus_refresh,
             });
         }
+        let status = SearchCorpusService.status(connection).map_err(|source| {
+            IndexRefreshError::SearchCorpus {
+                source: Box::new(source),
+            }
+        })?;
 
         if status.search_index_stale {
             SearchCorpusService
@@ -260,7 +305,31 @@ fn index_requires_full_rebuild(connection: &Connection) -> Result<bool, IndexRef
     };
 
     let stored_version = serde_json::from_str::<u32>(&record.value_json).unwrap_or_default();
-    Ok(stored_version != CURRENT_LINK_RESOLUTION_VERSION)
+    let fingerprint = IndexStateRepository::get_by_key(connection, "fingerprint_policy_version")
+        .map_err(|source| IndexRefreshError::IndexState {
+            source: Box::new(source),
+        })?;
+    let fingerprint_version =
+        fingerprint.and_then(|value| serde_json::from_str::<u32>(&value.value_json).ok());
+    Ok(stored_version != CURRENT_LINK_RESOLUTION_VERSION
+        || fingerprint_version != Some(tao_sdk_vault::FINGERPRINT_POLICY_VERSION))
+}
+
+fn index_case_policy_changed(
+    connection: &Connection,
+    case_policy: CasePolicy,
+) -> Result<bool, IndexRefreshError> {
+    let expected = match case_policy {
+        CasePolicy::Sensitive => "sensitive",
+        CasePolicy::Insensitive => "insensitive",
+    };
+    let stored =
+        IndexStateRepository::get_by_key(connection, "index_case_policy").map_err(|source| {
+            IndexRefreshError::IndexState {
+                source: Box::new(source),
+            }
+        })?;
+    Ok(stored.is_none_or(|record| record.value_json != expected))
 }
 
 fn count_inconsistent_file_rows(
@@ -282,11 +351,13 @@ fn count_inconsistent_file_rows(
     let mut mismatches = 0_u64;
     for file in files {
         let absolute = Path::new(&file.absolute_path);
-        let Ok(canonical) = canonicalizer.canonicalize(absolute) else {
-            mismatches = mismatches.saturating_add(1);
-            continue;
-        };
-        if canonical.normalized != file.normalized_path {
+        let canonical = absolute
+            .strip_prefix(canonicalizer.root())
+            .ok()
+            .and_then(|relative| tao_sdk_vault::normalize_relative_path(relative).ok());
+        // Absence is an ordinary manifest removal. Only malformed persisted identity
+        // or a path outside the configured vault requires reconstruction.
+        if canonical.as_deref() != Some(file.normalized_path.as_str()) {
             mismatches = mismatches.saturating_add(1);
         }
     }
@@ -297,6 +368,13 @@ fn count_inconsistent_file_rows(
 /// Index refresh failures.
 #[derive(Debug, Error)]
 pub enum IndexRefreshError {
+    /// Another publisher could not be coordinated within the request deadline.
+    #[error("index publication coordination failed: {source}")]
+    PublicationCoordination {
+        /// Lock acquisition or cancellation failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// Drift scan or repair failed.
     #[error("scan index drift failed: {source}")]
     ScanDrift {
@@ -305,7 +383,7 @@ pub enum IndexRefreshError {
         source: Box<crate::ReconciliationScanError>,
     },
     /// Full rebuild failed.
-    #[error("full index rebuild failed: {source}")]
+    #[error("index publication failed: {source}")]
     FullRebuild {
         /// Source error.
         #[source]

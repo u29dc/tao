@@ -80,7 +80,7 @@ pub struct SearchQueryProjectedItem {
     pub file_id: Option<String>,
     /// Normalized vault-relative path (when projected).
     pub path: Option<String>,
-    /// File stem title projection (when projected).
+    /// Canonical title from the indexed source revision (when projected).
     pub title: Option<String>,
     /// Indexed timestamp string.
     pub indexed_at: String,
@@ -247,13 +247,10 @@ mod tests {
             .expect("query");
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].path, "notes/deep/project-note.md");
+        assert_eq!(result.items[0].title, "Overview");
         assert_eq!(
             result.items[0].matched_in,
-            vec![
-                "title".to_string(),
-                "path".to_string(),
-                "content".to_string()
-            ]
+            vec!["path".to_string(), "content".to_string()]
         );
 
         let content = SearchQueryService

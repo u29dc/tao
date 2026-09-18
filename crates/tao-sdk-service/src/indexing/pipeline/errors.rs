@@ -3,6 +3,37 @@ use super::*;
 /// Full and incremental index rebuild failures.
 #[derive(Debug, Error)]
 pub enum FullIndexError {
+    /// Accumulated captured/prepared revisions exceeded the supported atomic work set.
+    #[error(
+        "index preparation requires {required_bytes} charged bytes, exceeding the {limit_bytes}-byte limit; the existing index was preserved; reduce the included content with .taoignore or refresh a smaller set of changed files"
+    )]
+    PreparationBudgetExceeded {
+        /// Capacity-accounted retained content and projection bytes.
+        required_bytes: usize,
+        /// Maximum retained preparation charge.
+        limit_bytes: usize,
+    },
+    /// Request cancellation prevented publication.
+    #[error(transparent)]
+    Cancelled(#[from] tao_sdk_vault::OperationCancelled),
+    /// Another writer committed while source revisions were being prepared.
+    #[error(
+        "concurrent index publication changed generation {expected} to {actual}; retry refresh"
+    )]
+    ConcurrentPublication {
+        /// Generation read before preparation.
+        expected: i64,
+        /// Generation observed under the publication lock.
+        actual: i64,
+    },
+    /// Canonical revision storage or serialization failed.
+    #[error("canonical index operation '{operation}' failed: {message}")]
+    CanonicalState {
+        /// Operation name.
+        operation: &'static str,
+        /// Underlying diagnostic.
+        message: String,
+    },
     /// Scanner initialization failed.
     #[error("failed to initialize full index scanner: {source}")]
     CreateScanner {
@@ -196,6 +227,13 @@ pub enum FullIndexError {
 /// Stale cleanup workflow failures.
 #[derive(Debug, Error)]
 pub enum StaleCleanupError {
+    /// Publishing stale removals and dependent graph rows failed.
+    #[error("failed to publish stale cleanup: {source}")]
+    Publish {
+        /// Shared publication failure.
+        #[source]
+        source: Box<FullIndexError>,
+    },
     /// Scanner initialization failed.
     #[error("failed to initialize stale cleanup scanner: {source}")]
     CreateScanner {
@@ -271,6 +309,12 @@ pub enum StaleCleanupError {
 /// Checkpointed incremental indexing failures.
 #[derive(Debug, Error)]
 pub enum CheckpointedIndexError {
+    /// Persisted checkpoint cannot safely be resumed.
+    #[error("invalid checkpoint: {reason}")]
+    InvalidCheckpoint {
+        /// Validation failure.
+        reason: String,
+    },
     /// Provided batch size is invalid.
     #[error("invalid checkpoint batch size: {value}")]
     InvalidBatchSize {
@@ -364,6 +408,13 @@ pub enum CheckpointedIndexError {
 /// Reconciliation scanner failures.
 #[derive(Debug, Error)]
 pub enum ReconciliationScanError {
+    /// Checking the derived asset revision failed.
+    #[error("failed to check content revision: {source}")]
+    Content {
+        /// Content diagnostic.
+        #[source]
+        source: Box<crate::ContentError>,
+    },
     /// Provided batch size is invalid.
     #[error("invalid reconciliation scan batch size: {value}")]
     InvalidBatchSize {
@@ -449,6 +500,13 @@ pub enum IndexConsistencyError {
 /// Index self-heal workflow failures.
 #[derive(Debug, Error)]
 pub enum IndexSelfHealError {
+    /// Publishing repaired canonical and derived rows failed.
+    #[error("failed to publish index self-heal: {source}")]
+    Publish {
+        /// Shared publication error.
+        #[source]
+        source: Box<FullIndexError>,
+    },
     /// Running pre-repair consistency check failed.
     #[error("failed to run pre-repair consistency check: {source}")]
     CheckBefore {

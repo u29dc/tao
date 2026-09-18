@@ -6,7 +6,6 @@ pub(crate) struct ResolvedVaultPathArgs {
     pub(crate) data_dir: String,
     pub(crate) db_path: String,
     pub(crate) case_policy: CasePolicy,
-    pub(crate) read_only: bool,
 }
 
 #[derive(Debug, Default)]
@@ -17,6 +16,10 @@ pub(crate) struct RuntimeCache {
     pub(crate) command_result_order: VecDeque<String>,
     pub(crate) change_monitors: HashMap<String, VaultChangeMonitor>,
     pub(crate) last_reconciled_generation: HashMap<String, u64>,
+    pub(crate) last_used: HashMap<String, Instant>,
+    pub(crate) resolved_runtimes: HashMap<String, ResolvedVaultPathArgs>,
+    pub(crate) result_bytes: usize,
+    pub(crate) command_result_sizes: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,8 @@ pub(crate) struct CachedCommandResult {
 pub(crate) enum RuntimeMode {
     OneShot,
     Daemon(Box<RuntimeCache>),
+    /// Per-request read-only connections, discarded together at request completion.
+    Snapshot(Box<RuntimeCache>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -37,12 +42,13 @@ pub(crate) struct CliRuntimeState {
     pub(crate) daemon_running: bool,
     pub(crate) change_monitor_initialized: bool,
     pub(crate) cached_connection: bool,
+    pub(crate) watcher_last_error: Option<String>,
 }
 
 pub(crate) fn runtime_cache_key(args: &ResolvedVaultPathArgs) -> String {
     format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
-        args.vault_root, args.data_dir, args.db_path, args.case_policy, args.read_only
+        "{}\u{1f}{}\u{1f}{}\u{1f}{:?}",
+        args.vault_root, args.data_dir, args.db_path, args.case_policy
     )
 }
 
@@ -51,13 +57,16 @@ pub(crate) fn with_connection<T>(
     args: &ResolvedVaultPathArgs,
     operation: impl FnOnce(&mut Connection) -> Result<T>,
 ) -> Result<T> {
-    match runtime {
+    check_request_deadline()?;
+    let result = match runtime {
         RuntimeMode::OneShot => {
             let mut connection = open_initialized_connection(args)?;
             operation(&mut connection)
         }
-        RuntimeMode::Daemon(cache) => {
+        RuntimeMode::Daemon(cache) | RuntimeMode::Snapshot(cache) => {
             let key = runtime_cache_key(args);
+            cache.last_used.insert(key.clone(), Instant::now());
+            cache.resolved_runtimes.insert(key.clone(), args.clone());
             if !cache.connections.contains_key(&key) {
                 let connection = open_initialized_connection(args)?;
                 cache.connections.insert(key.clone(), connection);
@@ -68,9 +77,13 @@ pub(crate) fn with_connection<T>(
                     args.db_path
                 )
             })?;
+            register_interrupt(connection.get_interrupt_handle());
+            connection.busy_timeout(request_remaining().min(Duration::from_secs(2)))?;
             operation(connection)
         }
-    }
+    };
+    check_request_deadline()?;
+    result
 }
 
 pub(crate) fn with_kernel<T>(
@@ -78,13 +91,16 @@ pub(crate) fn with_kernel<T>(
     args: &ResolvedVaultPathArgs,
     operation: impl FnOnce(&mut BridgeKernel) -> Result<T>,
 ) -> Result<T> {
-    match runtime {
+    check_request_deadline()?;
+    let result = match runtime {
         RuntimeMode::OneShot => {
             let mut kernel = open_bridge_kernel(args)?;
             operation(&mut kernel)
         }
-        RuntimeMode::Daemon(cache) => {
+        RuntimeMode::Daemon(cache) | RuntimeMode::Snapshot(cache) => {
             let key = runtime_cache_key(args);
+            cache.last_used.insert(key.clone(), Instant::now());
+            cache.resolved_runtimes.insert(key.clone(), args.clone());
             if !cache.kernels.contains_key(&key) {
                 let kernel = open_bridge_kernel(args)?;
                 cache.kernels.insert(key.clone(), kernel);
@@ -92,15 +108,21 @@ pub(crate) fn with_kernel<T>(
             let kernel = cache.kernels.get_mut(&key).ok_or_else(|| {
                 anyhow!("runtime cache missing bridge kernel for {}", args.db_path)
             })?;
+            register_interrupt(kernel.interrupt_handle());
             operation(kernel)
         }
-    }
+    };
+    check_request_deadline()?;
+    result
 }
 
 pub(crate) fn resolve_vault_paths(
     vault_root_override: Option<&str>,
     db_path_override: Option<&str>,
 ) -> Result<ResolvedVaultPathArgs> {
+    if let Some(resolved) = request_resolved_paths() {
+        return Ok(resolved);
+    }
     let config = SdkConfigLoader::load(SdkConfigOverrides {
         vault_root: vault_root_override.map(PathBuf::from),
         db_path: db_path_override.map(PathBuf::from),
@@ -115,14 +137,27 @@ pub(crate) fn resolve_vault_paths(
         data_dir: config.data_dir.to_string_lossy().to_string(),
         db_path: config.db_path.to_string_lossy().to_string(),
         case_policy: config.case_policy,
-        read_only: config.read_only,
     })
 }
 
 pub(crate) fn open_bridge_kernel(args: &ResolvedVaultPathArgs) -> Result<BridgeKernel> {
+    if request_is_observational() {
+        let kernel = BridgeKernel::open_read_only(
+            &args.vault_root,
+            &args.db_path,
+            args.case_policy,
+            request_remaining().min(Duration::from_secs(2)),
+        )
+        .map_err(|source| anyhow!("open read-only bridge kernel failed: {source}"))?;
+        register_interrupt(kernel.interrupt_handle());
+        return Ok(kernel);
+    }
     ensure_runtime_paths_for_args(args)?;
-    BridgeKernel::open_with_case_policy(&args.vault_root, &args.db_path, args.case_policy)
-        .map_err(|source| anyhow!("open bridge kernel failed: {source}"))
+    let kernel =
+        BridgeKernel::open_with_case_policy(&args.vault_root, &args.db_path, args.case_policy)
+            .map_err(|source| anyhow!("open bridge kernel failed: {source}"))?;
+    register_interrupt(kernel.interrupt_handle());
+    Ok(kernel)
 }
 
 pub(crate) fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str) -> Result<T> {
@@ -133,13 +168,14 @@ pub(crate) fn expect_bridge_value<T>(envelope: BridgeEnvelope<T>, command: &str)
     }
 
     match envelope.error {
-        Some(error) => {
-            let mut message = format!("{command} failed [{}]: {}", error.code, error.message);
-            if let Some(hint) = error.hint {
-                message.push_str(&format!("; hint: {hint}"));
-            }
-            Err(anyhow!(message))
+        Some(error) => Err(RemoteCliError {
+            exit_code: 1,
+            code: error.code,
+            message: format!("{command} failed: {}", error.message),
+            hint: error.hint,
+            details: Some(JsonValue::Object(*error.context)),
         }
+        .into()),
         None => Err(anyhow!("{command} failed without an error payload")),
     }
 }
@@ -165,6 +201,25 @@ pub(crate) fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Resul
         .into());
     }
 
+    if request_is_observational() {
+        let connection =
+            Connection::open_with_flags(&args.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
+                |source| {
+                    CliContractError::blocked_prerequisite(format!(
+                        "open existing sqlite database '{}': {source}",
+                        args.db_path
+                    ))
+                },
+            )?;
+        connection.busy_timeout(request_remaining().min(Duration::from_secs(2)))?;
+        register_interrupt(connection.get_interrupt_handle());
+        let preflight = preflight_migrations(&connection);
+        check_request_deadline()?;
+        preflight?;
+        connection.execute_batch("PRAGMA query_only = ON; BEGIN DEFERRED;")?;
+        register_interrupt(connection.get_interrupt_handle());
+        return Ok(connection);
+    }
     ensure_runtime_paths_for_args(args)?;
     let mut connection = Connection::open(&args.db_path).map_err(|source| {
         CliContractError::blocked_prerequisite(format!(
@@ -172,9 +227,15 @@ pub(crate) fn open_initialized_connection(args: &ResolvedVaultPathArgs) -> Resul
             args.db_path
         ))
     })?;
-    run_migrations(&mut connection).map_err(|source| {
+    connection.busy_timeout(request_remaining().min(Duration::from_secs(2)))?;
+    register_interrupt(connection.get_interrupt_handle());
+    let migration = run_migrations(&mut connection);
+    check_request_deadline()?;
+    migration.map_err(|source| {
         CliContractError::blocked_prerequisite(format!("run migrations failed: {source}"))
     })?;
+    connection.busy_timeout(request_remaining().min(Duration::from_secs(2)))?;
+    register_interrupt(connection.get_interrupt_handle());
     Ok(connection)
 }
 
@@ -184,9 +245,6 @@ pub(crate) fn ensure_runtime_paths_for_args(args: &ResolvedVaultPathArgs) -> Res
         data_dir: PathBuf::from(&args.data_dir),
         db_path: PathBuf::from(&args.db_path),
         case_policy: args.case_policy,
-        tracing_enabled: true,
-        feature_flags: Vec::new(),
-        read_only: args.read_only,
     })
     .map_err(|source| {
         CliContractError::blocked_prerequisite(format!("prepare runtime paths failed: {source}"))

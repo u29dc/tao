@@ -22,28 +22,6 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 }),
             })
         }
-        VaultCommands::Stats(args) => {
-            let resolved = args.resolve()?;
-            let (snapshot, runtime_state) =
-                super::health::load_cli_health_snapshot(&resolved, runtime, false)
-                    .map_err(|source| anyhow!("vault stats failed: {source}"))?;
-            Ok(CommandResult {
-                command: "vault.stats".to_string(),
-                summary: "vault stats completed".to_string(),
-                args: serde_json::json!({
-                    "vault_root": snapshot.vault_root,
-                    "files_total": snapshot.files_total,
-                    "markdown_files": snapshot.markdown_files,
-                    "db_healthy": snapshot.db_healthy,
-                    "db_migrations": snapshot.db_migrations,
-                    "index_lag": snapshot.index_lag,
-                    "scan_mode": "cached",
-                    "watcher_status": snapshot.watcher_status,
-                    "last_index_updated_at": snapshot.last_index_updated_at,
-                    "runtime": runtime_state,
-                }),
-            })
-        }
         VaultCommands::Preflight(args) => {
             let resolved = args.resolve()?;
             let vault_root = Path::new(&resolved.vault_root);
@@ -62,7 +40,13 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 .into());
             }
 
-            let connection = Connection::open(&resolved.db_path).map_err(|source| {
+            let database_exists = Path::new(&resolved.db_path).exists();
+            let connection = if database_exists {
+                Connection::open_with_flags(&resolved.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            } else {
+                Connection::open_in_memory()
+            }
+            .map_err(|source| {
                 CliContractError::blocked_prerequisite(format!(
                     "open sqlite database '{}': {source}",
                     resolved.db_path
@@ -74,6 +58,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 command: "vault.preflight".to_string(),
                 summary: "vault preflight completed".to_string(),
                 args: serde_json::json!({
+                    "database_exists": database_exists,
                     "migrations_table_exists": report.migrations_table_exists,
                     "known_migrations": report.known_migrations,
                     "applied_migrations": report.applied_migrations,
@@ -82,6 +67,12 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
             })
         }
         VaultCommands::Reindex(args) => {
+            if args.dry_run && args.wait_content_ms != 0 {
+                return Err(CliContractError::invalid_argument(
+                    "--wait-content-ms cannot be combined with --dry-run",
+                )
+                .into());
+            }
             let resolved = args.resolve()?;
             if args.dry_run {
                 let connection = Connection::open_with_flags(
@@ -114,7 +105,7 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                         "reason": refresh.rebuild_reason.map(|reason| reason.to_string()),
                         "dry_run": true,
                         "scan_mode": "content_hash",
-                        "would_write": true,
+                        "would_write": refresh.rebuild_reason.is_some() || refresh.drift_paths > 0 || refresh.would_rebuild_search_index,
                         "indexed_files": totals.indexed_files,
                         "markdown_files": totals.markdown_files,
                         "links_total": totals.links_total,
@@ -146,6 +137,8 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                 totals,
                 search_segments_rebuilt,
                 search_corpus_refresh,
+                content,
+                content_complete,
             ) = with_connection(runtime, &resolved, |connection| {
                 let outcome = IndexRefreshService
                     .refresh(
@@ -158,6 +151,21 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                         },
                     )
                     .map_err(|source| anyhow!("vault reindex failed: {source}"))?;
+                let spool_root = tao_sdk_service::content_spool_root(
+                    connection,
+                    Path::new(&resolved.vault_root),
+                );
+                let content = tao_sdk_service::ContentIndexService
+                    .process_pending_cancellable(
+                        connection,
+                        Path::new(&resolved.vault_root),
+                        &spool_root,
+                        std::time::Duration::from_millis(args.wait_content_ms)
+                            .min(request_remaining()),
+                        resolved.case_policy,
+                        &request_cancellation_flag(),
+                    )
+                    .map_err(|source| anyhow!("content extraction failed: {source}"))?;
                 let totals = query_index_totals(connection)
                     .map_err(|source| anyhow!("vault reindex total query failed: {source}"))?;
                 let mode = if matches!(outcome.mode, IndexRefreshMode::FullRebuild) {
@@ -175,6 +183,12 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     totals,
                     outcome.search_segments_rebuilt,
                     outcome.search_corpus_refresh.as_str(),
+                    content,
+                    tao_sdk_storage::ContentRepository::coverage_stats(connection)?
+                        .iter()
+                        .all(|(coverage, _)| {
+                            matches!(coverage.as_str(), "complete" | "unsupported")
+                        }),
                 ))
             })?;
             Ok(CommandResult {
@@ -192,6 +206,9 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     "bases_total": totals.bases_total,
                     "search_segments_total": totals.search_segments_total,
                     "search_aliases_total": totals.search_aliases_total,
+                    "content": content,
+                    "index_complete": true,
+                    "content_complete": content_complete && content.queued == 0 && content.running == 0 && content.failed == 0,
                     "search_index_stale": false,
                     "would_rebuild_search_index": false,
                     "search_segments_rebuilt": search_segments_rebuilt,
@@ -200,34 +217,6 @@ pub(crate) fn handle(command: VaultCommands, runtime: &mut RuntimeMode) -> Resul
                     "batches_applied": batches_applied,
                     "upserted_files": upserted_files,
                     "removed_files": removed_files,
-                }),
-            })
-        }
-        VaultCommands::Reconcile(args) => {
-            let resolved = args.resolve()?;
-            let result = with_connection(runtime, &resolved, |connection| {
-                WatchReconcileService::default()
-                    .reconcile_once(
-                        Path::new(&resolved.vault_root),
-                        connection,
-                        resolved.case_policy,
-                    )
-                    .map_err(|source| anyhow!("vault reconcile failed: {source}"))
-            })?;
-            Ok(CommandResult {
-                command: "vault.reconcile".to_string(),
-                summary: "vault reconcile completed".to_string(),
-                args: serde_json::json!({
-                    "scanned_files": result.scanned_files,
-                    "inserted_paths": result.inserted_paths,
-                    "updated_paths": result.updated_paths,
-                    "removed_files": result.removed_files,
-                    "drift_paths": result.drift_paths,
-                    "batches_applied": result.batches_applied,
-                    "upserted_files": result.upserted_files,
-                    "links_reindexed": result.links_reindexed,
-                    "properties_reindexed": result.properties_reindexed,
-                    "bases_reindexed": result.bases_reindexed,
                 }),
             })
         }

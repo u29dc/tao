@@ -29,34 +29,31 @@ pub struct ReconciliationScanResult {
     pub search_corpus_refresh: SearchCorpusRefreshMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReconciliationDrift {
-    scanned_files: u64,
-    inserted_changed_paths: Vec<PathBuf>,
-    updated_changed_paths: Vec<PathBuf>,
-    removed_changed_paths: Vec<PathBuf>,
-    inserted_paths: u64,
-    updated_paths: u64,
-    removed_paths: u64,
+/// An authoritative inventory operation. Removal is independent of physical existence.
+#[derive(Debug, Clone)]
+pub(crate) enum IndexChange {
+    Upsert {
+        entry: Box<VaultManifestEntry>,
+        captured: Option<CapturedFile>,
+    },
+    Remove {
+        normalized_path: String,
+    },
 }
 
-impl ReconciliationDrift {
-    fn drift_paths(&self) -> u64 {
-        (self.inserted_changed_paths.len()
-            + self.updated_changed_paths.len()
-            + self.removed_changed_paths.len()) as u64
-    }
+#[derive(Debug)]
+pub(crate) struct ReconciliationPlan {
+    pub(crate) scanned_files: u64,
+    pub(crate) generation: i64,
+    pub(crate) changes: Vec<IndexChange>,
+    pub(crate) inserted_paths: u64,
+    pub(crate) updated_paths: u64,
+    pub(crate) removed_paths: u64,
+}
 
-    fn into_changed_paths(self) -> Vec<PathBuf> {
-        let mut changed_paths = Vec::with_capacity(
-            self.inserted_changed_paths.len()
-                + self.updated_changed_paths.len()
-                + self.removed_changed_paths.len(),
-        );
-        changed_paths.extend(self.inserted_changed_paths);
-        changed_paths.extend(self.updated_changed_paths);
-        changed_paths.extend(self.removed_changed_paths);
-        changed_paths
+impl ReconciliationPlan {
+    pub(crate) fn drift_paths(&self) -> u64 {
+        self.changes.len() as u64
     }
 }
 
@@ -65,7 +62,7 @@ impl ReconciliationDrift {
 pub enum ReconciliationScanMode {
     /// Compare file identity, path, size, and modified time only.
     MetadataOnly,
-    /// Also verify persisted content hashes for indexed markdown and base files.
+    /// Also verify persisted hashes for supported Markdown, Base, TXT and PDF content.
     VerifyContentHashes,
 }
 
@@ -105,7 +102,7 @@ impl ReconciliationScannerService {
         case_policy: CasePolicy,
         scan_mode: ReconciliationScanMode,
     ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
-        let drift = collect_reconciliation_drift(vault_root, connection, case_policy, scan_mode)?;
+        let drift = self.plan(vault_root, connection, case_policy, scan_mode)?;
 
         Ok(ReconciliationScanResult {
             scanned_files: drift.scanned_files,
@@ -149,11 +146,17 @@ impl ReconciliationScannerService {
         max_batch_size: usize,
         scan_mode: ReconciliationScanMode,
     ) -> Result<ReconciliationScanResult, ReconciliationScanError> {
+        let _publication =
+            crate::publication_lock::PublicationGuard::acquire(connection).map_err(|source| {
+                ReconciliationScanError::Content {
+                    source: Box::new(crate::ContentError::Io(source)),
+                }
+            })?;
         if max_batch_size == 0 {
             return Err(ReconciliationScanError::InvalidBatchSize { value: 0 });
         }
 
-        let drift = collect_reconciliation_drift(vault_root, connection, case_policy, scan_mode)?;
+        let drift = self.plan(vault_root, connection, case_policy, scan_mode)?;
         let drift_paths = drift.drift_paths();
         let scanned_files = drift.scanned_files;
         let inserted_paths = drift.inserted_paths;
@@ -177,13 +180,13 @@ impl ReconciliationScannerService {
             });
         }
 
-        let changed_paths = drift.into_changed_paths();
         let batch_result = self
             .coalesced
-            .apply_coalesced(
+            .apply_plan(
                 vault_root,
                 connection,
-                &changed_paths,
+                drift.changes,
+                Some(drift.generation),
                 max_batch_size,
                 case_policy,
             )
@@ -208,121 +211,134 @@ impl ReconciliationScannerService {
     }
 }
 
-fn collect_reconciliation_drift(
-    vault_root: &Path,
-    connection: &Connection,
-    case_policy: CasePolicy,
-    scan_mode: ReconciliationScanMode,
-) -> Result<ReconciliationDrift, ReconciliationScanError> {
-    let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
-        ReconciliationScanError::CreateScanner {
-            source: Box::new(source),
-        }
-    })?;
-    let manifest = scanner
-        .scan()
-        .map_err(|source| ReconciliationScanError::Scan {
-            source: Box::new(source),
+impl ReconciliationScannerService {
+    pub(crate) fn plan(
+        &self,
+        vault_root: &Path,
+        connection: &Connection,
+        case_policy: CasePolicy,
+        scan_mode: ReconciliationScanMode,
+    ) -> Result<ReconciliationPlan, ReconciliationScanError> {
+        let generation = tao_sdk_storage::IndexGenerationRepository::get(connection)
+            .map_err(|source| ReconciliationScanError::Content {
+                source: Box::new(crate::ContentError::Storage(source)),
+            })?
+            .canonical_generation;
+        let scanner = VaultScanService::from_root(vault_root, case_policy).map_err(|source| {
+            ReconciliationScanError::CreateScanner {
+                source: Box::new(source),
+            }
         })?;
-
-    let existing = FilesRepository::list_reconcile(connection).map_err(|source| {
-        ReconciliationScanError::ListIndexedFiles {
-            source: Box::new(source),
-        }
-    })?;
-
-    let mut inserted_changed_paths = Vec::new();
-    let mut updated_changed_paths = Vec::new();
-    let mut removed_changed_paths = Vec::new();
-    let mut inserted_paths = 0_u64;
-    let mut updated_paths = 0_u64;
-    let mut removed_paths = 0_u64;
-    let mut scan_index = 0_usize;
-    let mut existing_index = 0_usize;
-
-    while scan_index < manifest.entries.len() && existing_index < existing.len() {
-        let scanned = &manifest.entries[scan_index];
-        let indexed = &existing[existing_index];
-        let order = scanned
-            .match_key
-            .cmp(&indexed.match_key)
-            .then(scanned.normalized.cmp(&indexed.normalized_path));
-
-        match order {
-            std::cmp::Ordering::Less => {
-                inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
-                inserted_paths += 1;
-                scan_index += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
-                removed_paths += 1;
-                existing_index += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                if !indexed_record_matches_manifest_entry(indexed, scanned, scan_mode)? {
-                    updated_changed_paths.push(PathBuf::from(&scanned.normalized));
-                    updated_paths += 1;
+        let manifest = scanner
+            .scan()
+            .map_err(|source| ReconciliationScanError::Scan {
+                source: Box::new(source),
+            })?;
+        let fingerprints =
+            FileFingerprintService::from_root(vault_root, case_policy).map_err(|source| {
+                ReconciliationScanError::CreateScanner {
+                    source: Box::new(source),
                 }
-                scan_index += 1;
-                existing_index += 1;
+            })?;
+        let existing = FilesRepository::list_all(connection).map_err(|source| {
+            ReconciliationScanError::ListIndexedFiles {
+                source: Box::new(source),
+            }
+        })?;
+        let mut existing = existing
+            .into_iter()
+            .map(|record| (record.normalized_path.clone(), record))
+            .collect::<HashMap<_, _>>();
+        let mut plan = ReconciliationPlan {
+            generation,
+            scanned_files: manifest.entries.len() as u64,
+            changes: Vec::new(),
+            inserted_paths: 0,
+            updated_paths: 0,
+            removed_paths: 0,
+        };
+        let mut retained_capture_bytes = 0_usize;
+        // Deferred PDF capture belongs to the resumable worker queue. Re-reading
+        // unchanged sources here just competes for the same bounded spool space.
+        let deferred = connection
+            .prepare("SELECT file_id FROM content_documents WHERE format='pdf' AND availability='deferred'")
+            .and_then(|mut statement| statement.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<std::collections::HashSet<_>>>())
+            .map_err(|source| ReconciliationScanError::Content { source: Box::new(crate::ContentError::Storage(source)) })?;
+        for entry in manifest.entries {
+            let Some(indexed) = existing.remove(&entry.normalized) else {
+                plan.inserted_paths += 1;
+                plan.changes.push(IndexChange::Upsert {
+                    entry: Box::new(entry),
+                    captured: None,
+                });
+                continue;
+            };
+            let kind = file_kind(&entry.relative);
+            let content_bearing = matches!(
+                kind,
+                FileKind::Markdown | FileKind::Base | FileKind::PlainText | FileKind::Pdf
+            );
+            let mut changed = indexed.match_key != entry.match_key
+                || entry.absolute.to_str() != Some(indexed.absolute_path.as_str())
+                || indexed.size_bytes != entry.size_bytes
+                || indexed.modified_unix_ms != entry.modified_unix_ms
+                || indexed.is_markdown != (kind == FileKind::Markdown)
+                || (!content_bearing && !indexed.hash_blake3.is_empty());
+            if matches!(kind, FileKind::PlainText | FileKind::Pdf) {
+                changed |= crate::ContentIndexService
+                    .needs_refresh(connection, &indexed.file_id, &entry.normalized)
+                    .map_err(|source| ReconciliationScanError::Content {
+                        source: Box::new(source),
+                    })?;
+            }
+            let capture_limit = if kind == FileKind::Pdf {
+                64 * 1024 * 1024
+            } else {
+                32 * 1024 * 1024
+            };
+            let captured = if content_bearing
+                && entry.size_bytes <= capture_limit
+                && scan_mode.verifies_content_hashes()
+                && (changed || !deferred.contains(&indexed.file_id))
+            {
+                match fingerprints.capture_with_limit(&entry.absolute, capture_limit) {
+                    Ok(capture) => {
+                        changed |= capture.fingerprint.hash_blake3 != indexed.hash_blake3;
+                        Some(capture)
+                    }
+                    // The apply stage records a precise per-file diagnostic without discarding
+                    // unrelated healthy revisions. Failed capture is never evidence of removal.
+                    Err(_) => {
+                        changed = true;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if changed {
+                plan.updated_paths += 1;
+                let captured = captured.filter(|capture| {
+                    if retained_capture_bytes.saturating_add(capture.bytes.capacity())
+                        > 64 * 1024 * 1024
+                    {
+                        return false;
+                    }
+                    retained_capture_bytes += capture.bytes.capacity();
+                    true
+                });
+                plan.changes.push(IndexChange::Upsert {
+                    entry: Box::new(entry),
+                    captured,
+                });
             }
         }
+        let mut removed = existing.into_keys().collect::<Vec<_>>();
+        removed.sort();
+        for normalized_path in removed {
+            plan.removed_paths += 1;
+            plan.changes.push(IndexChange::Remove { normalized_path });
+        }
+        Ok(plan)
     }
-
-    for scanned in &manifest.entries[scan_index..] {
-        inserted_changed_paths.push(PathBuf::from(&scanned.normalized));
-        inserted_paths += 1;
-    }
-
-    for indexed in &existing[existing_index..] {
-        removed_changed_paths.push(PathBuf::from(&indexed.normalized_path));
-        removed_paths += 1;
-    }
-
-    Ok(ReconciliationDrift {
-        scanned_files: manifest.entries.len() as u64,
-        inserted_changed_paths,
-        updated_changed_paths,
-        removed_changed_paths,
-        inserted_paths,
-        updated_paths,
-        removed_paths,
-    })
-}
-
-fn indexed_record_matches_manifest_entry(
-    indexed: &tao_sdk_storage::FileReconcileRecord,
-    entry: &tao_sdk_vault::VaultManifestEntry,
-    scan_mode: ReconciliationScanMode,
-) -> Result<bool, ReconciliationScanError> {
-    let metadata_matches = indexed.normalized_path == entry.normalized
-        && indexed.match_key == entry.match_key
-        && entry
-            .absolute
-            .to_str()
-            .is_some_and(|absolute| indexed.absolute_path == absolute)
-        && indexed.size_bytes == entry.size_bytes
-        && indexed.modified_unix_ms == entry.modified_unix_ms;
-
-    if !metadata_matches {
-        return Ok(false);
-    }
-    if !scan_mode.verifies_content_hashes() || !should_verify_content_hash(indexed, entry) {
-        return Ok(true);
-    }
-
-    let current_hash =
-        hash_file_blake3(&entry.absolute).map_err(|source| ReconciliationScanError::HashFile {
-            path: entry.absolute.clone(),
-            source,
-        })?;
-    Ok(current_hash == indexed.hash_blake3)
-}
-
-fn should_verify_content_hash(
-    indexed: &tao_sdk_storage::FileReconcileRecord,
-    entry: &tao_sdk_vault::VaultManifestEntry,
-) -> bool {
-    indexed.is_markdown || entry.normalized.to_ascii_lowercase().ends_with(".base")
 }

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use serde_json::Value as JsonValue;
 
 use crate::ast::{BaseFilterOp, BaseNullOrder};
+pub use tao_sdk_core::{compare_json_values, compare_predicate_values, json_values_equal};
 
 /// Evaluator failures for typed comparator/filter execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,21 +20,37 @@ pub fn evaluate_filter(
     op: BaseFilterOp,
     filter_value: &JsonValue,
 ) -> Result<bool, BaseEvalError> {
+    validate_filter_operand(op, filter_value)?;
+    if matches!(
+        op,
+        BaseFilterOp::Gt | BaseFilterOp::Gte | BaseFilterOp::Lt | BaseFilterOp::Lte
+    ) && !filter_value.is_null()
+        && row_value.is_some_and(|value| {
+            !value.is_null() && compare_predicate_values(value, filter_value).is_none()
+        })
+    {
+        return Err(BaseEvalError::TypeMismatch {
+            op,
+            expected: "matching scalar operand types",
+        });
+    }
     let matched = match op {
-        BaseFilterOp::Eq => row_value.is_some_and(|value| value == filter_value),
-        BaseFilterOp::NotEq => row_value.is_none_or(|value| value != filter_value),
-        BaseFilterOp::Gt => {
-            row_value.is_some_and(|value| compare_json_values(value, filter_value).is_gt())
+        BaseFilterOp::Eq => row_value.is_some_and(|value| json_values_equal(value, filter_value)),
+        BaseFilterOp::NotEq => {
+            row_value.is_none_or(|value| !json_values_equal(value, filter_value))
         }
-        BaseFilterOp::Gte => {
-            row_value.is_some_and(|value| compare_json_values(value, filter_value).is_ge())
-        }
-        BaseFilterOp::Lt => {
-            row_value.is_some_and(|value| compare_json_values(value, filter_value).is_lt())
-        }
-        BaseFilterOp::Lte => {
-            row_value.is_some_and(|value| compare_json_values(value, filter_value).is_le())
-        }
+        BaseFilterOp::Gt => row_value
+            .and_then(|value| compare_predicate_values(value, filter_value))
+            .is_some_and(|order| order.is_gt()),
+        BaseFilterOp::Gte => row_value
+            .and_then(|value| compare_predicate_values(value, filter_value))
+            .is_some_and(|order| order.is_ge()),
+        BaseFilterOp::Lt => row_value
+            .and_then(|value| compare_predicate_values(value, filter_value))
+            .is_some_and(|order| order.is_lt()),
+        BaseFilterOp::Lte => row_value
+            .and_then(|value| compare_predicate_values(value, filter_value))
+            .is_some_and(|order| order.is_le()),
         BaseFilterOp::Contains => {
             row_value.is_some_and(|value| value_contains(value, filter_value))
         }
@@ -42,6 +59,16 @@ pub fn evaluate_filter(
         }
         BaseFilterOp::NotIn => {
             row_value.is_none_or(|value| !filter_contains_value(filter_value, value))
+        }
+        BaseFilterOp::IsEmpty => {
+            let empty = row_value.is_none_or(|value| match value {
+                JsonValue::Null => true,
+                JsonValue::String(value) => value.is_empty(),
+                JsonValue::Array(value) => value.is_empty(),
+                JsonValue::Object(value) => value.is_empty(),
+                _ => false,
+            });
+            empty == filter_value.as_bool().unwrap_or(true)
         }
         BaseFilterOp::Exists => {
             let expected_exists = filter_value.as_bool().unwrap_or(true);
@@ -70,17 +97,6 @@ pub fn evaluate_filter(
             }),
     };
 
-    if matches!(
-        op,
-        BaseFilterOp::StartsWith | BaseFilterOp::NotStartsWith | BaseFilterOp::EndsWith
-    ) && json_scalar_to_string(filter_value).is_none()
-    {
-        return Err(BaseEvalError::TypeMismatch {
-            op,
-            expected: "scalar filter value",
-        });
-    }
-
     Ok(matched)
 }
 
@@ -106,27 +122,31 @@ pub fn compare_optional_json_values(
     }
 }
 
-/// Compare two json values with deterministic type ranking.
-pub fn compare_json_values(left: &JsonValue, right: &JsonValue) -> Ordering {
-    let left_rank = json_type_rank(left);
-    let right_rank = json_type_rank(right);
-    if left_rank != right_rank {
-        return left_rank.cmp(&right_rank);
-    }
-
-    match (left, right) {
-        (JsonValue::Null, JsonValue::Null) => Ordering::Equal,
-        (JsonValue::Bool(left), JsonValue::Bool(right)) => left.cmp(right),
-        (JsonValue::Number(left), JsonValue::Number(right)) => {
-            let left = left.as_f64().unwrap_or(0.0);
-            let right = right.as_f64().unwrap_or(0.0);
-            left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+/// Validate the operand once before evaluating a query against rows.
+pub fn validate_filter_operand(op: BaseFilterOp, value: &JsonValue) -> Result<(), BaseEvalError> {
+    let expected = match op {
+        BaseFilterOp::In | BaseFilterOp::NotIn if !value.is_array() => Some("array filter value"),
+        BaseFilterOp::Exists | BaseFilterOp::IsEmpty if !value.is_boolean() => {
+            Some("boolean filter value")
         }
-        (JsonValue::String(left), JsonValue::String(right)) => left.cmp(right),
-        (JsonValue::Array(left), JsonValue::Array(right)) => left.len().cmp(&right.len()),
-        (JsonValue::Object(left), JsonValue::Object(right)) => left.len().cmp(&right.len()),
-        _ => left.to_string().cmp(&right.to_string()),
-    }
+        BaseFilterOp::Gt | BaseFilterOp::Gte | BaseFilterOp::Lt | BaseFilterOp::Lte
+            if !value.is_null() && json_scalar_to_string(value).is_none() =>
+        {
+            Some("scalar or null filter value")
+        }
+        BaseFilterOp::StartsWith
+        | BaseFilterOp::NotStartsWith
+        | BaseFilterOp::EndsWith
+        | BaseFilterOp::Contains
+            if json_scalar_to_string(value).is_none() =>
+        {
+            Some("non-null scalar filter value")
+        }
+        _ => None,
+    };
+    expected.map_or(Ok(()), |expected| {
+        Err(BaseEvalError::TypeMismatch { op, expected })
+    })
 }
 
 /// Return deterministic scalar string representation for comparisons.
@@ -158,19 +178,10 @@ fn value_contains(value: &JsonValue, filter_value: &JsonValue) -> bool {
 
 fn filter_contains_value(filter_value: &JsonValue, row_value: &JsonValue) -> bool {
     match filter_value {
-        JsonValue::Array(values) => values.iter().any(|value| value == row_value),
+        JsonValue::Array(values) => values
+            .iter()
+            .any(|value| json_values_equal(value, row_value)),
         _ => false,
-    }
-}
-
-fn json_type_rank(value: &JsonValue) -> u8 {
-    match value {
-        JsonValue::Null => 0,
-        JsonValue::Bool(_) => 1,
-        JsonValue::Number(_) => 2,
-        JsonValue::String(_) => 3,
-        JsonValue::Array(_) => 4,
-        JsonValue::Object(_) => 5,
     }
 }
 
@@ -227,5 +238,40 @@ mod tests {
             compare_optional_json_values(None, Some(&json!(1)), BaseNullOrder::Last),
             std::cmp::Ordering::Greater
         );
+    }
+}
+
+#[cfg(test)]
+mod semantic_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn real_ingestion_number_representations_match_equality_and_membership() {
+        assert!(evaluate_filter(Some(&json!(1.0)), BaseFilterOp::Eq, &json!(1)).unwrap());
+        assert!(evaluate_filter(Some(&json!(1.0)), BaseFilterOp::In, &json!([1])).unwrap());
+        assert!(!evaluate_filter(Some(&json!(1.0)), BaseFilterOp::NotEq, &json!(1)).unwrap());
+    }
+
+    #[test]
+    fn empty_missing_null_and_invalid_comparisons_are_explicit() {
+        for value in [
+            None,
+            Some(json!(null)),
+            Some(json!("")),
+            Some(json!([])),
+            Some(json!({})),
+        ] {
+            assert!(evaluate_filter(value.as_ref(), BaseFilterOp::IsEmpty, &json!(true)).unwrap());
+        }
+        for value in [json!(false), json!(0), json!(" "), json!([null])] {
+            assert!(!evaluate_filter(Some(&value), BaseFilterOp::IsEmpty, &json!(true)).unwrap());
+        }
+        assert!(!evaluate_filter(Some(&json!(null)), BaseFilterOp::Lt, &json!(1)).unwrap());
+        assert!(!evaluate_filter(None, BaseFilterOp::Lt, &json!(1)).unwrap());
+        assert!(!evaluate_filter(Some(&json!(1)), BaseFilterOp::Lt, &json!(null)).unwrap());
+        assert!(evaluate_filter(Some(&json!("")), BaseFilterOp::Gt, &json!(1)).is_err());
+        assert!(evaluate_filter(None, BaseFilterOp::In, &json!(1)).is_err());
+        assert!(evaluate_filter(None, BaseFilterOp::Exists, &json!("yes")).is_err());
     }
 }

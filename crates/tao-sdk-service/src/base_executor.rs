@@ -1,23 +1,22 @@
-//! Base table execution, validation, persistence, and caching services.
+//! Base table execution, validation, and persistence services.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 
 use rayon::prelude::*;
 use rusqlite::Connection;
-use rusqlite::params_from_iter;
-use rusqlite::types::Value as SqlValue;
 use serde_json::Value as JsonValue;
 use tao_sdk_bases::{
     BaseAggregateOp, BaseAggregateSpec, BaseCoercionMode, BaseColumnConfig, BaseDiagnostic,
-    BaseDocument, BaseFieldType, BaseFilterClause, BaseRelationSpec, BaseRollupOp, BaseRollupSpec,
+    BaseFieldType, BaseFilterClause, BaseRelationSpec, BaseRollupOp, BaseRollupSpec,
     BaseSortClause, BaseSortDirection, TableQueryPlan, coerce_json_value, compare_json_values,
     compare_optional_json_values, evaluate_filter, validate_base_config_json,
 };
 use tao_sdk_core::{note_extension_from_path, note_folder_from_path, note_title_from_path};
-use tao_sdk_links::{LinkCasePolicy, resolve_target_with_case_policy};
-use tao_sdk_storage::{BaseRecordInput, BasesRepository, FilesRepository};
+use tao_sdk_links::{LinkCasePolicy, LinkResolutionIndex, LinkTarget, parse_link_target};
+use tao_sdk_markdown::LinkSyntax;
+use tao_sdk_storage::{BasesRepository, FilesRepository};
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
@@ -101,6 +100,13 @@ pub struct BaseTablePage {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BaseTableExecutorService;
 
+/// Reusable preparation scoped to one unchanged database snapshot. Corpus
+/// builders discard this context before their next index generation.
+#[derive(Debug, Default)]
+pub(crate) struct BaseTableExecutionContext {
+    relation_targets: Option<(CasePolicy, RelationTargetLookup)>,
+}
+
 /// Execution options for base table query plans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseTableExecutionOptions {
@@ -132,6 +138,35 @@ impl BaseTableExecutorService {
         self.execute_with_options(connection, plan, BaseTableExecutionOptions::default())
     }
 
+    /// Materialize a view once, without repeatedly evaluating it for each page.
+    /// Used by corpus derivation, whose output needs every matching row.
+    pub fn execute_all_with_options(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+        options: BaseTableExecutionOptions,
+    ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        self.execute_all_with_context(
+            connection,
+            plan,
+            options,
+            &mut BaseTableExecutionContext::default(),
+        )
+    }
+
+    pub(crate) fn execute_all_with_context(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+        options: BaseTableExecutionOptions,
+        context: &mut BaseTableExecutionContext,
+    ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        let mut complete_plan = plan.clone();
+        complete_plan.offset = 0;
+        complete_plan.limit = usize::MAX;
+        self.execute_with_context(connection, &complete_plan, options, context)
+    }
+
     /// Execute one compiled table query plan with explicit execution options.
     pub fn execute_with_options(
         &self,
@@ -139,7 +174,33 @@ impl BaseTableExecutorService {
         plan: &TableQueryPlan,
         options: BaseTableExecutionOptions,
     ) -> Result<BaseTablePage, BaseTableExecutorError> {
+        self.execute_with_context(
+            connection,
+            plan,
+            options,
+            &mut BaseTableExecutionContext::default(),
+        )
+    }
+
+    fn execute_with_context(
+        &self,
+        connection: &Connection,
+        plan: &TableQueryPlan,
+        options: BaseTableExecutionOptions,
+        context: &mut BaseTableExecutionContext,
+    ) -> Result<BaseTablePage, BaseTableExecutorError> {
         const PARALLEL_CANDIDATE_THRESHOLD: usize = 1_024;
+        // The measured rows and the hydrated rows must belong to the same snapshot.
+        let _snapshot = if connection.is_autocommit() {
+            Some(connection.unchecked_transaction().map_err(|source| {
+                BaseTableExecutorError::Sql {
+                    operation: "begin_base_read_snapshot",
+                    source,
+                }
+            })?)
+        } else {
+            None
+        };
 
         if plan.limit == 0 {
             return Err(BaseTableExecutorError::InvalidPlan {
@@ -147,108 +208,81 @@ impl BaseTableExecutorService {
             });
         }
 
-        let mut candidates = load_table_candidates(connection, plan.source_prefix.as_deref())?;
+        for filter in &plan.filters {
+            tao_sdk_bases::validate_filter_operand(filter.op, &filter.value).map_err(|error| {
+                BaseTableExecutorError::InvalidPlan {
+                    reason: format!("invalid filter '{}': {error:?}", filter.key),
+                }
+            })?;
+        }
+        if let Some(page) = execute_simple_sql_page(connection, plan, options)? {
+            return Ok(page);
+        }
+        let mut candidates = load_table_candidates(
+            connection,
+            plan.source_prefix.as_deref(),
+            options.case_policy,
+        )?;
+        budget::check_cells(
+            if options.include_summaries || !plan.group_by.is_empty() || !plan.aggregates.is_empty()
+            {
+                candidates.len()
+            } else {
+                candidates.len().min(plan.limit)
+            },
+            plan.columns
+                .len()
+                .max(plan.group_by.len().saturating_add(plan.aggregates.len())),
+        )?;
         let candidate_indices = candidates
             .iter()
             .enumerate()
             .map(|(index, row)| (row.file_id.clone(), index))
             .collect::<HashMap<_, _>>();
 
-        if !plan.required_property_keys.is_empty() {
-            let key_placeholders = (1..=plan.required_property_keys.len())
-                .map(|index| format!("?{index}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let source_param = plan.required_property_keys.len() + 1;
-            let like_param = source_param + 1;
-            let query = format!(
-                r#"
-SELECT
-  p.file_id,
-  p.key,
-  p.value_type,
-  p.value_json
-FROM properties p
-INNER JOIN files f ON f.file_id = p.file_id
-WHERE f.is_markdown = 1
-  AND p.key IN ({key_placeholders})
-  AND (
-    ?{source_param} IS NULL
-    OR f.normalized_path = ?{source_param}
-    OR f.normalized_path LIKE ?{like_param}
-  )
-ORDER BY p.file_id ASC, p.key ASC
-"#
-            );
-            let mut parameters = plan
-                .required_property_keys
-                .iter()
-                .map(|key| SqlValue::Text(key.clone()))
-                .collect::<Vec<_>>();
-            if let Some(source_prefix) = plan.source_prefix.as_ref() {
-                parameters.push(SqlValue::Text(source_prefix.clone()));
-                parameters.push(SqlValue::Text(format!("{source_prefix}/%")));
-            } else {
-                parameters.push(SqlValue::Null);
-                parameters.push(SqlValue::Null);
-            }
+        load_candidate_properties(
+            connection,
+            &mut candidates,
+            &candidate_indices,
+            &plan.required_property_keys,
+            options.coercion_mode,
+        )?;
 
-            let mut statement =
-                connection
-                    .prepare(&query)
-                    .map_err(|source| BaseTableExecutorError::Sql {
-                        operation: "prepare_property_projection",
-                        source,
-                    })?;
-            let rows = statement
-                .query_map(params_from_iter(parameters), |row| {
-                    Ok((
-                        row.get::<_, String>("file_id")?,
-                        row.get::<_, String>("key")?,
-                        row.get::<_, String>("value_type")?,
-                        row.get::<_, String>("value_json")?,
-                    ))
-                })
-                .map_err(|source| BaseTableExecutorError::Sql {
-                    operation: "query_property_projection",
-                    source,
-                })?;
-            for row in rows {
-                let (file_id, key, value_type, value_json) =
-                    row.map_err(|source| BaseTableExecutorError::Sql {
-                        operation: "map_property_projection_row",
-                        source,
-                    })?;
-                let Some(candidate_index) = candidate_indices.get(&file_id).copied() else {
-                    continue;
-                };
-                let value = serde_json::from_str::<JsonValue>(&value_json).map_err(|source| {
-                    BaseTableExecutorError::ParsePropertyValue {
-                        file_id: file_id.clone(),
-                        key: key.clone(),
-                        source,
-                    }
-                })?;
-                let value =
-                    coerce_json_value(&value, map_field_type(&value_type), options.coercion_mode)
-                        .map_err(|source| BaseTableExecutorError::Coercion {
-                        file_id: file_id.clone(),
-                        key: key.clone(),
-                        source: Box::new(source),
-                    })?;
-                candidates[candidate_index].properties.insert(key, value);
-            }
-        }
+        // Relation-independent predicates can discard rows before expensive derived work.
+        let derived_keys = plan
+            .relations
+            .iter()
+            .map(|relation| relation.key.as_str())
+            .chain(plan.rollups.iter().map(|rollup| rollup.alias.as_str()))
+            .collect::<HashSet<_>>();
+        let (derived_filters, independent_filters): (Vec<_>, Vec<_>) = plan
+            .filters
+            .iter()
+            .cloned()
+            .partition(|filter| derived_keys.contains(filter.key.as_str()));
+        candidates = filter_candidates(candidates, &independent_filters)?;
 
         let mut relation_diagnostics = Vec::new();
         if !plan.relations.is_empty() {
-            let targets = load_relation_target_lookup(connection)?;
-            let case_policy = link_case_policy(options.case_policy);
+            if context
+                .relation_targets
+                .as_ref()
+                .is_none_or(|(policy, _)| *policy != options.case_policy)
+            {
+                context.relation_targets = Some((
+                    options.case_policy,
+                    load_relation_target_lookup(connection, link_case_policy(options.case_policy))?,
+                ));
+            }
+            let targets = &context
+                .relation_targets
+                .as_ref()
+                .expect("initialized relation context")
+                .1;
             resolve_relation_fields(
                 &mut candidates,
                 &plan.relations,
-                &targets,
-                case_policy,
+                targets,
                 &mut relation_diagnostics,
             );
         }
@@ -256,33 +290,47 @@ ORDER BY p.file_id ASC, p.key ASC
             apply_rollups(connection, &mut candidates, &plan.rollups)?;
         }
 
-        let mut candidates = if candidates.len() >= PARALLEL_CANDIDATE_THRESHOLD {
-            candidates
-                .into_par_iter()
-                .filter(|row| row_matches_filters(row, &plan.filters))
-                .collect::<Vec<_>>()
-        } else {
-            candidates
-                .into_iter()
-                .filter(|row| row_matches_filters(row, &plan.filters))
-                .collect::<Vec<_>>()
-        };
-
-        if candidates.len() >= PARALLEL_CANDIDATE_THRESHOLD {
-            candidates
-                .par_sort_unstable_by(|left, right| compare_table_rows(left, right, &plan.sorts));
-        } else {
-            candidates.sort_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+        let mut candidates = filter_candidates(candidates, &derived_filters)?;
+        let grouped_mode = !plan.group_by.is_empty() || !plan.aggregates.is_empty();
+        if !grouped_mode {
+            // Select only the requested sorted prefix when summaries do not require an order.
+            let end = plan.offset.saturating_add(plan.limit).min(candidates.len());
+            if end > 0 && end < candidates.len() {
+                candidates.select_nth_unstable_by(end, |left, right| {
+                    compare_table_rows(left, right, &plan.sorts)
+                });
+            }
+            let ordered = &mut candidates[..end];
+            if ordered.len() >= PARALLEL_CANDIDATE_THRESHOLD {
+                ordered.par_sort_unstable_by(|left, right| {
+                    compare_table_rows(left, right, &plan.sorts)
+                });
+            } else {
+                ordered
+                    .sort_unstable_by(|left, right| compare_table_rows(left, right, &plan.sorts));
+            }
         }
 
         let execution = BaseExecutionMetadata {
             adapter: "base_table".to_string(),
             path: "query-planner".to_string(),
         };
-        let grouped_mode = !plan.group_by.is_empty() || !plan.aggregates.is_empty();
         let (total, summaries, grouping, rows) = if grouped_mode {
-            let grouped_rows =
-                materialize_grouped_rows(&candidates, &plan.group_by, &plan.aggregates);
+            let mut grouped_rows =
+                materialize_grouped_rows(&candidates, &plan.group_by, &plan.aggregates)?;
+            grouped_rows.sort_by(|left, right| {
+                for sort in &plan.sorts {
+                    let order = compare_sorted_values(
+                        left.values.get(&sort.key),
+                        right.values.get(&sort.key),
+                        sort,
+                    );
+                    if !order.is_eq() {
+                        return order;
+                    }
+                }
+                left.file_id.cmp(&right.file_id)
+            });
             let total = grouped_rows.len() as u64;
             let rows = grouped_rows
                 .into_iter()
@@ -333,31 +381,33 @@ struct TableRowCandidate {
 }
 
 impl TableRowCandidate {
-    fn lookup_value(&self, key: &str) -> Option<JsonValue> {
+    fn value(&self, key: &str) -> Option<Cow<'_, JsonValue>> {
+        if let Some(key) = key.strip_prefix("note.") {
+            return self.properties.get(key).map(Cow::Borrowed);
+        }
         if key.eq_ignore_ascii_case("path") || key.eq_ignore_ascii_case("file_path") {
-            return Some(JsonValue::String(self.file_path.clone()));
+            return Some(Cow::Owned(JsonValue::String(self.file_path.clone())));
         }
         if key.eq_ignore_ascii_case("folder") || key.eq_ignore_ascii_case("file_folder") {
-            return Some(JsonValue::String(note_folder_from_path(&self.file_path)));
+            return Some(Cow::Owned(JsonValue::String(note_folder_from_path(
+                &self.file_path,
+            ))));
         }
         if key.eq_ignore_ascii_case("ext") || key.eq_ignore_ascii_case("file_ext") {
-            return Some(JsonValue::String(note_extension_from_path(&self.file_path)));
+            return Some(Cow::Owned(JsonValue::String(note_extension_from_path(
+                &self.file_path,
+            ))));
         }
         if key.eq_ignore_ascii_case("title") {
-            return Some(JsonValue::String(note_title_from_path(&self.file_path)));
+            return Some(Cow::Owned(JsonValue::String(note_title_from_path(
+                &self.file_path,
+            ))));
         }
 
-        self.properties.get(key).cloned()
+        self.properties.get(key).map(Cow::Borrowed)
     }
-}
-
-fn map_field_type(value_type: &str) -> BaseFieldType {
-    match value_type.trim().to_ascii_lowercase().as_str() {
-        "number" | "int" | "integer" | "float" | "double" => BaseFieldType::Number,
-        "bool" | "boolean" | "checkbox" => BaseFieldType::Bool,
-        "date" | "datetime" => BaseFieldType::Date,
-        "json" | "object" | "array" => BaseFieldType::Json,
-        _ => BaseFieldType::String,
+    fn lookup_value(&self, key: &str) -> Option<JsonValue> {
+        self.value(key).map(Cow::into_owned)
     }
 }
 
@@ -376,73 +426,19 @@ struct RelationTarget {
 
 #[derive(Debug, Clone)]
 struct RelationTargetLookup {
-    candidates: Vec<String>,
+    index: LinkResolutionIndex,
     by_path: HashMap<String, RelationTarget>,
-}
-
-fn load_relation_target_lookup(
-    connection: &Connection,
-) -> Result<RelationTargetLookup, BaseTableExecutorError> {
-    let mut statement = connection
-        .prepare(
-            r#"
-SELECT file_id, normalized_path
-FROM files
-WHERE is_markdown = 1
-ORDER BY normalized_path ASC
-"#,
-        )
-        .map_err(|source| BaseTableExecutorError::Sql {
-            operation: "prepare_relation_lookup",
-            source,
-        })?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>("file_id")?,
-                row.get::<_, String>("normalized_path")?,
-            ))
-        })
-        .map_err(|source| BaseTableExecutorError::Sql {
-            operation: "query_relation_lookup",
-            source,
-        })?;
-
-    let mut lookup = HashMap::new();
-    let mut candidates = Vec::new();
-    for row in rows {
-        let (file_id, file_path) = row.map_err(|source| BaseTableExecutorError::Sql {
-            operation: "map_relation_lookup_row",
-            source,
-        })?;
-        let target = RelationTarget {
-            file_id: file_id.clone(),
-            file_path: file_path.clone(),
-        };
-        candidates.push(file_path.clone());
-        lookup.insert(file_path.clone(), target.clone());
-        lookup.insert(file_path.to_ascii_lowercase(), target);
-    }
-
-    candidates.sort();
-    candidates.dedup();
-
-    Ok(RelationTargetLookup {
-        candidates,
-        by_path: lookup,
-    })
 }
 
 fn resolve_relation_fields(
     candidates: &mut [TableRowCandidate],
     relations: &[BaseRelationSpec],
     relation_targets: &RelationTargetLookup,
-    case_policy: LinkCasePolicy,
     diagnostics: &mut Vec<BaseRelationDiagnostic>,
 ) {
     for row in candidates {
         for relation in relations {
-            let Some(raw_value) = row.properties.get(&relation.key).cloned() else {
+            let Some(raw_value) = row.lookup_value(&relation.key) else {
                 continue;
             };
             let tokens = extract_relation_tokens(&raw_value);
@@ -452,7 +448,7 @@ fn resolve_relation_fields(
 
             let mut resolved_values = Vec::new();
             for token in tokens {
-                let Some(normalized_target) = normalize_relation_token(&token) else {
+                let Some(target) = parse_relation_target(&token) else {
                     diagnostics.push(BaseRelationDiagnostic {
                         file_id: row.file_id.clone(),
                         file_path: row.file_path.clone(),
@@ -468,19 +464,20 @@ fn resolve_relation_fields(
                     continue;
                 };
 
-                let resolution = resolve_target_with_case_policy(
-                    &normalized_target,
-                    Some(&row.file_path),
-                    &relation_targets.candidates,
-                    case_policy,
-                );
+                let resolution = relation_targets
+                    .index
+                    .resolve_link(&target, Some(&row.file_path));
+                if resolution.is_ambiguous {
+                    diagnostics.push(BaseRelationDiagnostic {
+                        file_id: row.file_id.clone(),
+                        file_path: row.file_path.clone(),
+                        key: relation.key.clone(),
+                        target: token.clone(),
+                        reason: "ambiguous_relation_target".to_string(),
+                    });
+                }
                 if let Some(resolved_path) = resolution.resolved_path {
-                    let lookup_key = resolved_path.to_ascii_lowercase();
-                    if let Some(target) = relation_targets
-                        .by_path
-                        .get(&resolved_path)
-                        .or_else(|| relation_targets.by_path.get(&lookup_key))
-                    {
+                    if let Some(target) = relation_targets.by_path.get(&resolved_path) {
                         resolved_values.push(serde_json::json!({
                             "file_id": target.file_id,
                             "path": target.file_path,
@@ -491,11 +488,11 @@ fn resolve_relation_fields(
                             file_id: row.file_id.clone(),
                             file_path: row.file_path.clone(),
                             key: relation.key.clone(),
-                            target: normalized_target.clone(),
+                            target: token.clone(),
                             reason: "relation_target_not_found".to_string(),
                         });
                         resolved_values.push(serde_json::json!({
-                            "target": normalized_target,
+                            "target": token,
                             "resolved": false,
                             "reason": "relation_target_not_found",
                         }));
@@ -505,19 +502,25 @@ fn resolve_relation_fields(
                         file_id: row.file_id.clone(),
                         file_path: row.file_path.clone(),
                         key: relation.key.clone(),
-                        target: normalized_target.clone(),
+                        target: token.clone(),
                         reason: "relation_target_not_found".to_string(),
                     });
                     resolved_values.push(serde_json::json!({
-                        "target": normalized_target,
+                        "target": token,
                         "resolved": false,
                         "reason": "relation_target_not_found",
                     }));
                 }
             }
 
-            row.properties
-                .insert(relation.key.clone(), JsonValue::Array(resolved_values));
+            row.properties.insert(
+                relation
+                    .key
+                    .strip_prefix("note.")
+                    .unwrap_or(&relation.key)
+                    .to_string(),
+                JsonValue::Array(resolved_values),
+            );
         }
     }
 }
@@ -538,32 +541,12 @@ fn extract_relation_tokens(value: &JsonValue) -> Vec<String> {
     }
 }
 
-fn normalize_relation_token(raw: &str) -> Option<String> {
-    let mut normalized = raw.trim();
-    if normalized.is_empty() {
-        return None;
-    }
-    if let Some(inner) = normalized
-        .strip_prefix("[[")
-        .and_then(|value| value.strip_suffix("]]"))
-    {
-        normalized = inner.trim();
-    }
-    if let Some((before_pipe, _)) = normalized.split_once('|') {
-        normalized = before_pipe.trim();
-    }
-    if let Some((before_fragment, _)) = normalized.split_once('#') {
-        normalized = before_fragment.trim();
-    }
-    normalized = normalized.trim_start_matches('/');
-    if normalized.is_empty() {
-        return None;
-    }
-    let normalized = normalized.replace('\\', "/");
-    if normalized.to_ascii_lowercase().ends_with(".md") {
-        Some(normalized)
+fn parse_relation_target(raw: &str) -> Option<LinkTarget> {
+    let target = parse_link_target(raw, LinkSyntax::Wiki)?;
+    if target.invalid_reason.is_some() || (target.path.is_empty() && target.fragment.is_none()) {
+        None
     } else {
-        Some(format!("{normalized}.md"))
+        Some(target)
     }
 }
 
@@ -594,17 +577,11 @@ fn apply_rollups(
                         JsonValue::Number(serde_json::Number::from(target_file_ids.len() as i64))
                     }
                     BaseRollupOp::Sum => {
-                        let total = target_file_ids
-                            .iter()
-                            .filter_map(|file_id| {
-                                rollup_values
-                                    .get(&(file_id.clone(), rollup.target_key.clone()))
-                                    .and_then(JsonValue::as_f64)
-                            })
-                            .sum::<f64>();
-                        serde_json::Number::from_f64(total)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
+                        sum_numeric_values(target_file_ids.iter().filter_map(|file_id| {
+                            rollup_values
+                                .get(&(file_id.clone(), rollup.target_key.clone()))
+                                .cloned()
+                        }))?
                     }
                     BaseRollupOp::Min => {
                         let mut min: Option<JsonValue> = None;
@@ -615,6 +592,9 @@ fn apply_rollups(
                             else {
                                 continue;
                             };
+                            if candidate.is_null() {
+                                continue;
+                            }
                             if min.as_ref().is_none_or(|current| {
                                 compare_json_values(&candidate, current).is_lt()
                             }) {
@@ -632,6 +612,9 @@ fn apply_rollups(
                             else {
                                 continue;
                             };
+                            if candidate.is_null() {
+                                continue;
+                            }
                             if max.as_ref().is_none_or(|current| {
                                 compare_json_values(&candidate, current).is_gt()
                             }) {
@@ -650,7 +633,7 @@ fn apply_rollups(
 
 fn relation_target_file_ids(row: &TableRowCandidate, relation_key: &str) -> Vec<String> {
     row.properties
-        .get(relation_key)
+        .get(relation_key.strip_prefix("note.").unwrap_or(relation_key))
         .and_then(JsonValue::as_array)
         .map(|values| {
             values
@@ -673,101 +656,63 @@ fn relation_target_file_ids(row: &TableRowCandidate, relation_key: &str) -> Vec<
         .unwrap_or_default()
 }
 
-fn load_rollup_property_values(
-    connection: &Connection,
-    file_ids: &HashSet<String>,
-    keys: &HashSet<String>,
-) -> Result<HashMap<(String, String), JsonValue>, BaseTableExecutorError> {
-    if file_ids.is_empty() || keys.is_empty() {
-        return Ok(HashMap::new());
+fn canonical_group_value(value: JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Number(ref number) if number.as_i64().is_none() && number.as_u64().is_none() => {
+            let candidate = number
+                .as_f64()
+                .and_then(|float| serde_json::Number::from_i128(float as i128))
+                .map(JsonValue::Number);
+            candidate
+                .filter(|candidate| compare_json_values(candidate, &value).is_eq())
+                .unwrap_or(value)
+        }
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.into_iter().map(canonical_group_value).collect())
+        }
+        JsonValue::Object(values) => JsonValue::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, canonical_group_value(value)))
+                .collect(),
+        ),
+        _ => value,
     }
+}
 
-    let file_ids = file_ids.iter().cloned().collect::<Vec<_>>();
-    let keys = keys.iter().cloned().collect::<Vec<_>>();
-
-    let file_placeholders = (1..=file_ids.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let key_placeholders = ((file_ids.len() + 1)..=(file_ids.len() + keys.len()))
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let query = format!(
-        r#"
-SELECT file_id, key, value_type, value_json
-FROM properties
-WHERE file_id IN ({file_placeholders})
-  AND key IN ({key_placeholders})
-ORDER BY file_id ASC, key ASC
-"#
-    );
-
-    let mut parameters = Vec::with_capacity(file_ids.len() + keys.len());
-    parameters.extend(
-        file_ids
-            .iter()
-            .map(|file_id| SqlValue::Text(file_id.clone())),
-    );
-    parameters.extend(keys.iter().map(|key| SqlValue::Text(key.clone())));
-
-    let mut statement =
-        connection
-            .prepare(&query)
-            .map_err(|source| BaseTableExecutorError::Sql {
-                operation: "prepare_rollup_projection",
-                source,
-            })?;
-    let rows = statement
-        .query_map(params_from_iter(parameters), |row| {
-            Ok((
-                row.get::<_, String>("file_id")?,
-                row.get::<_, String>("key")?,
-                row.get::<_, String>("value_type")?,
-                row.get::<_, String>("value_json")?,
-            ))
-        })
-        .map_err(|source| BaseTableExecutorError::Sql {
-            operation: "query_rollup_projection",
-            source,
-        })?;
-
-    let mut values = HashMap::new();
-    for row in rows {
-        let (file_id, key, value_type, value_json) =
-            row.map_err(|source| BaseTableExecutorError::Sql {
-                operation: "map_rollup_projection_row",
-                source,
-            })?;
-        let value = serde_json::from_str::<JsonValue>(&value_json).map_err(|source| {
-            BaseTableExecutorError::ParsePropertyValue {
-                file_id: file_id.clone(),
-                key: key.clone(),
-                source,
-            }
-        })?;
-        let value = coerce_json_value(
-            &value,
-            map_field_type(&value_type),
-            BaseCoercionMode::Permissive,
-        )
-        .map_err(|source| BaseTableExecutorError::Coercion {
-            file_id: file_id.clone(),
-            key: key.clone(),
-            source: Box::new(source),
-        })?;
-        values.insert((file_id, key), value);
+fn sum_numeric_values(
+    values: impl Iterator<Item = JsonValue>,
+) -> Result<JsonValue, BaseTableExecutorError> {
+    let mut integer_sum = Some(0_i128);
+    let mut float_sum = 0.0;
+    for value in values.filter(JsonValue::is_number) {
+        let integer = value
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from));
+        integer_sum = match (integer_sum, integer) {
+            (Some(total), Some(number)) => Some(
+                total
+                    .checked_add(number)
+                    .ok_or(BaseTableExecutorError::NumericOverflow)?,
+            ),
+            _ => None,
+        };
+        float_sum += value.as_f64().unwrap_or_default();
     }
-
-    Ok(values)
+    let number = match integer_sum {
+        Some(total) => serde_json::Number::from_i128(total),
+        None => serde_json::Number::from_f64(float_sum),
+    }
+    .ok_or(BaseTableExecutorError::NumericOverflow)?;
+    Ok(JsonValue::Number(number))
 }
 
 fn materialize_grouped_rows(
     rows: &[TableRowCandidate],
     group_by: &[String],
     aggregates: &[BaseAggregateSpec],
-) -> Vec<BaseTableRow> {
+) -> Result<Vec<BaseTableRow>, BaseTableExecutorError> {
     let mut groups = std::collections::BTreeMap::<String, Vec<&TableRowCandidate>>::new();
 
     for row in rows {
@@ -775,36 +720,33 @@ fn materialize_grouped_rows(
         for key in group_by {
             group_values.insert(
                 key.clone(),
-                row.lookup_value(key).unwrap_or(JsonValue::Null),
+                canonical_group_value(row.lookup_value(key).unwrap_or(JsonValue::Null)),
             );
         }
         let group_key = serde_json::to_string(&group_values).unwrap_or_default();
         groups.entry(group_key).or_default().push(row);
     }
 
+    if groups.is_empty() && group_by.is_empty() {
+        groups.insert("{}".to_string(), Vec::new());
+    }
     groups
-        .into_values()
-        .map(|members| {
-            let anchor = members[0];
-            let mut values = serde_json::Map::new();
-            for key in group_by {
-                values.insert(
-                    key.clone(),
-                    anchor.lookup_value(key).unwrap_or(JsonValue::Null),
-                );
-            }
+        .into_iter()
+        .map(|(group_key, members)| {
+            let mut values = serde_json::from_str::<serde_json::Map<String, JsonValue>>(&group_key)
+                .expect("serialized group object");
             for aggregate in aggregates {
                 values.insert(
                     aggregate.alias.clone(),
-                    compute_aggregate_value(&members, aggregate),
+                    compute_aggregate_value(&members, aggregate)?,
                 );
             }
 
-            BaseTableRow {
-                file_id: anchor.file_id.clone(),
-                file_path: anchor.file_path.clone(),
+            Ok(BaseTableRow {
+                file_id: format!("group_{}", blake3::hash(group_key.as_bytes()).to_hex()),
+                file_path: String::new(),
                 values,
-            }
+            })
         })
         .collect()
 }
@@ -812,29 +754,20 @@ fn materialize_grouped_rows(
 fn compute_aggregate_value(
     rows: &[&TableRowCandidate],
     aggregate: &BaseAggregateSpec,
-) -> JsonValue {
-    match aggregate.op {
+) -> Result<JsonValue, BaseTableExecutorError> {
+    Ok(match aggregate.op {
         BaseAggregateOp::Count => JsonValue::Number(serde_json::Number::from(rows.len() as i64)),
-        BaseAggregateOp::Sum => {
-            let total = aggregate
-                .key
-                .as_ref()
-                .map(|key| {
-                    rows.iter()
-                        .filter_map(|row| row.lookup_value(key).and_then(|value| value.as_f64()))
-                        .sum::<f64>()
-                })
-                .unwrap_or(0.0);
-            serde_json::Number::from_f64(total)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
-        }
+        BaseAggregateOp::Sum => sum_numeric_values(
+            rows.iter()
+                .filter_map(|row| aggregate.key.as_ref().and_then(|key| row.lookup_value(key))),
+        )?,
         BaseAggregateOp::Min => aggregate
             .key
             .as_ref()
             .and_then(|key| {
                 rows.iter()
                     .filter_map(|row| row.lookup_value(key))
+                    .filter(|value| !value.is_null())
                     .reduce(|left, right| {
                         if compare_json_values(&left, &right).is_le() {
                             left
@@ -850,6 +783,7 @@ fn compute_aggregate_value(
             .and_then(|key| {
                 rows.iter()
                     .filter_map(|row| row.lookup_value(key))
+                    .filter(|value| !value.is_null())
                     .reduce(|left, right| {
                         if compare_json_values(&left, &right).is_ge() {
                             left
@@ -859,83 +793,49 @@ fn compute_aggregate_value(
                     })
             })
             .unwrap_or(JsonValue::Null),
-    }
-}
-
-fn load_table_candidates(
-    connection: &Connection,
-    source_prefix: Option<&str>,
-) -> Result<Vec<TableRowCandidate>, BaseTableExecutorError> {
-    let (query, params): (&str, Vec<SqlValue>) = if let Some(prefix) = source_prefix {
-        (
-            r#"
-SELECT
-  file_id,
-  normalized_path
-FROM files
-WHERE is_markdown = 1
-  AND (normalized_path = ?1 OR normalized_path LIKE ?2)
-ORDER BY normalized_path ASC
-"#,
-            vec![
-                SqlValue::Text(prefix.to_string()),
-                SqlValue::Text(format!("{prefix}/%")),
-            ],
-        )
-    } else {
-        (
-            r#"
-SELECT
-  file_id,
-  normalized_path
-FROM files
-WHERE is_markdown = 1
-ORDER BY normalized_path ASC
-"#,
-            Vec::new(),
-        )
-    };
-
-    let mut statement =
-        connection
-            .prepare(query)
-            .map_err(|source| BaseTableExecutorError::Sql {
-                operation: "prepare_table_candidate_files",
-                source,
-            })?;
-    let rows = statement
-        .query_map(params_from_iter(params), |row| {
-            Ok(TableRowCandidate {
-                file_id: row.get("file_id")?,
-                file_path: row.get("normalized_path")?,
-                properties: HashMap::new(),
-            })
-        })
-        .map_err(|source| BaseTableExecutorError::Sql {
-            operation: "query_table_candidate_files",
-            source,
-        })?;
-
-    rows.map(|row| {
-        row.map_err(|source| BaseTableExecutorError::Sql {
-            operation: "map_table_candidate_files_row",
-            source,
-        })
     })
-    .collect()
 }
 
-fn row_matches_filters(row: &TableRowCandidate, filters: &[BaseFilterClause]) -> bool {
-    filters.iter().all(|filter| row_matches_filter(row, filter))
+fn filter_candidates(
+    rows: Vec<TableRowCandidate>,
+    filters: &[BaseFilterClause],
+) -> Result<Vec<TableRowCandidate>, BaseTableExecutorError> {
+    rows.into_iter()
+        .filter_map(|row| {
+            for filter in filters {
+                match evaluate_filter(row.value(&filter.key).as_deref(), filter.op, &filter.value) {
+                    Ok(true) => {}
+                    Ok(false) => return None,
+                    Err(error) => {
+                        return Some(Err(BaseTableExecutorError::InvalidPlan {
+                            reason: format!(
+                                "filter '{}' on '{}': {error:?}",
+                                filter.key, row.file_path
+                            ),
+                        }));
+                    }
+                }
+            }
+            Some(Ok(row))
+        })
+        .collect()
 }
 
-fn row_matches_filter(row: &TableRowCandidate, filter: &BaseFilterClause) -> bool {
-    evaluate_filter(
-        row.lookup_value(&filter.key).as_ref(),
-        filter.op,
-        &filter.value,
-    )
-    .unwrap_or(false)
+fn compare_sorted_values(
+    left: Option<&JsonValue>,
+    right: Option<&JsonValue>,
+    sort: &BaseSortClause,
+) -> Ordering {
+    let ordering = compare_optional_json_values(left, right, sort.null_order);
+    // Null positioning is independent of ascending/descending value order.
+    if left.is_some_and(|value| !value.is_null())
+        && right.is_some_and(|value| !value.is_null())
+        && matches!(sort.direction, BaseSortDirection::Desc)
+    {
+        ordering.reverse()
+    } else {
+        ordering
+    }
 }
 
 fn compare_table_rows(
@@ -944,15 +844,11 @@ fn compare_table_rows(
     sorts: &[BaseSortClause],
 ) -> Ordering {
     for sort in sorts {
-        let ordering = compare_optional_json_values(
-            left.lookup_value(&sort.key).as_ref(),
-            right.lookup_value(&sort.key).as_ref(),
-            sort.null_order,
+        let ordering = compare_sorted_values(
+            left.value(&sort.key).as_deref(),
+            right.value(&sort.key).as_deref(),
+            sort,
         );
-        let ordering = match sort.direction {
-            BaseSortDirection::Asc => ordering,
-            BaseSortDirection::Desc => ordering.reverse(),
-        };
         if ordering != Ordering::Equal {
             return ordering;
         }
@@ -1056,27 +952,26 @@ fn compute_column_summary(
 /// Base table execution failures.
 #[derive(Debug, Error)]
 pub enum BaseTableExecutorError {
+    /// The view is too large to materialize within the bounded execution policy.
+    #[error(
+        "base work budget exceeded: {resource} {observed} > {limit}; narrow the view source or projected properties and retry"
+    )]
+    WorkBudgetExceeded {
+        /// Resource counted before hydration.
+        resource: &'static str,
+        /// Required amount.
+        observed: u64,
+        /// Supported maximum.
+        limit: u64,
+    },
+    /// Numeric aggregation exceeded the supported finite JSON number range.
+    #[error("base numeric aggregate is outside the supported JSON number range")]
+    NumericOverflow,
     /// Plan payload was invalid for execution.
     #[error("invalid base table plan: {reason}")]
     InvalidPlan {
         /// Validation message.
         reason: String,
-    },
-    /// Listing file rows failed.
-    #[error("failed to list file metadata for base table execution: {source}")]
-    FilesRepository {
-        /// Repository error.
-        #[source]
-        source: tao_sdk_storage::FilesRepositoryError,
-    },
-    /// Listing property rows by key failed.
-    #[error("failed to list property rows for key '{key}' during base table execution: {source}")]
-    PropertiesRepository {
-        /// Property key.
-        key: String,
-        /// Repository error.
-        #[source]
-        source: tao_sdk_storage::PropertiesRepositoryError,
     },
     /// SQL execution failed during property projection.
     #[error("base table property projection sql operation '{operation}' failed: {source}")]
@@ -1111,12 +1006,13 @@ pub enum BaseTableExecutorError {
     },
 }
 
-mod cache;
-mod persistence;
+mod budget;
+mod sql;
+use sql::{
+    execute_simple_sql_page, load_candidate_properties, load_relation_target_lookup,
+    load_rollup_property_values, load_table_candidates,
+};
+
 mod validation;
 
-pub use cache::{BaseTableCacheError, BaseTableCachedQueryService};
-pub use persistence::{
-    BaseColumnConfigPersistError, BaseColumnConfigPersistResult, BaseColumnConfigPersistenceService,
-};
 pub use validation::{BaseValidationError, BaseValidationResult, BaseValidationService};

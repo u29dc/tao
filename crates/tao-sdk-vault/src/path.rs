@@ -73,6 +73,7 @@ pub fn validate_relative_vault_path(input: &str) -> Result<(), RelativeVaultPath
 #[derive(Debug, Clone)]
 pub struct PathCanonicalizationService {
     root: PathBuf,
+    requested_root: PathBuf,
     case_policy: CasePolicy,
 }
 
@@ -96,8 +97,20 @@ impl PathCanonicalizationService {
             });
         }
 
+        let requested_root = if root_path.is_absolute() {
+            root_path.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|source| PathCanonicalizationError::RootCanonicalize {
+                    path: root_path.clone(),
+                    source,
+                })?
+                .join(&root_path)
+        };
+
         Ok(Self {
             root: canonical_root,
+            requested_root,
             case_policy,
         })
     }
@@ -142,8 +155,87 @@ impl PathCanonicalizationService {
             .to_path_buf();
 
         let normalized = normalize_relative_path(&relative)?;
-        let match_key = apply_case_policy(&normalized, self.case_policy);
+        let match_key = path_match_key(&normalized, self.case_policy);
 
+        Ok(CanonicalPath {
+            absolute,
+            relative,
+            normalized,
+            match_key,
+        })
+    }
+
+    /// Resolve a regular inventory file without traversing any symlink components.
+    ///
+    /// Unlike [`Self::canonicalize`], this follows the scanner's inclusion policy:
+    /// symlink aliases and non-regular files are not inventory entries. The physical
+    /// spelling is retained independently from its normalized comparison key.
+    pub fn regular_file(
+        &self,
+        input: impl AsRef<Path>,
+    ) -> Result<CanonicalPath, PathCanonicalizationError> {
+        let canonical = self.physical_path(input)?;
+        if !fs::symlink_metadata(&canonical.absolute)
+            .map_err(|source| PathCanonicalizationError::InputCanonicalize {
+                path: canonical.absolute.clone(),
+                source,
+            })?
+            .is_file()
+        {
+            return Err(PathCanonicalizationError::NotRegularFile {
+                path: canonical.absolute,
+            });
+        }
+        Ok(canonical)
+    }
+
+    /// Validate an existing physical file or directory without following symlinks.
+    pub fn physical_path(
+        &self,
+        input: impl AsRef<Path>,
+    ) -> Result<CanonicalPath, PathCanonicalizationError> {
+        let input = input.as_ref();
+        let absolute = if input.is_absolute() {
+            if input.starts_with(&self.root) {
+                input.to_path_buf()
+            } else if let Ok(relative) = input.strip_prefix(&self.requested_root) {
+                // A configured root may itself be an alias (for example macOS
+                // `/var` -> `/private/var`). Map only that already-authorized
+                // root, preserving and validating every child component below.
+                self.root.join(relative)
+            } else {
+                input.to_path_buf()
+            }
+        } else {
+            self.root.join(input)
+        };
+        let relative = absolute.strip_prefix(&self.root).map_err(|_| {
+            PathCanonicalizationError::OutsideVault {
+                root: self.root.clone(),
+                path: absolute.clone(),
+            }
+        })?;
+        let normalized = normalize_relative_path(relative)?;
+        let mut current = self.root.clone();
+        for component in relative.components() {
+            if let Component::Normal(segment) = component {
+                current.push(segment);
+                let metadata = fs::symlink_metadata(&current).map_err(|source| {
+                    PathCanonicalizationError::InputCanonicalize {
+                        path: current.clone(),
+                        source,
+                    }
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(PathCanonicalizationError::SymlinkNotIncluded { path: current });
+                }
+            }
+        }
+        self.canonicalize(&absolute)?;
+        // Preserve the walk/input path even on filesystems with a different
+        // canonical Unicode spelling. Canonicalization above validates the root.
+        let relative = relative.to_path_buf();
+        let match_key = path_match_key(&normalized, self.case_policy);
         Ok(CanonicalPath {
             absolute,
             relative,
@@ -153,7 +245,9 @@ impl PathCanonicalizationService {
     }
 }
 
-fn normalize_relative_path(path: &Path) -> Result<String, PathCanonicalizationError> {
+/// Normalize a relative physical path to NFC and `/` separators without I/O.
+/// This comparison/display representation must never be used to reopen a file.
+pub fn normalize_relative_path(path: &Path) -> Result<String, PathCanonicalizationError> {
     let mut segments = Vec::new();
     for component in path.components() {
         match component {
@@ -182,16 +276,30 @@ fn normalize_component(component: &str) -> String {
     component.nfc().collect()
 }
 
-fn apply_case_policy(value: &str, case_policy: CasePolicy) -> String {
+/// Return the shared NFC, case-policy-aware key used by scans and reconciliation.
+#[must_use]
+pub fn path_match_key(value: &str, case_policy: CasePolicy) -> String {
     match case_policy {
-        CasePolicy::Sensitive => value.to_string(),
-        CasePolicy::Insensitive => value.to_lowercase(),
+        CasePolicy::Sensitive => value.nfc().collect(),
+        CasePolicy::Insensitive => value.to_lowercase().nfc().collect(),
     }
 }
 
 /// Errors returned by path canonicalization operations.
 #[derive(Debug, Error)]
 pub enum PathCanonicalizationError {
+    /// Inventory and content capture exclude symlink aliases.
+    #[error("symlink path '{path}' is not included in the vault inventory")]
+    SymlinkNotIncluded {
+        /// Symlink component.
+        path: PathBuf,
+    },
+    /// Inventory content reads require regular files.
+    #[error("path '{path}' is not a regular file")]
+    NotRegularFile {
+        /// Non-file path.
+        path: PathBuf,
+    },
     /// The vault root could not be canonicalized.
     #[error("failed to canonicalize vault root '{path}': {source}")]
     RootCanonicalize {
@@ -378,6 +486,31 @@ mod tests {
         assert!(matches!(
             error,
             PathCanonicalizationError::OutsideVault { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn physical_paths_accept_configured_root_alias_but_reject_child_aliases() {
+        let temp = tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        let root_alias = temp.path().join("root-alias");
+        fs::create_dir(&vault).expect("mkdir");
+        fs::write(vault.join("note.md"), "# Note").expect("write");
+        symlink(&vault, &root_alias).expect("root alias");
+        symlink(vault.join("note.md"), vault.join("alias.md")).expect("child alias");
+        let service =
+            PathCanonicalizationService::new(&root_alias, CasePolicy::Sensitive).expect("service");
+        let physical = service
+            .regular_file(root_alias.join("note.md"))
+            .expect("root alias allowed");
+        assert_eq!(
+            physical.absolute,
+            fs::canonicalize(vault.join("note.md")).expect("canonical note")
+        );
+        assert!(matches!(
+            service.regular_file(root_alias.join("alias.md")),
+            Err(PathCanonicalizationError::SymlinkNotIncluded { .. })
         ));
     }
 }

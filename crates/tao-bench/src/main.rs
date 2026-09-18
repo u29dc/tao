@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::fs;
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -15,8 +14,8 @@ use tao_sdk_search::{SearchQueryRequest, SearchQueryService};
 use tao_sdk_service::{
     BacklinkGraphService, GraphWalkRequest, SearchKind, VaultSearchRequest, VaultSearchService,
 };
-use tao_sdk_vault::CasePolicy;
-use tempfile::{TempDir, tempdir};
+use tao_sdk_vault::{CasePolicy, VaultScanService};
+use tempfile::TempDir;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum Scenario {
@@ -81,11 +80,12 @@ struct Args {
     limit: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct LatencySummary {
     p50_ms: f64,
     p95_ms: f64,
     max_ms: f64,
+    samples_ms: Vec<f64>,
 }
 
 impl LatencySummary {
@@ -94,8 +94,20 @@ impl LatencySummary {
             bail!("benchmark produced no latency samples");
         }
 
-        samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-        let p50_ms = percentile(&samples, 50.0);
+        if samples
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            bail!("benchmark latency samples must be finite and greater than zero");
+        }
+        let original_samples = samples.clone();
+        samples.sort_by(f64::total_cmp);
+        let midpoint = samples.len() / 2;
+        let p50_ms = if samples.len().is_multiple_of(2) {
+            (samples[midpoint - 1] + samples[midpoint]) / 2.0
+        } else {
+            samples[midpoint]
+        };
         let p95_ms = percentile(&samples, 95.0);
         let max_ms = samples.last().copied().unwrap_or(0.0);
 
@@ -103,15 +115,26 @@ impl LatencySummary {
             p50_ms,
             p95_ms,
             max_ms,
+            samples_ms: original_samples,
         })
     }
 
-    fn as_json(self) -> JsonValue {
+    fn as_json(&self) -> JsonValue {
         json!({
-            "p50_ms": round_ms(self.p50_ms),
-            "p95_ms": round_ms(self.p95_ms),
-            "max_ms": round_ms(self.max_ms),
+            "p50_ms": self.p50_ms,
+            "p95_ms": if self.samples_ms.len() >= 20 { Some(self.p95_ms) } else { None },
+            "p95_sample_sufficient": self.samples_ms.len() >= 20,
+            "max_ms": self.max_ms,
+            "samples_ms": self.samples_ms,
         })
+    }
+
+    fn p95_display(&self) -> String {
+        if self.samples_ms.len() >= 20 {
+            format!("{:.6}", self.p95_ms)
+        } else {
+            "insufficient_samples".to_string()
+        }
     }
 }
 
@@ -124,6 +147,16 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+    validate_report_output_paths(&args)?;
+    if args.enforce_budgets
+        && (args.iterations < 20
+            || !args.max_p50_ms.is_finite()
+            || !args.max_p95_ms.is_finite()
+            || args.max_p50_ms <= 0.0
+            || args.max_p95_ms <= 0.0)
+    {
+        bail!("budget enforcement requires at least 20 samples and finite positive budgets");
+    }
     match args.scenario {
         Scenario::Bridge => run_bridge_benchmark(&args),
         Scenario::GraphWalk => run_graph_walk_benchmark(&args),
@@ -151,11 +184,20 @@ fn run_parse_benchmark(args: &Args) -> Result<()> {
 
     let parser = MarkdownParser;
     let mut samples = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut sample_paths = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
+    let mut sample_bytes = Vec::with_capacity(usize::try_from(args.iterations).unwrap_or(0));
     let mut headings_total = 0_u64;
     let docs_len = u64::try_from(docs.len()).context("convert parsed document count")?;
     for iteration in 0..args.iterations {
-        let index = usize::try_from(iteration % docs_len).context("convert sample index")?;
+        let sample_index = if args.iterations < docs_len {
+            iteration.saturating_mul(docs_len) / args.iterations
+        } else {
+            iteration % docs_len
+        };
+        let index = usize::try_from(sample_index).context("convert sample index")?;
         let (path, raw) = &docs[index];
+        sample_paths.push(path.clone());
+        sample_bytes.push(raw.len());
         let start = Instant::now();
         let parsed = parser
             .parse(MarkdownParseRequest {
@@ -170,16 +212,20 @@ fn run_parse_benchmark(args: &Args) -> Result<()> {
 
     let summary = LatencySummary::from_samples(samples)?;
     println!(
-        "parse docs={} p50_ms={:.3} p95_ms={:.3} headings_avg={:.1}",
+        "parse docs={} p50_ms={:.3} p95_ms={} headings_avg={:.1}",
         docs.len(),
         summary.p50_ms,
-        summary.p95_ms,
+        summary.p95_display(),
         headings_total as f64 / args.iterations as f64
     );
     let report = json!({
         "scenario": "parse",
         "iterations": args.iterations,
         "docs_loaded": docs.len(),
+        "sample_paths": sample_paths,
+        "sample_bytes": sample_bytes,
+        "timing_scope": "in-memory source clone and Markdown parsing; file I/O excluded",
+        "sampling": "evenly distributed over canonical manifest, including its largest Markdown file",
         "generated_at_unix": now_unix(),
         "latency": summary.as_json(),
         "headings_avg": round_ms(headings_total as f64 / args.iterations as f64),
@@ -234,9 +280,9 @@ fn run_search_benchmark(args: &Args) -> Result<()> {
 
     let summary = LatencySummary::from_samples(samples)?;
     println!(
-        "search p50_ms={:.3} p95_ms={:.3} candidates_avg={:.1}",
+        "search p50_ms={:.3} p95_ms={} candidates_avg={:.1}",
         summary.p50_ms,
-        summary.p95_ms,
+        summary.p95_display(),
         candidates_total as f64 / args.iterations as f64
     );
 
@@ -305,12 +351,16 @@ fn run_resolve_benchmark(args: &Args) -> Result<()> {
     };
 
     println!(
-        "resolve p50_ms={:.3} p95_ms={:.3} max_ms={:.3} ops_per_sec={:.1}",
-        summary.p50_ms, summary.p95_ms, summary.max_ms, throughput_ops_per_sec
+        "resolve p50_ms={:.3} p95_ms={} max_ms={:.3} ops_per_sec={:.1}",
+        summary.p50_ms,
+        summary.p95_display(),
+        summary.max_ms,
+        throughput_ops_per_sec
     );
 
     let report = json!({
         "scenario": "resolve",
+        "timing_scope": "batch of resolutions against a prebuilt candidate index; not per-link latency",
         "iterations": args.iterations,
         "links_per_iteration": links_per_iteration,
         "candidates_total": candidates.len(),
@@ -329,7 +379,7 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
     }
 
     let notes_total = args.bridge_notes.max(1);
-    let temp = tempdir().context("create startup benchmark temp directory")?;
+    let temp = benchmark_tempdir().context("create startup benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let notes_dir = vault_root.join("notes");
     let db_path = temp.path().join("tao.sqlite");
@@ -352,17 +402,21 @@ fn run_startup_benchmark(args: &Args) -> Result<()> {
     }
 
     let summary = LatencySummary::from_samples(samples)?;
-    let target_p95_ms = 900.0;
+    let target_p95_ms = args.max_p95_ms;
     let budget_failed = summary.p95_ms > target_p95_ms;
     let status = if budget_failed { "fail" } else { "pass" };
 
     println!(
-        "startup p50_ms={:.3} p95_ms={:.3} max_ms={:.3} target_p95_ms={:.1} status={status}",
-        summary.p50_ms, summary.p95_ms, summary.max_ms, target_p95_ms
+        "startup p50_ms={:.3} p95_ms={} max_ms={:.3} target_p95_ms={:.1} status={status}",
+        summary.p50_ms,
+        summary.p95_display(),
+        summary.max_ms,
+        target_p95_ms
     );
 
     let report = json!({
         "scenario": "startup",
+        "timing_scope": "open already-indexed bridge runtime, read stats, first 1000 notes and first-note context; filesystem warm, no process start or indexing",
         "iterations": args.iterations,
         "notes_seeded": notes_total,
         "generated_at_unix": now_unix(),
@@ -426,7 +480,7 @@ fn run_graph_walk_benchmark(args: &Args) -> Result<()> {
     };
 
     println!(
-        "graph-walk warm_p50_ms={:.3} cold_p50_ms={:.3} warm_steps_avg={:.1} cold_steps_avg={:.1}",
+        "graph-walk reused_connection_p50_ms={:.3} new_connection_warm_filesystem_p50_ms={:.3} reused_connection_steps_avg={:.1} new_connection_steps_avg={:.1}",
         warm.p50_ms,
         cold.p50_ms,
         warm_steps as f64 / args.iterations as f64,
@@ -447,17 +501,17 @@ fn run_graph_walk_benchmark(args: &Args) -> Result<()> {
             "include_folders": request.include_folders,
         },
         "latency": {
-            "warm": warm.as_json(),
-            "cold": cold.as_json(),
+            "reused_connection": warm.as_json(),
+            "new_connection_warm_filesystem": cold.as_json(),
         },
         "steps": {
-            "warm_total": warm_steps,
-            "cold_total": cold_steps,
-            "warm_avg": round_ms(warm_steps as f64 / args.iterations as f64),
-            "cold_avg": round_ms(cold_steps as f64 / args.iterations as f64),
+            "reused_connection_total": warm_steps,
+            "new_connection_total": cold_steps,
+            "reused_connection_avg": round_ms(warm_steps as f64 / args.iterations as f64),
+            "new_connection_avg": round_ms(cold_steps as f64 / args.iterations as f64),
         },
         "improvement": {
-            "p50_vs_cold_pct": round_ms(improvement_pct),
+            "p50_vs_new_connection_pct": round_ms(improvement_pct),
         },
     });
     write_benchmark_reports(args, &report, "graph_walk")?;
@@ -516,7 +570,7 @@ fn run_unified_query_benchmark(args: &Args) -> Result<()> {
     };
 
     println!(
-        "unified-query warm_p50_ms={:.3} cold_p50_ms={:.3} warm_rows_avg={:.1} cold_rows_avg={:.1}",
+        "unified-query reused_connection_p50_ms={:.3} new_connection_warm_filesystem_p50_ms={:.3} reused_connection_rows_avg={:.1} new_connection_rows_avg={:.1}",
         warm.p50_ms,
         cold.p50_ms,
         warm_rows as f64 / args.iterations as f64,
@@ -535,17 +589,17 @@ fn run_unified_query_benchmark(args: &Args) -> Result<()> {
             "offset": request.offset,
         },
         "latency": {
-            "warm": warm.as_json(),
-            "cold": cold.as_json(),
+            "reused_connection": warm.as_json(),
+            "new_connection_warm_filesystem": cold.as_json(),
         },
         "rows": {
-            "warm_total": warm_rows,
-            "cold_total": cold_rows,
-            "warm_avg": round_ms(warm_rows as f64 / args.iterations as f64),
-            "cold_avg": round_ms(cold_rows as f64 / args.iterations as f64),
+            "reused_connection_total": warm_rows,
+            "new_connection_total": cold_rows,
+            "reused_connection_avg": round_ms(warm_rows as f64 / args.iterations as f64),
+            "new_connection_avg": round_ms(cold_rows as f64 / args.iterations as f64),
         },
         "improvement": {
-            "p50_vs_cold_pct": round_ms(improvement_pct),
+            "p50_vs_new_connection_pct": round_ms(improvement_pct),
         },
     });
     write_benchmark_reports(args, &report, "unified_query")?;
@@ -558,7 +612,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     }
 
     let notes_total = args.bridge_notes.max(1);
-    let temp = tempdir().context("create benchmark temp directory")?;
+    let temp = benchmark_tempdir().context("create benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let notes_dir = vault_root.join("notes");
     let db_path = temp.path().join("tao.sqlite");
@@ -603,47 +657,55 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
     let events_poll = LatencySummary::from_samples(events_poll_samples)?;
 
     println!(
-        "bridge metric=note_get p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        note_get.p50_ms, note_get.p95_ms, note_get.max_ms
+        "bridge metric=note_get p50_ms={:.3} p95_ms={} max_ms={:.3}",
+        note_get.p50_ms,
+        note_get.p95_display(),
+        note_get.max_ms
     );
     println!(
-        "bridge metric=notes_list p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        notes_list.p50_ms, notes_list.p95_ms, notes_list.max_ms
+        "bridge metric=notes_list p50_ms={:.3} p95_ms={} max_ms={:.3}",
+        notes_list.p50_ms,
+        notes_list.p95_display(),
+        notes_list.max_ms
     );
     println!(
-        "bridge metric=note_context p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        note_context.p50_ms, note_context.p95_ms, note_context.max_ms
+        "bridge metric=note_context p50_ms={:.3} p95_ms={} max_ms={:.3}",
+        note_context.p50_ms,
+        note_context.p95_display(),
+        note_context.max_ms
     );
     println!(
-        "bridge metric=events_poll p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",
-        events_poll.p50_ms, events_poll.p95_ms, events_poll.max_ms
+        "bridge metric=events_poll p50_ms={:.3} p95_ms={} max_ms={:.3}",
+        events_poll.p50_ms,
+        events_poll.p95_display(),
+        events_poll.max_ms
     );
 
     let mut violations = Vec::new();
     check_budget(
         "note_get",
-        note_get,
+        &note_get,
         args.max_p50_ms,
         args.max_p95_ms,
         &mut violations,
     );
     check_budget(
         "notes_list",
-        notes_list,
+        &notes_list,
         args.max_p50_ms,
         args.max_p95_ms,
         &mut violations,
     );
     check_budget(
         "note_context",
-        note_context,
+        &note_context,
         args.max_p50_ms,
         args.max_p95_ms,
         &mut violations,
     );
     check_budget(
         "events_poll",
-        events_poll,
+        &events_poll,
         args.max_p50_ms,
         args.max_p95_ms,
         &mut violations,
@@ -682,6 +744,7 @@ fn run_bridge_benchmark(args: &Args) -> Result<()> {
 
 fn parse_benchmark_vault(args: &Args) -> Result<(PathBuf, Option<TempDir>)> {
     if let Some(vault_root) = &args.vault_root {
+        validate_repository_input(vault_root)?;
         if !vault_root.is_dir() {
             bail!(
                 "vault root does not exist or is not a directory: {}",
@@ -691,7 +754,7 @@ fn parse_benchmark_vault(args: &Args) -> Result<(PathBuf, Option<TempDir>)> {
         return Ok((vault_root.clone(), None));
     }
 
-    let temp = tempdir().context("create parse benchmark temp directory")?;
+    let temp = benchmark_tempdir().context("create parse benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let notes_dir = vault_root.join("notes");
     fs::create_dir_all(&notes_dir).context("create parse benchmark notes directory")?;
@@ -712,7 +775,7 @@ fn search_benchmark_vault(args: &Args) -> Result<(PathBuf, PathBuf, Option<TempD
         return Ok((vault_root, db_path, None));
     }
 
-    let temp = tempdir().context("create search benchmark temp directory")?;
+    let temp = benchmark_tempdir().context("create search benchmark temp directory")?;
     let vault_root = temp.path().join("vault");
     let db_path = temp.path().join("tao.sqlite");
     seed_indexed_bridge_vault(&vault_root, &db_path, args.bridge_notes.max(128))
@@ -721,15 +784,34 @@ fn search_benchmark_vault(args: &Args) -> Result<(PathBuf, PathBuf, Option<TempD
 }
 
 fn collect_markdown_payloads(vault_root: &Path, limit: usize) -> Result<Vec<(String, String)>> {
+    let vault_root = vault_root
+        .canonicalize()
+        .context("canonicalize benchmark vault")?;
     let mut paths = Vec::<PathBuf>::new();
-    collect_markdown_paths(vault_root, &mut paths)?;
+    collect_markdown_paths(&vault_root, &mut paths)?;
     paths.sort();
-    paths.truncate(limit.max(1));
+    let largest = paths
+        .iter()
+        .max_by_key(|path| fs::metadata(path).map(|value| value.len()).unwrap_or(0))
+        .cloned();
+    let sample_count = limit.max(1).min(paths.len());
+    if sample_count < paths.len() {
+        paths = (0..sample_count)
+            .map(|index| paths[index * paths.len() / sample_count].clone())
+            .collect();
+    }
 
+    if let Some(largest) = largest {
+        if let Some(index) = paths.iter().position(|path| *path == largest) {
+            paths.swap(0, index);
+        } else if let Some(first) = paths.first_mut() {
+            *first = largest;
+        }
+    }
     let mut payloads = Vec::with_capacity(paths.len());
     for path in paths {
         let normalized = path
-            .strip_prefix(vault_root)
+            .strip_prefix(&vault_root)
             .with_context(|| format!("strip vault prefix from {}", path.display()))?
             .to_string_lossy()
             .replace('\\', "/");
@@ -740,29 +822,25 @@ fn collect_markdown_payloads(vault_root: &Path, limit: usize) -> Result<Vec<(Str
 }
 
 fn collect_markdown_paths(current: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(current).with_context(|| format!("read dir {}", current.display()))? {
-        let entry = entry.with_context(|| format!("read dir entry {}", current.display()))?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        if name == ".git" || name == ".obsidian" || name == ".tao" {
-            continue;
-        }
-        let metadata = entry
-            .metadata()
-            .with_context(|| format!("metadata {}", path.display()))?;
-        if metadata.is_dir() {
-            collect_markdown_paths(&path, paths)?;
-        } else if metadata.is_file()
-            && path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            paths.push(path);
-        }
-    }
+    let manifest = VaultScanService::from_root(current, CasePolicy::Sensitive)?.scan()?;
+    paths.extend(manifest.entries.into_iter().filter_map(|entry| {
+        entry
+            .absolute
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            .then_some(entry.absolute)
+    }));
     Ok(())
+}
+
+fn benchmark_tempdir() -> Result<TempDir> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tao-bench-tmp");
+    fs::create_dir_all(&root).context("create repository-local benchmark temporary root")?;
+    tempfile::Builder::new()
+        .prefix("scenario-")
+        .tempdir_in(root)
+        .context("create repository-local benchmark temporary directory")
 }
 
 fn seed_indexed_bridge_vault(vault_root: &Path, db_path: &Path, notes_total: u64) -> Result<()> {
@@ -801,7 +879,7 @@ fn consume_envelope<T>(envelope: BridgeEnvelope<T>, operation: &str) -> Result<T
 
 fn check_budget(
     metric: &str,
-    summary: LatencySummary,
+    summary: &LatencySummary,
     max_p50_ms: f64,
     max_p95_ms: f64,
     violations: &mut Vec<String>,
@@ -826,7 +904,7 @@ fn percentile(sorted_samples: &[f64], percentile: f64) -> f64 {
     }
 
     let max_index = sorted_samples.len().saturating_sub(1);
-    let rank = ((percentile / 100.0) * (max_index as f64)).round();
+    let rank = ((percentile / 100.0) * sorted_samples.len() as f64).ceil() - 1.0;
     let index = usize::try_from(rank as u64)
         .unwrap_or(max_index)
         .min(max_index);
@@ -869,23 +947,112 @@ fn resolve_vault_and_db_paths(args: &Args) -> Result<(PathBuf, PathBuf)> {
             db_path.display()
         );
     }
+    validate_repository_input(&vault_root)?;
+    validate_repository_input(&db_path)?;
     Ok((vault_root, db_path))
 }
 
-fn write_benchmark_reports(args: &Args, report: &JsonValue, scenario: &str) -> Result<()> {
-    validate_report_output_paths(args)?;
-    if let Some(path) = &args.json_out {
-        write_json_report(path, report)?;
-        println!("{scenario} report written to {}", path.display());
-    }
-    if let Some(path) = &args.markdown_out {
-        write_markdown_summary(path, report)?;
-        println!("{scenario} markdown summary written to {}", path.display());
+fn validate_repository_input(path: &Path) -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let canonical = path
+        .canonicalize()
+        .context("canonicalize benchmark input")?;
+    if !canonical.starts_with(root) {
+        bail!(
+            "SDK benchmark inputs must remain repository-local; use the explicit live suite for external vaults"
+        );
     }
     Ok(())
 }
 
+fn write_benchmark_reports(args: &Args, report: &JsonValue, scenario: &str) -> Result<()> {
+    validate_report_output_paths(args)?;
+    let mut report = report.clone();
+    report["schema_version"] = json!(2);
+    report["backend"] = json!("direct_sdk");
+    report["platform"] = json!({"os": std::env::consts::OS, "arch": std::env::consts::ARCH});
+    report["budget_enforced"] = json!(args.enforce_budgets);
+    let mut violations = Vec::new();
+    if args.enforce_budgets {
+        let metrics = if let Some(metrics) = report.get("metrics").and_then(JsonValue::as_object) {
+            metrics
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect::<Vec<_>>()
+        } else if let Some(latency) = report.get("latency") {
+            if latency.get("reused_connection").is_some() {
+                vec![
+                    ("reused_connection", &latency["reused_connection"]),
+                    (
+                        "new_connection_warm_filesystem",
+                        &latency["new_connection_warm_filesystem"],
+                    ),
+                ]
+            } else {
+                vec![(scenario, latency)]
+            }
+        } else {
+            bail!("budget enforcement requires latency metrics");
+        };
+        if metrics.is_empty() {
+            bail!("budget enforcement requires nonempty latency metrics");
+        }
+        for (name, values) in metrics {
+            let samples = values
+                .get("samples_ms")
+                .and_then(JsonValue::as_array)
+                .context("budget metric missing samples")?
+                .iter()
+                .map(|value| value.as_f64().context("budget sample must be numeric"))
+                .collect::<Result<Vec<_>>>()?;
+            if samples.len() < 20 {
+                bail!("budget metric requires at least 20 samples");
+            }
+            let summary = LatencySummary::from_samples(samples)?;
+            check_budget(
+                name,
+                &summary,
+                args.max_p50_ms,
+                args.max_p95_ms,
+                &mut violations,
+            );
+        }
+        report["violations"] = json!(violations);
+        report["status"] = json!(if violations.is_empty() {
+            "pass"
+        } else {
+            "fail"
+        });
+    }
+    if let Some(path) = &args.json_out {
+        write_json_report(path, &report)?;
+        println!("{scenario} report written to {}", path.display());
+    }
+    if let Some(path) = &args.markdown_out {
+        write_markdown_summary(path, &report)?;
+        println!("{scenario} markdown summary written to {}", path.display());
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        bail!("benchmark exceeded budgets: {}", violations.join("; "));
+    }
+}
+
 fn validate_report_output_paths(args: &Args) -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    for path in [&args.json_out, &args.markdown_out].into_iter().flatten() {
+        if !report_output_identity(path)?.starts_with(&root) {
+            bail!(
+                "benchmark report output must remain inside repository: {}",
+                path.display()
+            );
+        }
+    }
     if let (Some(json_path), Some(markdown_path)) = (&args.json_out, &args.markdown_out)
         && report_output_identity(json_path)? == report_output_identity(markdown_path)?
     {
@@ -909,12 +1076,26 @@ fn report_output_identity(path: &Path) -> Result<PathBuf> {
             .context("resolve current directory for report output path")?
             .join(path)
     };
-    if let (Some(parent), Some(file_name)) = (absolute.parent(), absolute.file_name())
-        && let Ok(canonical_parent) = fs::canonicalize(parent)
-    {
-        return Ok(canonical_parent.join(file_name));
+    // Resolve the nearest existing ancestor, so a symlink preceding not-yet-created
+    // directories cannot hide an output escape.
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = fs::canonicalize(ancestor) {
+            let mut resolved = canonical;
+            for name in missing.iter().rev() {
+                resolved.push(name);
+            }
+            return Ok(normalize_lexical_path(&resolved));
+        }
+        missing.push(
+            ancestor
+                .file_name()
+                .context("output path has no resolvable ancestor")?
+                .to_os_string(),
+        );
+        ancestor = ancestor.parent().context("output path has no parent")?;
     }
-    Ok(normalize_lexical_path(&absolute))
 }
 
 fn normalize_lexical_path(path: &Path) -> PathBuf {
@@ -951,30 +1132,38 @@ fn write_markdown_summary(path: &Path, report: &JsonValue) -> Result<()> {
         markdown.push_str("| --- | ---: | ---: | ---: |\n");
         for (metric, values) in metrics {
             markdown.push_str(&format!(
-                "| {metric} | {:.3} | {:.3} | {:.3} |\n",
-                json_number(values, "p50_ms"),
-                json_number(values, "p95_ms"),
-                json_number(values, "max_ms")
+                "| {metric} | {} | {} | {} |\n",
+                json_number_display(values, "p50_ms"),
+                json_number_display(values, "p95_ms"),
+                json_number_display(values, "max_ms")
             ));
         }
         markdown.push('\n');
     } else if let Some(latency) = report.get("latency") {
         markdown.push_str("| mode | p50_ms | p95_ms | max_ms |\n");
         markdown.push_str("| --- | ---: | ---: | ---: |\n");
-        if latency.get("warm").is_some() || latency.get("cold").is_some() {
-            write_latency_row(&mut markdown, "warm", latency.get("warm"));
-            write_latency_row(&mut markdown, "cold", latency.get("cold"));
+        if latency.get("reused_connection").is_some() {
+            write_latency_row(
+                &mut markdown,
+                "reused connection",
+                latency.get("reused_connection"),
+            );
+            write_latency_row(
+                &mut markdown,
+                "new connection, warm filesystem",
+                latency.get("new_connection_warm_filesystem"),
+            );
         } else {
             write_latency_row(&mut markdown, "sample", Some(latency));
         }
         markdown.push('\n');
     }
     if let Some(improvement_pct) = report
-        .pointer("/improvement/p50_vs_cold_pct")
+        .pointer("/improvement/p50_vs_new_connection_pct")
         .and_then(JsonValue::as_f64)
     {
         markdown.push_str(&format!(
-            "- warm_vs_cold_p50_improvement_pct: `{improvement_pct:.3}`\n"
+            "- reused_vs_new_connection_p50_improvement_pct: `{improvement_pct:.3}`\n"
         ));
     }
 
@@ -999,15 +1188,27 @@ fn write_json_report(path: &Path, report: &JsonValue) -> Result<()> {
 
 fn write_latency_row(markdown: &mut String, mode: &str, values: Option<&JsonValue>) {
     markdown.push_str(&format!(
-        "| {mode} | {:.3} | {:.3} | {:.3} |\n",
-        values.map_or(0.0, |value| json_number(value, "p50_ms")),
-        values.map_or(0.0, |value| json_number(value, "p95_ms")),
-        values.map_or(0.0, |value| json_number(value, "max_ms"))
+        "| {mode} | {} | {} | {} |\n",
+        values.map_or_else(
+            || "n/a".to_string(),
+            |value| json_number_display(value, "p50_ms")
+        ),
+        values.map_or_else(
+            || "n/a".to_string(),
+            |value| json_number_display(value, "p95_ms")
+        ),
+        values.map_or_else(
+            || "n/a".to_string(),
+            |value| json_number_display(value, "max_ms")
+        )
     ));
 }
 
-fn json_number(value: &JsonValue, key: &str) -> f64 {
-    value.get(key).and_then(JsonValue::as_f64).unwrap_or(0.0)
+fn json_number_display(value: &JsonValue, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(JsonValue::as_f64)
+        .map_or_else(|| "n/a".to_string(), |number| format!("{number:.6}"))
 }
 
 fn enforce_startup_budget(
@@ -1057,8 +1258,76 @@ mod tests {
     }
 
     #[test]
+    fn latency_rejects_invalid_samples_and_preserves_sub_microsecond_values() {
+        for samples in [
+            vec![],
+            vec![0.0],
+            vec![-1.0],
+            vec![f64::NAN],
+            vec![f64::INFINITY],
+        ] {
+            assert!(LatencySummary::from_samples(samples).is_err());
+        }
+        let summary = LatencySummary::from_samples(vec![0.000_123; 20]).expect("samples");
+        assert_eq!(summary.as_json()["p50_ms"], json!(0.000_123));
+        assert_eq!(
+            summary.as_json()["samples_ms"].as_array().unwrap().len(),
+            20
+        );
+        let sequence = LatencySummary::from_samples((1..=20).map(f64::from).collect()).unwrap();
+        assert_eq!(sequence.p50_ms, 10.5);
+        assert_eq!(sequence.p95_ms, 19.0);
+    }
+
+    #[test]
+    fn every_scenario_budget_uses_validated_raw_samples_and_fails_closed() {
+        let temp = benchmark_tempdir().unwrap();
+        let mut args = report_args(None);
+        args.iterations = 20;
+        args.enforce_budgets = true;
+        args.max_p50_ms = 0.5;
+        args.json_out = Some(temp.path().join("failed.json"));
+        // The misleading cached summary cannot override the actual measured samples.
+        let report = json!({"scenario": "parse", "iterations": 20,
+            "latency": {"p50_ms": 0.001, "samples_ms": vec![1.0; 20]}});
+        assert!(write_benchmark_reports(&args, &report, "parse").is_err());
+        let observed: JsonValue =
+            serde_json::from_slice(&fs::read(args.json_out.as_ref().unwrap()).unwrap()).unwrap();
+        assert_eq!(observed["status"], "fail");
+        for latency in [
+            json!({}),
+            json!({"samples_ms": []}),
+            json!({"samples_ms": vec![0.0; 20]}),
+        ] {
+            let malformed = json!({"latency": latency});
+            assert!(write_benchmark_reports(&args, &malformed, "parse").is_err());
+        }
+    }
+
+    #[test]
+    fn parser_sampling_covers_manifest_and_honors_inclusion() {
+        let temp = benchmark_tempdir().expect("fixture");
+        for category in ["a", "b", "c", "d"] {
+            fs::create_dir_all(temp.path().join(category)).unwrap();
+            for index in 0..10 {
+                fs::write(
+                    temp.path().join(category).join(format!("{index:02}.md")),
+                    "# Sample",
+                )
+                .unwrap();
+            }
+        }
+        fs::write(temp.path().join(".taoignore"), "d/\n").unwrap();
+        let samples = collect_markdown_payloads(temp.path(), 6).unwrap();
+        assert!(samples.iter().any(|(path, _)| path.starts_with("a/")));
+        assert!(samples.iter().any(|(path, _)| path.starts_with("b/")));
+        assert!(samples.iter().any(|(path, _)| path.starts_with("c/")));
+        assert!(!samples.iter().any(|(path, _)| path.starts_with("d/")));
+    }
+
+    #[test]
     fn report_writer_honors_markdown_out_for_simple_latency() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let markdown_out = temp.path().join("parse.md");
         let report = json!({
             "scenario": "parse",
@@ -1076,12 +1345,12 @@ mod tests {
 
         let markdown = std::fs::read_to_string(markdown_out).expect("read markdown report");
         assert!(markdown.contains("- scenario: `parse`"));
-        assert!(markdown.contains("| sample | 1.000 | 2.000 | 3.000 |"));
+        assert!(markdown.contains("| sample | 1.000000 | 2.000000 | 3.000000 |"));
     }
 
     #[test]
     fn report_writer_honors_markdown_out_for_bridge_metrics() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let markdown_out = temp.path().join("bridge.md");
         let report = json!({
             "scenario": "bridge",
@@ -1101,12 +1370,12 @@ mod tests {
 
         let markdown = std::fs::read_to_string(markdown_out).expect("read markdown report");
         assert!(markdown.contains("- scenario: `bridge`"));
-        assert!(markdown.contains("| note_get | 1.000 | 2.000 | 3.000 |"));
+        assert!(markdown.contains("| note_get | 1.000000 | 2.000000 | 3.000000 |"));
     }
 
     #[test]
     fn report_writer_does_not_infer_markdown_out_from_json_out() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let json_out = temp.path().join("bench.md");
         let mut args = report_args(None);
         args.json_out = Some(json_out.clone());
@@ -1130,7 +1399,7 @@ mod tests {
 
     #[test]
     fn report_writer_rejects_identical_json_and_markdown_paths_before_write() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let report_path = temp.path().join("bench.json");
         std::fs::write(&report_path, "sentinel").expect("seed report file");
         let mut args = report_args(Some(report_path.clone()));
@@ -1160,7 +1429,7 @@ mod tests {
 
     #[test]
     fn report_writer_rejects_normalized_json_and_markdown_path_collision() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let reports_dir = temp.path().join("reports");
         std::fs::create_dir_all(&reports_dir).expect("create reports dir");
         let report_path = reports_dir.join("bench.json");
@@ -1192,7 +1461,7 @@ mod tests {
 
     #[test]
     fn startup_budget_enforcement_rejects_failed_status() {
-        let temp = tempdir().expect("tempdir");
+        let temp = benchmark_tempdir().expect("tempdir");
         let mut args = report_args(Some(temp.path().join("startup.md")));
         args.scenario = Scenario::Startup;
         args.enforce_budgets = true;

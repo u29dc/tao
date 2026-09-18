@@ -1,18 +1,29 @@
 use super::*;
 
-pub(crate) fn paginate_json_items(
-    items: Vec<JsonValue>,
-    limit: u32,
-    offset: u32,
-) -> Vec<JsonValue> {
-    items
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .collect()
-}
-
 pub(crate) fn link_edge_to_json(edge: tao_sdk_service::LinkGraphEdge) -> JsonValue {
+    let fragment_status = edge
+        .evidence
+        .as_ref()
+        .and_then(|value| value.get("fragment_status"))
+        .and_then(JsonValue::as_str);
+    let fragment_issue = matches!(
+        fragment_status,
+        Some("bad_anchor" | "bad_block" | "bad_page" | "pending")
+    );
+    let issue_scope = if edge.is_unresolved {
+        Some("document")
+    } else if fragment_issue {
+        Some("fragment")
+    } else {
+        None
+    };
+    let issue_status = if !edge.is_unresolved && fragment_status == Some("pending") {
+        Some("pending")
+    } else if issue_scope.is_some() {
+        Some("broken")
+    } else {
+        None
+    };
     serde_json::json!({
         "link_id": edge.link_id,
         "source_file_id": edge.source_file_id,
@@ -25,6 +36,9 @@ pub(crate) fn link_edge_to_json(edge: tao_sdk_service::LinkGraphEdge) -> JsonVal
         "is_unresolved": edge.is_unresolved,
         "unresolved_reason": edge.unresolved_reason,
         "source_field": edge.source_field,
+        "evidence": edge.evidence,
+        "issue_scope": issue_scope,
+        "issue_status": issue_status,
     })
 }
 
@@ -34,88 +48,34 @@ pub(crate) fn handle_meta_token_aggregate(
     command: &str,
     runtime: &mut RuntimeMode,
 ) -> Result<CommandResult> {
+    use tao_sdk_service::{
+        MetadataAggregationKind, MetadataAggregationRequest, MetadataAggregationService,
+    };
+    let kind = match property_key {
+        "tags" => MetadataAggregationKind::Tags,
+        "aliases" => MetadataAggregationKind::Aliases,
+        _ => return Err(anyhow!("unsupported metadata token key '{property_key}'")),
+    };
+    let request = MetadataAggregationRequest::new(kind, args.limit, args.offset)?;
     let resolved = args.resolve()?;
-    let rows = with_connection(runtime, &resolved, |connection| {
-        Ok(PropertiesRepository::list_by_key_with_paths(
-            connection,
-            property_key,
-        )?)
-    })
-    .map_err(|source| anyhow!("query property key '{}' failed: {source}", property_key))?;
-    let mut counts = HashMap::<String, usize>::new();
-    for row in rows {
-        for token in extract_property_tokens(&row.value_json) {
-            *counts.entry(token).or_insert(0) += 1;
-        }
-    }
-    let mut items = counts
+    let page = with_connection(runtime, &resolved, |connection| {
+        Ok(MetadataAggregationService.aggregate(connection, request)?)
+    })?;
+    let items = page
+        .items
         .into_iter()
-        .map(|(token, total)| serde_json::json!({ "token": token, "total": total }))
+        .map(|item| serde_json::json!({ "token": item.value, "total": item.total }))
         .collect::<Vec<_>>();
-    items.sort_by(|left, right| {
-        right["total"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&left["total"].as_u64().unwrap_or(0))
-            .then_with(|| {
-                left["token"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["token"].as_str().unwrap_or_default())
-            })
-    });
-    let total = items.len();
-    let items = paginate_json_items(items, args.limit, args.offset);
     Ok(CommandResult {
         command: command.to_string(),
         summary: format!("{command} completed"),
         args: serde_json::json!({
-            "total": total,
-            "limit": args.limit,
-            "offset": args.offset,
+            "total": page.total,
+            "limit": page.limit,
+            "offset": page.offset,
             "items": items,
         }),
     })
-}
-
-pub(crate) fn extract_property_tokens(value_json: &str) -> Vec<String> {
-    let parsed = serde_json::from_str::<JsonValue>(value_json)
-        .unwrap_or_else(|_| JsonValue::String(value_json.to_string()));
-    let mut tokens = Vec::new();
-    collect_json_string_tokens(&parsed, &mut tokens);
-    let mut deduped = Vec::new();
-    let mut seen = HashSet::<String>::new();
-    for token in tokens {
-        let key = token.to_ascii_lowercase();
-        if seen.insert(key) {
-            deduped.push(token);
-        }
-    }
-    deduped
-}
-
-pub(crate) fn collect_json_string_tokens(value: &JsonValue, out: &mut Vec<String>) {
-    match value {
-        JsonValue::String(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return;
-            }
-            for token in trimmed
-                .split([',', ' '])
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-            {
-                out.push(token.trim_start_matches('#').to_string());
-            }
-        }
-        JsonValue::Array(values) => {
-            for item in values {
-                collect_json_string_tokens(item, out);
-            }
-        }
-        JsonValue::Null | JsonValue::Bool(_) | JsonValue::Number(_) | JsonValue::Object(_) => {}
-    }
 }
 
 pub(crate) fn normalize_relative_note_path_arg(path: &str, flag: &str) -> Result<String> {

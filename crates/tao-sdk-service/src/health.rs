@@ -34,12 +34,26 @@ pub struct HealthSnapshot {
     pub vault_root: String,
     /// Database status flag.
     pub db_healthy: bool,
+    /// Readiness means SQL is readable, not that all integrity checks ran.
+    pub schema_compatible: bool,
+    /// Canonical revision of the published database.
+    pub canonical_generation: i64,
+    /// Generation represented by derived search.
+    pub search_generation: i64,
+    /// Whether the derived index agrees with its canonical publication.
+    pub derived_current: bool,
+    /// Names of explicit integrity checks performed by the caller.
+    pub consistency_checks: Vec<String>,
+    /// Reported integrity failures, bounded by the diagnostic caller.
+    pub consistency_errors: Vec<String>,
     /// Applied migration row count.
     pub db_migrations: u64,
     /// Current index lag count.
     pub index_lag: u64,
     /// Watcher status label.
     pub watcher_status: String,
+    /// Original degradation detail, if reported by the watcher.
+    pub watcher_reason: Option<String>,
     /// Total scanned files.
     pub files_total: u64,
     /// Total markdown files from latest scan.
@@ -84,12 +98,34 @@ impl HealthSnapshotService {
             .optional()
             .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
 
+        let migration_status =
+            tao_sdk_storage::preflight_migrations(connection).map_err(|source| {
+                HealthSnapshotError::MigrationStatus {
+                    message: source.to_string(),
+                }
+            })?;
+        let generations = tao_sdk_storage::IndexGenerationRepository::get(connection)
+            .map_err(|source| HealthSnapshotError::DatabaseStatus { source })?;
+        let watcher_reason = match &watcher_status {
+            WatcherStatus::Degraded { reason } => Some(reason.clone()),
+            _ => None,
+        };
         Ok(HealthSnapshot {
             vault_root: vault_root.to_string_lossy().to_string(),
             db_healthy: true,
+            schema_compatible: migration_status.pending_migrations == 0,
+            canonical_generation: generations.canonical_generation,
+            search_generation: generations.search_generation,
+            derived_current: generations.canonical_generation == generations.search_generation
+                && generations.derived_generation == generations.published_derived_generation
+                && generations.segments_total == generations.published_segments
+                && generations.aliases_total == generations.published_aliases,
+            consistency_checks: Vec::new(),
+            consistency_errors: Vec::new(),
             db_migrations,
             index_lag,
             watcher_status: watcher_status.as_label().to_string(),
+            watcher_reason,
             files_total,
             markdown_files,
             last_index_updated_at,
@@ -100,6 +136,9 @@ impl HealthSnapshotService {
 /// Errors returned by health snapshot service operations.
 #[derive(Debug, Error)]
 pub enum HealthSnapshotError {
+    /// The stored schema is incompatible or its migration history is invalid.
+    #[error("failed to inspect migration compatibility: {message}")]
+    MigrationStatus { message: String },
     /// Scanner initialization failed.
     #[error("failed to initialize vault scanner for health snapshot: {source}")]
     CreateScanner {

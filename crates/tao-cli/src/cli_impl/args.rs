@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ExecutionMode {
+    #[default]
+    Auto,
+    Direct,
+    RequiredDaemon,
+}
+
 #[derive(Debug, Clone, Parser, Serialize, Deserialize)]
 #[command(name = "tao", version, about = "tao cli")]
 pub(crate) struct Cli {
@@ -21,6 +30,18 @@ pub(crate) struct Cli {
     /// Route command execution through a warm daemon socket.
     #[arg(long, global = true, hide = true)]
     pub(crate) daemon_socket: Option<String>,
+    /// Execution backend: auto starts a daemon when available; direct never starts one.
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    pub(crate) execution_mode: ExecutionMode,
+    /// Maximum request execution time in milliseconds, including queued work.
+    #[arg(long, global = true, default_value_t = 120_000, value_parser = clap::value_parser!(u64).range(1..=3_600_000))]
+    pub(crate) timeout_ms: u64,
+    /// Bypass stored command results while retaining warm runtime resources.
+    #[arg(long, global = true, hide = true)]
+    pub(crate) no_result_cache: bool,
+    /// Require the query and index generation from a previous page response.
+    #[arg(long, global = true)]
+    pub(crate) continuation: Option<String>,
     #[command(subcommand)]
     pub(crate) command: Commands,
 }
@@ -88,10 +109,10 @@ pub(crate) struct ToolsArgs {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub(crate) enum DocCommands {
-    /// Return one note by normalized path.
-    Read(NotePathArgs),
+    /// Return indexed Markdown, TXT, or PDF content segments.
+    Read(DocReadArgs),
     /// List markdown note windows.
-    List(VaultPathArgs),
+    List(DocListArgs),
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -106,40 +127,13 @@ pub(crate) enum BaseCommands {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub(crate) enum GraphCommands {
-    /// Canonical one-hop graph link window for a note.
+    /// Inspect paged link occurrences for a file.
     Links(GraphLinksArgs),
-    /// Canonical graph-quality audit window.
+    /// Audit unresolved links and graph structure.
     Audit(GraphAuditArgs),
-    /// Return outgoing links for one note.
-    #[command(hide = true)]
-    Outgoing(NotePathArgs),
-    /// Return backlinks for one note.
-    #[command(hide = true)]
-    Backlinks(NotePathArgs),
-    /// Return scoped inbound-link counts for file audits.
-    #[command(hide = true)]
-    InboundScope(GraphInboundScopeArgs),
-    /// Return unresolved graph links.
-    #[command(hide = true)]
-    Unresolved(GraphWindowArgs),
-    /// Return notes with no outgoing resolved edges.
-    #[command(hide = true)]
-    Deadends(GraphWindowArgs),
-    /// Return isolated notes with no incoming/outgoing resolved edges.
-    #[command(hide = true)]
-    Orphans(GraphWindowArgs),
-    /// Return strict floating files with built-in graph-view filtering.
-    #[command(hide = true)]
-    Floating(GraphWindowArgs),
-    /// Return connected components across resolved graph edges.
-    #[command(hide = true)]
-    Components(GraphComponentsArgs),
-    /// Return one-hop neighbors for one note.
-    #[command(hide = true)]
-    Neighbors(GraphNeighborsArgs),
-    /// Return shortest path between two notes.
+    /// Find a bounded shortest path between two files.
     Path(GraphPathArgs),
-    /// Walk graph neighbors from one root note.
+    /// Traverse a bounded graph neighborhood.
     Walk(GraphWalkArgs),
 }
 
@@ -151,9 +145,6 @@ pub(crate) enum MetaCommands {
     Tags(GraphWindowArgs),
     /// Aggregate aliases across vault.
     Aliases(GraphWindowArgs),
-    /// Aggregate task counts across vault.
-    #[command(hide = true)]
-    Tasks(TaskListArgs),
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
@@ -166,16 +157,10 @@ pub(crate) enum TaskCommands {
 pub(crate) enum VaultCommands {
     /// Open one vault path and initialize sqlite state.
     Open(VaultPathArgs),
-    /// Return vault health snapshot.
-    #[command(hide = true)]
-    Stats(VaultPathArgs),
     /// Validate migration state/checksums before startup migration apply.
     Preflight(VaultPathArgs),
     /// Run smart reindex using vault scan rules and root .taoignore exclusions.
     Reindex(VaultReindexArgs),
-    /// Apply incremental reconcile pass.
-    #[command(hide = true)]
-    Reconcile(VaultPathArgs),
     /// Manage persistent warm-runtime daemon.
     #[command(hide = true)]
     Daemon {
@@ -223,16 +208,37 @@ pub(crate) struct HealthArgs {
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct NotePathArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
+pub(crate) struct DocListArgs {
     #[arg(long)]
     pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
     #[arg(long)]
     pub(crate) db_path: Option<String>,
-    /// Vault-relative normalized note path.
+    /// Maximum notes to return (1 through 1000).
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub(crate) limit: u32,
+    /// Number of notes to skip in canonical path order.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) offset: usize,
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub(crate) struct DocReadArgs {
+    #[arg(long)]
+    pub(crate) vault_root: Option<String>,
+    #[arg(long)]
+    pub(crate) db_path: Option<String>,
+    /// Vault-relative source path.
     #[arg(long)]
     pub(crate) path: String,
+    /// First indexed content segment to retrieve.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) offset: usize,
+    /// Maximum indexed content segments to retrieve.
+    #[arg(long, default_value_t = 100)]
+    pub(crate) limit: usize,
+    /// Require the source revision returned by a previous content response.
+    #[arg(long)]
+    pub(crate) revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -349,34 +355,6 @@ pub(crate) struct GraphAuditArgs {
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct GraphInboundScopeArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
-    #[arg(long)]
-    pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    pub(crate) db_path: Option<String>,
-    /// Vault-relative folder/file prefix to audit.
-    #[arg(long)]
-    pub(crate) scope: String,
-    /// Include markdown files in scoped audit.
-    #[arg(long, default_value_t = false)]
-    pub(crate) include_markdown: bool,
-    /// Include non-markdown files in scoped audit.
-    #[arg(long, default_value_t = false)]
-    pub(crate) include_non_md: bool,
-    /// Optional exclude path prefixes (repeatable).
-    #[arg(long)]
-    pub(crate) exclude_prefix: Vec<String>,
-    /// Window size.
-    #[arg(long, default_value_t = 100)]
-    pub(crate) limit: u32,
-    /// Window offset.
-    #[arg(long, default_value_t = 0)]
-    pub(crate) offset: u32,
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub(crate) struct GraphWalkArgs {
     /// Optional absolute vault root path. Falls back to config/env defaults.
     #[arg(long)]
@@ -399,53 +377,6 @@ pub(crate) struct GraphWalkArgs {
     /// Include folder hierarchy overlay edges.
     #[arg(long, default_value_t = false)]
     pub(crate) include_folders: bool,
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct GraphComponentsArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
-    #[arg(long)]
-    pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    pub(crate) db_path: Option<String>,
-    /// Window size.
-    #[arg(long, default_value_t = 100)]
-    pub(crate) limit: u32,
-    /// Window offset.
-    #[arg(long, default_value_t = 0)]
-    pub(crate) offset: u32,
-    /// Include full member path list for each component (slower on large vaults).
-    #[arg(long, default_value_t = false)]
-    pub(crate) include_members: bool,
-    /// Number of member paths to include when `--include-members` is not set.
-    #[arg(long, default_value_t = 64)]
-    pub(crate) sample_size: u32,
-    /// Component mode selector: weak|strong.
-    #[arg(long, default_value = "weak")]
-    pub(crate) mode: String,
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub(crate) struct GraphNeighborsArgs {
-    /// Optional absolute vault root path. Falls back to config/env defaults.
-    #[arg(long)]
-    pub(crate) vault_root: Option<String>,
-    /// Optional sqlite database file path override.
-    #[arg(long)]
-    pub(crate) db_path: Option<String>,
-    /// Root note path.
-    #[arg(long)]
-    pub(crate) path: String,
-    /// Direction selector: all|outgoing|incoming.
-    #[arg(long, default_value = "all")]
-    pub(crate) direction: String,
-    /// Window size.
-    #[arg(long, default_value_t = 100)]
-    pub(crate) limit: u32,
-    /// Window offset.
-    #[arg(long, default_value_t = 0)]
-    pub(crate) offset: u32,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -503,6 +434,9 @@ pub(crate) struct VaultReindexArgs {
     /// Inspect the planned reindex mode without writing SQLite state.
     #[arg(long, default_value_t = false)]
     pub(crate) dry_run: bool,
+    /// Spend at most this many milliseconds processing pending document extraction.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=600_000))]
+    pub(crate) wait_content_ms: u64,
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -533,9 +467,6 @@ pub(crate) struct SearchArgs {
     /// Include bounded note body excerpts.
     #[arg(long, default_value_t = false)]
     pub(crate) include_content: bool,
-    /// Include local frontmatter/property values.
-    #[arg(long, default_value_t = true)]
-    pub(crate) include_pii: bool,
     /// Redact local frontmatter/property values.
     #[arg(long = "no-pii", default_value_t = false)]
     pub(crate) no_pii: bool,
@@ -656,7 +587,7 @@ impl HealthArgs {
     }
 }
 
-impl NotePathArgs {
+impl DocReadArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
@@ -692,25 +623,7 @@ impl GraphAuditArgs {
     }
 }
 
-impl GraphInboundScopeArgs {
-    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
-    }
-}
-
 impl GraphWalkArgs {
-    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
-    }
-}
-
-impl GraphComponentsArgs {
-    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
-        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
-    }
-}
-
-impl GraphNeighborsArgs {
     pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
         resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
@@ -769,5 +682,11 @@ impl DaemonStartArgs {
             self.vault_root.as_deref(),
             self.db_path.as_deref(),
         )
+    }
+}
+
+impl DocListArgs {
+    pub(crate) fn resolve(&self) -> Result<ResolvedVaultPathArgs> {
+        resolve_vault_paths(self.vault_root.as_deref(), self.db_path.as_deref())
     }
 }

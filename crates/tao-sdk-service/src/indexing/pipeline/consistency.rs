@@ -7,8 +7,6 @@ pub enum ConsistencyIssueKind {
     OrphanProperty,
     /// Base row references a missing file row.
     OrphanBase,
-    /// Render cache row references a missing file row.
-    OrphanRenderCache,
     /// Link row source file reference is missing.
     OrphanLinkSource,
     /// Link row resolved target reference is missing.
@@ -19,6 +17,8 @@ pub enum ConsistencyIssueKind {
     OutsideVaultRoot,
     /// File row absolute path does not exist on disk.
     MissingOnDiskFile,
+    /// File existence cannot be established due to an I/O or permission failure.
+    InaccessibleOnDiskFile,
 }
 
 /// One consistency issue identified during index consistency checking.
@@ -63,7 +63,6 @@ impl IndexConsistencyChecker {
 
         issues.extend(self_heal::query_orphan_properties(connection)?);
         issues.extend(self_heal::query_orphan_bases(connection)?);
-        issues.extend(self_heal::query_orphan_render_cache(connection)?);
         issues.extend(self_heal::query_orphan_link_sources(connection)?);
         issues.extend(self_heal::query_broken_link_targets(connection)?);
         issues.extend(self_heal::query_link_resolution_mismatches(connection)?);

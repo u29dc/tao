@@ -2,394 +2,25 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rusqlite::{Connection, params_from_iter, types::Value};
-use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tao_sdk_core::note_title_from_path;
-use tao_sdk_markdown::{MarkdownParseRequest, MarkdownParser};
 use tao_sdk_storage::{
-    FilesRepository, PropertiesRepository, SearchAliasRepository, SearchSegmentCandidate,
-    SearchSegmentMatch, SearchSegmentQuery, SearchSegmentRepository,
+    ContentRepository, DocumentsRepository, FilesRepository, LinksRepository, PropertiesRepository,
+    SearchAliasRepository, SearchSegmentCandidate, SearchSegmentMatch, SearchSegmentQuery,
+    SearchSegmentRepository,
 };
 use tao_sdk_vault::CasePolicy;
 use thiserror::Error;
 
 use crate::{BacklinkGraphService, GraphWalkDirection, GraphWalkEdgeType, GraphWalkRequest};
 
-/// Search surface selector for high-level vault search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchKind {
-    /// Let the service search all indexed surfaces and rank canonical candidates.
-    Auto,
-    /// Search every supported indexed surface.
-    All,
-    /// Search markdown document title/path/body index.
-    Docs,
-    /// Search the indexed file inventory.
-    Files,
-    /// Search base definitions and base row values.
-    Bases,
-    /// Search frontmatter/property rows.
-    Properties,
-    /// Search extracted task rows.
-    Tasks,
-    /// Search graph link targets and paths.
-    Graph,
-}
-
-impl SearchKind {
-    /// Parse one public search kind label.
-    pub fn parse(raw: &str) -> Result<Self, VaultSearchError> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "all" => Ok(Self::All),
-            "docs" => Ok(Self::Docs),
-            "files" => Ok(Self::Files),
-            "bases" => Ok(Self::Bases),
-            "properties" => Ok(Self::Properties),
-            "tasks" => Ok(Self::Tasks),
-            "graph" => Ok(Self::Graph),
-            other => Err(VaultSearchError::InvalidKind {
-                value: other.to_string(),
-            }),
-        }
-    }
-
-    /// Public label used in JSON output.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::All => "all",
-            Self::Docs => "docs",
-            Self::Files => "files",
-            Self::Bases => "bases",
-            Self::Properties => "properties",
-            Self::Tasks => "tasks",
-            Self::Graph => "graph",
-        }
-    }
-}
-
-/// Request payload for graph-aware vault search.
-#[derive(Debug, Clone)]
-pub struct VaultSearchRequest {
-    /// Canonical vault root.
-    pub vault_root: PathBuf,
-    /// Optional text query.
-    pub query: Option<String>,
-    /// Optional path root for context mode.
-    pub path: Option<String>,
-    /// Surface selector.
-    pub kind: SearchKind,
-    /// Optional path prefix.
-    pub scope: Option<String>,
-    /// Extension filters without leading dots.
-    pub extensions: Vec<String>,
-    /// Include context expansion.
-    pub include_context: bool,
-    /// Graph context depth.
-    pub depth: u32,
-    /// Result limit per section.
-    pub limit: u32,
-    /// Include bounded content excerpts.
-    pub include_content: bool,
-    /// Include local frontmatter/property values.
-    pub include_pii: bool,
-}
-
-/// Top-level search response payload.
-#[derive(Debug, Clone, Serialize)]
-pub struct VaultSearchResult {
-    /// Original query string, empty for path-only context mode.
-    pub query: String,
-    /// Search mode label.
-    pub mode: String,
-    /// Canonical path candidates deduped across surfaces.
-    pub candidates: Vec<SearchCandidate>,
-    /// File inventory matches.
-    pub files: Vec<SearchFileMatch>,
-    /// Markdown document matches.
-    pub docs: Vec<SearchDocMatch>,
-    /// Frontmatter/property matches.
-    pub properties: Vec<SearchPropertyMatch>,
-    /// Extracted task matches.
-    pub tasks: Vec<SearchTaskMatch>,
-    /// Graph/link matches.
-    pub graph: Vec<SearchGraphMatch>,
-    /// Optional context expansion. Empty sections are still present.
-    pub context: SearchContext,
-    /// Total canonical candidates before limit truncation.
-    pub total: u64,
-    /// Per-section result limit.
-    pub limit: u32,
-}
-
-/// One deduped canonical candidate.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchCandidate {
-    /// Normalized vault-relative path.
-    pub path: String,
-    /// Display title derived from note/file path.
-    pub title: String,
-    /// Whether the candidate is a markdown note.
-    pub is_markdown: bool,
-    /// Lowercase extension without leading dot.
-    pub extension: String,
-    /// Ranking score.
-    pub score: i64,
-    /// Matched surfaces.
-    pub kinds: Vec<String>,
-    /// Match reasons.
-    pub reasons: Vec<String>,
-    /// Resolved inbound link count.
-    pub inbound_links: u64,
-    /// Resolved outgoing link count.
-    pub outgoing_links: u64,
-}
-
-/// One file inventory match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchFileMatch {
-    /// Stable file id.
-    pub file_id: String,
-    /// Normalized vault-relative path.
-    pub path: String,
-    /// Lowercase extension without leading dot.
-    pub extension: String,
-    /// Size in bytes.
-    pub size: u64,
-    /// Last modified unix timestamp in milliseconds.
-    pub modified_unix_ms: i64,
-    /// Indexed timestamp.
-    pub indexed_at: String,
-    /// Whether this row is markdown.
-    pub is_markdown: bool,
-    /// Resolved inbound link count.
-    pub inbound_links: u64,
-    /// Resolved outgoing link count.
-    pub outgoing_links: u64,
-    /// Whether the file has any resolved inbound link.
-    pub linked: bool,
-    /// Match reasons.
-    pub matched_in: Vec<String>,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// One markdown document match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchDocMatch {
-    /// Stable file id.
-    pub file_id: String,
-    /// Normalized vault-relative path.
-    pub path: String,
-    /// Display title.
-    pub title: String,
-    /// Indexed timestamp.
-    pub indexed_at: String,
-    /// Matching document surfaces.
-    pub matched_in: Vec<String>,
-    /// Optional bounded excerpt.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub excerpt: Option<String>,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// One property/frontmatter match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchPropertyMatch {
-    /// Stable property id.
-    pub property_id: String,
-    /// Owning file id.
-    pub file_id: String,
-    /// Owning file path.
-    pub path: String,
-    /// Property key.
-    pub key: String,
-    /// Property value type.
-    pub value_type: String,
-    /// Property value, or `"redacted"` when --no-pii is set.
-    pub value: JsonValue,
-    /// Updated timestamp.
-    pub updated_at: String,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// One extracted task match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchTaskMatch {
-    /// Stable task id.
-    pub task_id: String,
-    /// Owning file id.
-    pub file_id: String,
-    /// Owning file path.
-    pub path: String,
-    /// One-based line number.
-    pub line: i64,
-    /// Task state.
-    pub state: String,
-    /// Task text.
-    pub text: String,
-    /// Updated timestamp.
-    pub updated_at: String,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// One graph/link match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchGraphMatch {
-    /// Stable link id.
-    pub link_id: String,
-    /// Source path.
-    pub source_path: String,
-    /// Resolved target path when available.
-    pub target_path: Option<String>,
-    /// Raw target token.
-    pub raw_target: String,
-    /// Link source field.
-    pub source_field: String,
-    /// Whether the link resolved.
-    pub resolved: bool,
-    /// Stable unresolved reason.
-    pub unresolved_reason: Option<String>,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// Context expansion payload.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchContext {
-    /// Selected root candidate.
-    pub root: Option<SearchRoot>,
-    /// Root properties.
-    pub properties: Vec<SearchPropertyMatch>,
-    /// Matching base rows for the root.
-    pub base_rows: Vec<SearchBaseRowMatch>,
-    /// One-hop link panels and grouped paths.
-    pub links: SearchContextLinks,
-    /// Graph walk rows.
-    pub walk: Vec<SearchWalkStep>,
-    /// Date-sorted inferred timeline.
-    pub timeline: Vec<SearchTimelineEntry>,
-    /// Attached or related non-markdown files.
-    pub attachments: Vec<SearchFileMatch>,
-    /// Related counts by coarse kind.
-    pub related_counts: JsonMap<String, JsonValue>,
-    /// Ambiguous near-top candidates.
-    pub ambiguity: Vec<SearchCandidate>,
-}
-
-impl Default for SearchContext {
-    fn default() -> Self {
-        Self {
-            root: None,
-            properties: Vec::new(),
-            base_rows: Vec::new(),
-            links: SearchContextLinks::default(),
-            walk: Vec::new(),
-            timeline: Vec::new(),
-            attachments: Vec::new(),
-            related_counts: JsonMap::new(),
-            ambiguity: Vec::new(),
-        }
-    }
-}
-
-/// Selected root context metadata.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchRoot {
-    /// Stable file id.
-    pub file_id: String,
-    /// Normalized path.
-    pub path: String,
-    /// Display title.
-    pub title: String,
-    /// Whether root is markdown.
-    pub is_markdown: bool,
-    /// Extension.
-    pub extension: String,
-    /// File size.
-    pub size: u64,
-    /// Last modified unix timestamp in milliseconds.
-    pub modified_unix_ms: i64,
-    /// Indexed timestamp.
-    pub indexed_at: String,
-    /// Frontmatter text, or `"redacted"` when --no-pii is set.
-    pub front_matter: Option<String>,
-    /// Optional bounded body excerpt.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body_excerpt: Option<String>,
-}
-
-/// One base row match.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchBaseRowMatch {
-    /// Base id.
-    pub base_id: String,
-    /// Base file path.
-    pub base_path: String,
-    /// View name.
-    pub view_name: String,
-    /// Row file id.
-    pub file_id: String,
-    /// Row file path.
-    pub path: String,
-    /// Projected base row values.
-    pub values: JsonMap<String, JsonValue>,
-    /// Ranking score.
-    pub score: i64,
-}
-
-/// One-hop links.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SearchContextLinks {
-    /// Outgoing link rows.
-    pub outgoing: Vec<SearchGraphMatch>,
-    /// Incoming link rows.
-    pub incoming: Vec<SearchGraphMatch>,
-    /// Related paths grouped by coarse vault role.
-    pub grouped: JsonMap<String, JsonValue>,
-}
-
-/// Graph walk step.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchWalkStep {
-    /// Traversal depth.
-    pub depth: u32,
-    /// Direction label.
-    pub direction: String,
-    /// Edge type label.
-    pub edge_type: String,
-    /// Source path.
-    pub source_path: String,
-    /// Target path when resolved.
-    pub target_path: Option<String>,
-    /// Raw target token.
-    pub raw_target: String,
-    /// Whether the edge resolved.
-    pub resolved: bool,
-}
-
-/// Timeline entry inferred from paths/properties.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchTimelineEntry {
-    /// Date token in YYYY-MM-DD form when inferred.
-    pub date: String,
-    /// Source kind.
-    pub kind: String,
-    /// Related path.
-    pub path: String,
-    /// Human label.
-    pub label: String,
-}
+mod types;
+pub use types::*;
+mod coverage;
+use coverage::search_content_coverage;
 
 /// High-level vault search service.
 #[derive(Debug, Default, Clone, Copy)]
@@ -415,7 +46,17 @@ impl VaultSearchService {
                     source: Box::new(source),
                 })?;
         }
-        self.search_current(connection, request)
+        match self.search_current(connection, request.clone()) {
+            Err(VaultSearchError::InvalidPayload { .. } | VaultSearchError::Payload { .. }) => {
+                crate::SearchCorpusService
+                    .rebuild_atomic(connection, case_policy)
+                    .map_err(|source| VaultSearchError::SearchCorpus {
+                        source: Box::new(source),
+                    })?;
+                self.search_current(connection, request)
+            }
+            result => result,
+        }
     }
 
     /// Execute one graph-aware vault search over already-fresh indexed state.
@@ -424,9 +65,37 @@ impl VaultSearchService {
         connection: &Connection,
         request: VaultSearchRequest,
     ) -> Result<VaultSearchResult, VaultSearchError> {
+        let transaction =
+            if connection.is_autocommit() {
+                Some(connection.unchecked_transaction().map_err(|source| {
+                    VaultSearchError::Sql {
+                        operation: "begin_search_snapshot",
+                        source,
+                    }
+                })?)
+            } else {
+                None
+            };
+        let result = self.search_snapshot(connection, request);
+        if let Some(transaction) = transaction {
+            transaction
+                .commit()
+                .map_err(|source| VaultSearchError::Sql {
+                    operation: "end_search_snapshot",
+                    source,
+                })?;
+        }
+        result
+    }
+
+    fn search_snapshot(
+        &self,
+        connection: &Connection,
+        request: VaultSearchRequest,
+    ) -> Result<VaultSearchResult, VaultSearchError> {
         validate_request(&request)?;
-        let limit = request.limit.clamp(1, 100);
-        let depth = request.depth.min(4);
+        let limit = request.limit;
+        let depth = request.depth;
         let query = request
             .query
             .as_deref()
@@ -434,12 +103,32 @@ impl VaultSearchService {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
         let needle = query.as_deref().map(SearchNeedle::new);
-        let root_path = request
+        let mut root_path = request
             .path
             .as_deref()
             .map(normalize_path_input)
             .transpose()?;
-        let scope = request.scope.as_deref().map(normalize_scope).transpose()?;
+        let insensitive = indexed_case_policy(connection)? == CasePolicy::Insensitive;
+        if insensitive && let Some(path) = &root_path {
+            let key = tao_sdk_vault::path_match_key(path, CasePolicy::Insensitive);
+            if let Some(file) = FilesRepository::get_by_match_key(connection, &key)
+                .map_err(|source| VaultSearchError::Files { source })?
+            {
+                root_path = Some(file.normalized_path);
+            }
+        }
+        let scope = request
+            .scope
+            .as_deref()
+            .map(normalize_scope)
+            .transpose()?
+            .map(|scope| {
+                if insensitive {
+                    tao_sdk_vault::path_match_key(&scope, CasePolicy::Insensitive)
+                } else {
+                    scope
+                }
+            });
         let extensions = normalize_extensions(&request.extensions);
 
         let mut candidates = CandidateSet::new();
@@ -470,6 +159,7 @@ impl VaultSearchService {
                 needle,
                 request.kind,
                 scope.as_deref(),
+                insensitive,
                 &extensions,
                 limit,
                 request.include_content,
@@ -508,7 +198,9 @@ impl VaultSearchService {
             SearchContext::default()
         };
 
-        Ok(VaultSearchResult {
+        let content_coverage =
+            search_content_coverage(connection, scope.as_deref(), insensitive, &extensions)?;
+        let mut result = VaultSearchResult {
             query: query.unwrap_or_default(),
             mode: request.kind.label().to_string(),
             candidates: candidate_rows,
@@ -520,7 +212,11 @@ impl VaultSearchService {
             context,
             total,
             limit,
-        })
+            content_truncated: false,
+            content_coverage,
+        };
+        bound_result_content(&mut result);
+        Ok(result)
     }
 }
 
@@ -565,11 +261,11 @@ impl CandidateSet {
             .entry(path.to_string())
             .or_insert_with(|| CandidateAccumulator {
                 path: path.to_string(),
-                score: canonical_entity_path_boost(path),
+                score: 0,
                 kinds: HashSet::new(),
                 reasons: HashSet::new(),
             });
-        entry.score += score;
+        entry.score = entry.score.max(score);
         entry.kinds.insert(kind.label().to_string());
         entry.reasons.insert(reason);
     }
@@ -656,6 +352,27 @@ struct PendingSegmentMatch {
 }
 
 fn validate_request(request: &VaultSearchRequest) -> Result<(), VaultSearchError> {
+    if request.limit == 0 || request.limit > 100 || request.depth > 4 {
+        return Err(VaultSearchError::InvalidRequest(
+            "search limit must be 1..100 and depth must be 0..4".to_string(),
+        ));
+    }
+    if request
+        .query
+        .as_ref()
+        .is_some_and(|query| query.len() > 4096)
+        || request
+            .extensions
+            .iter()
+            .flat_map(|entry| entry.split(','))
+            .count()
+            > 32
+        || request.extensions.iter().any(|entry| entry.len() > 256)
+    {
+        return Err(VaultSearchError::InvalidRequest(
+            "search query exceeds the 4096-byte or 32-extension bound".to_string(),
+        ));
+    }
     let has_query = request
         .query
         .as_deref()
@@ -680,16 +397,46 @@ fn validate_request(request: &VaultSearchRequest) -> Result<(), VaultSearchError
 #[allow(clippy::too_many_arguments)]
 fn search_indexed_corpus(
     connection: &Connection,
-    vault_root: &Path,
+    _vault_root: &Path,
     needle: &SearchNeedle,
     kind: SearchKind,
     scope: Option<&str>,
+    scope_case_insensitive: bool,
     extensions: &HashSet<String>,
     limit: u32,
     include_content: bool,
     include_pii: bool,
     candidates: &mut CandidateSet,
 ) -> Result<IndexedSearchResult, VaultSearchError> {
+    let rank_needle = needle.clone();
+    connection
+        .create_scalar_function(
+            "tao_search_rank",
+            6,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            move |context| {
+                let path = context.get::<String>(0)?;
+                let label = context.get::<String>(1)?;
+                let surface = context.get::<String>(2)?;
+                let field = context.get::<String>(3)?;
+                let weight = context.get::<i64>(4)?;
+                let rank = context.get::<i64>(5)?;
+                Ok(candidate_score(
+                    &path,
+                    &label,
+                    &surface,
+                    &field,
+                    weight,
+                    rank,
+                    &rank_needle,
+                ))
+            },
+        )
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "register_search_ranker",
+            source,
+        })?;
     let surfaces = surfaces_for_kind(kind);
     let extension_filters = sorted_extensions(extensions);
     let query_limit = indexed_candidate_window(limit);
@@ -698,6 +445,7 @@ fn search_indexed_corpus(
         fts_query,
         surfaces: surfaces.clone(),
         scope: scope.map(ToString::to_string),
+        scope_case_insensitive,
         extensions: extension_filters.clone(),
         limit: query_limit,
     };
@@ -708,13 +456,38 @@ fn search_indexed_corpus(
         &needle.compact,
         &surfaces,
         scope,
+        scope_case_insensitive,
         &extension_filters,
         query_limit,
     )
     .map_err(|source| VaultSearchError::SearchAliases { source })?;
 
-    let segment_candidates = SearchSegmentRepository::query_candidates(connection, &segment_query)
-        .map_err(|source| VaultSearchError::SearchSegments { source })?;
+    let surface_windows = if surfaces.is_empty() {
+        vec!["docs", "files", "properties", "tasks", "graph", "bases"]
+    } else {
+        surfaces.iter().map(String::as_str).collect()
+    };
+    let mut segment_candidates = Vec::new();
+    let mut seen_segments = HashSet::new();
+    for surface in surface_windows {
+        let window = SearchSegmentQuery {
+            surfaces: vec![surface.to_string()],
+            limit: 100,
+            ..segment_query.clone()
+        };
+        for segment in SearchSegmentRepository::query_scored_candidates(connection, &window, false)
+            .map_err(|source| VaultSearchError::SearchSegments { source })?
+            .into_iter()
+            .chain(
+                SearchSegmentRepository::query_scored_candidates(connection, &window, true)
+                    .map_err(|source| VaultSearchError::SearchSegments { source })?,
+            )
+        {
+            if seen_segments.insert(segment.segment_id.clone()) {
+                segment_candidates.push(segment);
+            }
+        }
+    }
 
     let mut total = SearchSegmentRepository::count_distinct_paths(connection, &segment_query)
         .map_err(|source| VaultSearchError::SearchSegments { source })?;
@@ -724,6 +497,7 @@ fn search_indexed_corpus(
         &needle.compact,
         &surfaces,
         scope,
+        scope_case_insensitive,
         &extension_filters,
     )
     .map_err(|source| VaultSearchError::SearchAliases { source })?;
@@ -742,14 +516,19 @@ fn search_indexed_corpus(
     }
 
     for alias in alias_matches {
-        if !path_allowed(&alias.normalized_path, scope, extensions) {
+        if !path_allowed(
+            &alias.normalized_path,
+            scope,
+            scope_case_insensitive,
+            extensions,
+        ) {
             continue;
         }
         if let Some(surface_kind) = kind_for_surface(&alias.surface) {
             candidates.add(
                 &alias.normalized_path,
                 surface_kind,
-                120 + alias.weight + canonical_entity_path_boost(&alias.normalized_path),
+                (10_000 + alias.weight) * SEARCH_SCORE_SCALE,
                 format!("alias:{}", alias.source),
             );
         }
@@ -758,7 +537,12 @@ fn search_indexed_corpus(
     let mut pending_segments = HashMap::<String, PendingSegmentMatch>::new();
 
     for segment in segment_candidates {
-        if !path_allowed(&segment.normalized_path, scope, extensions) {
+        if !path_allowed(
+            &segment.normalized_path,
+            scope,
+            scope_case_insensitive,
+            extensions,
+        ) {
             continue;
         }
         let Some(surface_kind) = kind_for_surface(&segment.surface) else {
@@ -847,10 +631,19 @@ fn search_indexed_corpus(
                     indexed_at: payload_string(&payload, "indexed_at")
                         .unwrap_or_else(|| segment.updated_at.clone()),
                     excerpt: if include_content {
-                        excerpt_for_file(vault_root, &path, needle)
+                        if let Some(text) = payload.get("excerpt_text").and_then(JsonValue::as_str)
+                        {
+                            excerpt_for(text, needle).or_else(|| Some(bound_excerpt(text)))
+                        } else {
+                            excerpt_for_document(connection, &segment.file_id, needle, include_pii)?
+                        }
                     } else {
                         None
                     },
+                    locator: payload.get("locator").cloned(),
+                    revision: payload_string(&payload, "revision"),
+                    coverage: payload_string(&payload, "coverage"),
+                    stale: payload_bool(&payload, "stale").unwrap_or(false),
                     path: path.clone(),
                     matched_in,
                     score,
@@ -919,7 +712,7 @@ fn search_indexed_corpus(
                 let link_id = payload_string(&payload, "link_id")
                     .or_else(|| segment.record_id.clone())
                     .unwrap_or_else(|| segment.segment_id.clone());
-                let row = SearchGraphMatch {
+                let mut row = SearchGraphMatch {
                     link_id: link_id.clone(),
                     source_path: payload_string(&payload, "source_path")
                         .unwrap_or_else(|| segment.normalized_path.clone()),
@@ -930,6 +723,7 @@ fn search_indexed_corpus(
                     unresolved_reason: payload_string(&payload, "unresolved_reason"),
                     score,
                 };
+                redact_graph_metadata(&mut row, include_pii);
                 upsert_best_graph(&mut graph, link_id, row);
             }
             "bases" if segment.field == "base_row" => {
@@ -950,7 +744,7 @@ fn search_indexed_corpus(
                         .unwrap_or_else(|| segment.file_id.clone()),
                     path: payload_string(&payload, "path")
                         .unwrap_or_else(|| segment.normalized_path.clone()),
-                    values,
+                    values: redact_base_values(values, include_pii),
                     score,
                 };
                 upsert_best(&mut base_rows, record_id, row);
@@ -974,10 +768,20 @@ fn search_indexed_corpus(
 
     docs.sort_by(compare_score_path);
     files.sort_by(compare_score_path);
-    properties.sort_by(compare_score_path);
-    tasks.sort_by(compare_score_path);
+    properties
+        .sort_by(|a, b| compare_score_path(a, b).then_with(|| a.property_id.cmp(&b.property_id)));
+    tasks.sort_by(|a, b| compare_score_path(a, b).then_with(|| a.task_id.cmp(&b.task_id)));
     graph.sort_by(compare_score_source);
-    base_rows.sort_by(compare_score_path);
+    base_rows.sort_by(|a, b| {
+        compare_score_path(a, b)
+            .then_with(|| a.base_path.cmp(&b.base_path))
+            .then_with(|| a.view_name.cmp(&b.view_name))
+            .then_with(|| {
+                serde_json::to_string(&a.values)
+                    .unwrap_or_default()
+                    .cmp(&serde_json::to_string(&b.values).unwrap_or_default())
+            })
+    });
 
     docs.truncate(limit_usize);
     files.truncate(limit_usize);
@@ -1001,6 +805,7 @@ fn base_rows_for_path(
     connection: &Connection,
     selected_path: &str,
     limit: u32,
+    include_pii: bool,
 ) -> Result<Vec<SearchBaseRowMatch>, VaultSearchError> {
     let rows = SearchSegmentRepository::base_rows_for_path(connection, selected_path, limit)
         .map_err(|source| VaultSearchError::SearchSegments { source })?;
@@ -1016,11 +821,14 @@ fn base_rows_for_path(
                     .unwrap_or_else(|| segment.file_id.clone()),
                 path: payload_string(&payload, "path")
                     .unwrap_or_else(|| segment.normalized_path.clone()),
-                values: payload
-                    .get("values")
-                    .and_then(JsonValue::as_object)
-                    .cloned()
-                    .unwrap_or_default(),
+                values: redact_base_values(
+                    payload
+                        .get("values")
+                        .and_then(JsonValue::as_object)
+                        .cloned()
+                        .unwrap_or_default(),
+                    include_pii,
+                ),
                 score: 0,
             })
         })
@@ -1054,25 +862,45 @@ fn build_context(
     };
 
     let root = root_for_file(
-        &request.vault_root,
+        connection,
         &file,
         request.include_content,
         request.include_pii,
-    );
+    )?;
     let properties = root_properties(connection, &file.file_id, request.include_pii)?;
-    let outgoing = BacklinkGraphService
-        .outgoing_for_path(connection, &selected_path)
-        .map_err(|source| VaultSearchError::Graph { source })?
+    let (_, outgoing_edges) = BacklinkGraphService
+        .links_page(
+            connection,
+            &selected_path,
+            crate::GraphLinkDirection::Outgoing,
+            limit,
+            0,
+        )
+        .map_err(|source| VaultSearchError::Graph { source })?;
+    let (_, incoming_edges) = BacklinkGraphService
+        .links_page(
+            connection,
+            &selected_path,
+            crate::GraphLinkDirection::Incoming,
+            limit,
+            0,
+        )
+        .map_err(|source| VaultSearchError::Graph { source })?;
+    let outgoing = outgoing_edges
         .into_iter()
-        .take(limit as usize)
-        .map(|edge| graph_match_from_edge(edge, 0))
+        .map(|edge| {
+            let mut row = graph_match_from_edge(edge, 0);
+            redact_graph_metadata(&mut row, request.include_pii);
+            row
+        })
         .collect::<Vec<_>>();
-    let incoming = BacklinkGraphService
-        .backlinks_for_path(connection, &selected_path)
-        .map_err(|source| VaultSearchError::Graph { source })?
+    let incoming = incoming_edges
         .into_iter()
-        .take(limit as usize)
-        .map(|edge| graph_match_from_edge(edge, 0))
+        .map(|edge| {
+            let mut row = graph_match_from_edge(edge, 0);
+            redact_graph_metadata(&mut row, request.include_pii);
+            row
+        })
         .collect::<Vec<_>>();
 
     let walk_steps = BacklinkGraphService
@@ -1088,23 +916,34 @@ fn build_context(
         )
         .map_err(|source| VaultSearchError::Graph { source })?
         .into_iter()
-        .map(|step| SearchWalkStep {
-            depth: step.depth,
-            direction: match step.direction {
-                GraphWalkDirection::Outgoing => "outgoing".to_string(),
-                GraphWalkDirection::Incoming => "incoming".to_string(),
-            },
-            edge_type: match step.edge_type {
-                GraphWalkEdgeType::Wikilink => "wikilink".to_string(),
-                GraphWalkEdgeType::FolderParent => "folder_parent".to_string(),
-                GraphWalkEdgeType::FolderSibling => "folder_sibling".to_string(),
-            },
-            source_path: step.source_path,
-            target_path: step.target_path,
-            raw_target: step.raw_target,
-            resolved: step.resolved,
+        .map(|mut step| {
+            if !request.include_pii
+                && LinksRepository::get_by_id(connection, &step.link_id)
+                    .map_err(|source| VaultSearchError::Links { source })?
+                    .is_some_and(|link| link.source_field.starts_with("frontmatter:"))
+            {
+                step.raw_target = "redacted".to_string();
+            }
+            Ok(SearchWalkStep {
+                depth: step.depth,
+                direction: match step.direction {
+                    GraphWalkDirection::Outgoing => "outgoing".to_string(),
+                    GraphWalkDirection::Incoming => "incoming".to_string(),
+                },
+                edge_type: match step.edge_type {
+                    GraphWalkEdgeType::Wikilink => "wikilink".to_string(),
+                    GraphWalkEdgeType::Markdown => "markdown".to_string(),
+                    GraphWalkEdgeType::Embed => "embed".to_string(),
+                    GraphWalkEdgeType::FolderParent => "folder_parent".to_string(),
+                    GraphWalkEdgeType::FolderSibling => "folder_sibling".to_string(),
+                },
+                source_path: step.source_path,
+                target_path: step.target_path,
+                raw_target: step.raw_target,
+                resolved: step.resolved,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, VaultSearchError>>()?;
 
     let mut related_paths = Vec::<String>::new();
     for item in outgoing.iter().chain(incoming.iter()) {
@@ -1152,7 +991,8 @@ fn build_context(
         .cloned()
         .collect::<Vec<_>>();
     if context_base_rows.is_empty() {
-        context_base_rows = base_rows_for_path(connection, &selected_path, limit)?;
+        context_base_rows =
+            base_rows_for_path(connection, &selected_path, limit, request.include_pii)?;
     }
     let ambiguity = if root_path.is_none() {
         ambiguous_candidates(candidates)
@@ -1178,33 +1018,84 @@ fn build_context(
 }
 
 fn root_for_file(
-    vault_root: &Path,
+    connection: &Connection,
     file: &tao_sdk_storage::FileRecord,
     include_content: bool,
     include_pii: bool,
-) -> SearchRoot {
-    let mut front_matter = None;
-    let mut body_excerpt = None;
-    if file.is_markdown
-        && let Ok(raw) = fs::read_to_string(vault_root.join(&file.normalized_path))
-        && let Ok(parsed) = MarkdownParser.parse(MarkdownParseRequest {
-            normalized_path: file.normalized_path.clone(),
-            raw,
-        })
-    {
-        front_matter = if include_pii {
-            parsed.front_matter
-        } else {
-            parsed.front_matter.map(|_| "redacted".to_string())
-        };
-        if include_content {
-            body_excerpt = Some(bound_excerpt(&parsed.body));
+) -> Result<SearchRoot, VaultSearchError> {
+    let document =
+        DocumentsRepository::get_by_file_id(connection, &file.file_id).map_err(|source| {
+            VaultSearchError::Sql {
+                operation: "read_root_revision",
+                source,
+            }
+        })?;
+    let front_matter = if include_pii {
+        document
+            .as_ref()
+            .and_then(|doc| doc.raw_text.strip_suffix(&doc.body_text))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    } else {
+        document
+            .as_ref()
+            .filter(|doc| doc.raw_text != doc.body_text)
+            .map(|_| "redacted".to_string())
+    };
+    let extracted = ContentRepository::get(connection, &file.file_id).map_err(|source| {
+        VaultSearchError::Sql {
+            operation: "read_root_content",
+            source,
         }
-    }
-    SearchRoot {
+    })?;
+    let body_excerpt = if include_content {
+        match &document {
+            Some(document) => Some(bound_excerpt(&document.body_text)),
+            None => ContentRepository::segments(connection, &file.file_id, 0, 1)
+                .map_err(|source| VaultSearchError::Sql {
+                    operation: "read_root_content_excerpt",
+                    source,
+                })?
+                .first()
+                .map(|segment| bound_excerpt(&segment.text)),
+        }
+    } else {
+        None
+    };
+    let revision = document
+        .as_ref()
+        .map(|document| document.source_hash.clone())
+        .or_else(|| {
+            extracted
+                .as_ref()
+                .and_then(|content| content.served_revision.clone())
+        });
+    let coverage = document
+        .as_ref()
+        .map(|_| "complete".to_string())
+        .or_else(|| extracted.as_ref().map(|content| content.coverage.clone()));
+    let source_diagnostic: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM file_diagnostics WHERE path=?1)",
+            [&file.normalized_path],
+            |row| row.get(0),
+        )
+        .map_err(|source| VaultSearchError::Sql {
+            operation: "read_root_diagnostics",
+            source,
+        })?;
+    let stale = source_diagnostic
+        || extracted.as_ref().is_some_and(|content| {
+            content.served_revision.as_deref() != Some(&content.desired_revision)
+                || content.served_extractor_identity.as_deref() != Some(&content.extractor_identity)
+        });
+    Ok(SearchRoot {
         file_id: file.file_id.clone(),
         path: file.normalized_path.clone(),
-        title: note_title_from_path(&file.normalized_path),
+        title: document
+            .map(|doc| doc.title)
+            .unwrap_or_else(|| note_title_from_path(&file.normalized_path)),
         is_markdown: file.is_markdown,
         extension: extension_for_path(&file.normalized_path),
         size: file.size_bytes,
@@ -1212,7 +1103,10 @@ fn root_for_file(
         indexed_at: file.indexed_at.clone(),
         front_matter,
         body_excerpt,
-    }
+        revision,
+        coverage,
+        stale,
+    })
 }
 
 fn root_properties(
@@ -1246,6 +1140,13 @@ fn files_by_paths(
     unique_paths.dedup();
     if unique_paths.is_empty() {
         return Ok(HashMap::new());
+    }
+    if unique_paths.len() > tao_sdk_storage::SQL_PARAMETER_CHUNK {
+        let mut rows = HashMap::new();
+        for chunk in unique_paths.chunks(tao_sdk_storage::SQL_PARAMETER_CHUNK) {
+            rows.extend(files_by_paths(connection, chunk)?);
+        }
+        return Ok(rows);
     }
 
     let placeholders = vec!["?"; unique_paths.len()].join(", ");
@@ -1302,6 +1203,13 @@ fn link_counts_for_paths(
     unique_paths.dedup();
     if unique_paths.is_empty() {
         return Ok(HashMap::new());
+    }
+    if unique_paths.len() > tao_sdk_storage::SQL_PARAMETER_CHUNK {
+        let mut rows = HashMap::new();
+        for chunk in unique_paths.chunks(tao_sdk_storage::SQL_PARAMETER_CHUNK) {
+            rows.extend(link_counts_for_paths(connection, chunk)?);
+        }
+        return Ok(rows);
     }
 
     let placeholders = vec!["?"; unique_paths.len()].join(", ");
@@ -1415,25 +1323,101 @@ fn sorted_extensions(extensions: &HashSet<String>) -> Vec<String> {
     values
 }
 
-fn indexed_candidate_window(limit: u32) -> u32 {
-    limit.saturating_mul(30).clamp(200, 5_000)
+fn indexed_candidate_window(_limit: u32) -> u32 {
+    1_000
 }
 
 fn segment_payload(segment: &SearchSegmentMatch) -> Result<JsonValue, VaultSearchError> {
-    serde_json::from_str(&segment.payload_json).map_err(|source| VaultSearchError::Payload {
-        segment_id: segment.segment_id.clone(),
-        source,
-    })
+    let value: JsonValue = serde_json::from_str(&segment.payload_json).map_err(|source| {
+        VaultSearchError::Payload {
+            segment_id: segment.segment_id.clone(),
+            source,
+        }
+    })?;
+    let required: &[&str] = match segment.surface.as_str() {
+        "docs" => &["file_id", "path", "title", "indexed_at"],
+        "files" => &["file_id", "path", "extension", "indexed_at"],
+        "properties" => &[
+            "property_id",
+            "file_id",
+            "path",
+            "key",
+            "value_type",
+            "value_json",
+            "updated_at",
+        ],
+        "tasks" => &["task_id", "file_id", "path", "state", "text", "updated_at"],
+        "graph" => &[
+            "link_id",
+            "source_file_id",
+            "source_path",
+            "raw_target",
+            "source_field",
+        ],
+        "bases" if segment.field == "base_row" => {
+            &["base_id", "base_path", "view_name", "file_id", "path"]
+        }
+        "bases" => &["base_id", "base_path", "file_id", "updated_at"],
+        _ => &[],
+    };
+    let invalid = value.get("schema_version").and_then(JsonValue::as_u64) != Some(1)
+        || required
+            .iter()
+            .any(|key| !value.get(*key).is_some_and(JsonValue::is_string))
+        || (segment.surface == "tasks" && !value.get("line").is_some_and(JsonValue::is_i64))
+        || (segment.surface == "files"
+            && (!value.get("size").is_some_and(JsonValue::is_u64)
+                || !value.get("is_markdown").is_some_and(JsonValue::is_boolean)))
+        || (segment.surface == "graph"
+            && !value.get("resolved").is_some_and(JsonValue::is_boolean))
+        || (segment.field == "base_row" && !value.get("values").is_some_and(JsonValue::is_object));
+    if invalid {
+        return Err(VaultSearchError::InvalidPayload {
+            segment_id: segment.segment_id.clone(),
+        });
+    }
+    Ok(value)
 }
 
 fn indexed_segment_candidate_score(segment: &SearchSegmentCandidate, needle: &SearchNeedle) -> i64 {
-    let mut score = segment.weight + segment.rank_score + field_score(&segment.field);
-    score += canonical_entity_path_boost(&segment.normalized_path);
-    score += text_match_score(&segment.normalized_path, needle).unwrap_or(0);
-    if segment_label_is_title(segment) {
-        score += text_match_score(&segment.label, needle).unwrap_or(0);
+    candidate_score(
+        &segment.normalized_path,
+        &segment.label,
+        &segment.surface,
+        &segment.field,
+        segment.weight,
+        segment.rank_score,
+        needle,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_score(
+    path: &str,
+    label: &str,
+    surface: &str,
+    field: &str,
+    weight: i64,
+    rank: i64,
+    needle: &SearchNeedle,
+) -> i64 {
+    let mut score = weight + field_score(field) + text_match_score(path, needle).unwrap_or(0);
+    if matches!(surface, "docs" | "files") || (surface == "bases" && field == "base") {
+        score += text_match_score(label, needle).unwrap_or(0);
     }
-    score
+    score * SEARCH_SCORE_SCALE + lexical_score(rank)
+}
+
+// Fixed-point scores retain lexical ordering without allowing corpus-dependent
+// BM25 magnitudes to overwhelm the smallest path/title evidence tier (30).
+// The monotone transform avoids the old hard cap, which made all ordinary
+// matches tie and discarded useful length-normalized BM25 evidence.
+const SEARCH_SCORE_SCALE: i64 = 1_000_000;
+
+fn lexical_score(rank: i64) -> i64 {
+    let rank = i128::from(rank.max(0));
+    let scale = i128::from(SEARCH_SCORE_SCALE);
+    ((29 * scale * rank) / (i128::from(tao_sdk_storage::SEARCH_RANK_SCALE) + rank)) as i64
 }
 
 fn field_score(field: &str) -> i64 {
@@ -1562,6 +1546,7 @@ fn file_match_from_pending(
 ) -> SearchFileMatch {
     let counts = link_counts.get(&file.path).copied().unwrap_or_default();
     SearchFileMatch {
+        file_group: crate::content::classify_content(&file.path).1,
         file_id: file.file_id,
         path: file.path,
         extension: file.extension,
@@ -1577,9 +1562,34 @@ fn file_match_from_pending(
     }
 }
 
-fn excerpt_for_file(vault_root: &Path, path: &str, needle: &SearchNeedle) -> Option<String> {
-    let content = fs::read_to_string(vault_root.join(path)).ok()?;
-    excerpt_for(&content, needle)
+fn excerpt_for_document(
+    connection: &Connection,
+    file_id: &str,
+    needle: &SearchNeedle,
+    include_pii: bool,
+) -> Result<Option<String>, VaultSearchError> {
+    let document = DocumentsRepository::get_by_file_id(connection, file_id).map_err(|source| {
+        VaultSearchError::Sql {
+            operation: "read_excerpt_revision",
+            source,
+        }
+    })?;
+    Ok(document.and_then(|doc| {
+        excerpt_for(
+            if include_pii {
+                &doc.raw_text
+            } else {
+                &doc.body_text
+            },
+            needle,
+        )
+    }))
+}
+
+fn redact_graph_metadata(row: &mut SearchGraphMatch, include_pii: bool) {
+    if !include_pii && row.source_field.starts_with("frontmatter:") {
+        row.raw_target = "redacted".to_string();
+    }
 }
 
 fn graph_match_from_edge(edge: crate::LinkGraphEdge, score: i64) -> SearchGraphMatch {
@@ -1606,6 +1616,7 @@ fn file_match_from_record(
         .copied()
         .unwrap_or_default();
     SearchFileMatch {
+        file_group: crate::content::classify_content(&file.normalized_path).1,
         file_id: file.file_id.clone(),
         path: file.normalized_path.clone(),
         extension: extension_for_path(&file.normalized_path),
@@ -1622,42 +1633,59 @@ fn file_match_from_record(
 }
 
 fn normalize_path_input(raw: &str) -> Result<String, VaultSearchError> {
-    let normalized = raw.trim().trim_matches('/').replace('\\', "/");
-    if normalized.is_empty() || normalized.starts_with("../") || normalized.contains("/../") {
-        return Err(VaultSearchError::InvalidRequest(format!(
-            "invalid --path '{raw}': expected vault-relative path"
-        )));
-    }
-    Ok(normalized)
+    let normalized = raw.trim().replace('\\', "/");
+    tao_sdk_vault::validate_relative_vault_path(&normalized).map_err(|error| {
+        VaultSearchError::InvalidRequest(format!("invalid vault-relative path '{raw}': {error}"))
+    })?;
+    tao_sdk_vault::normalize_relative_path(Path::new(&normalized))
+        .map_err(|error| VaultSearchError::InvalidRequest(error.to_string()))
 }
 
 fn normalize_scope(raw: &str) -> Result<String, VaultSearchError> {
-    let normalized = raw.trim().trim_matches('/').replace('\\', "/");
-    if normalized == "." {
+    if raw.trim() == "." || raw.trim().is_empty() {
         return Ok(String::new());
     }
-    if normalized.starts_with("../") || normalized.contains("/../") {
-        return Err(VaultSearchError::InvalidRequest(format!(
-            "invalid --scope '{raw}': expected vault-relative prefix"
-        )));
-    }
-    Ok(normalized)
+    normalize_path_input(raw.trim_end_matches('/'))
 }
 
 fn normalize_extensions(raw: &[String]) -> HashSet<String> {
     raw.iter()
         .flat_map(|entry| entry.split(','))
         .map(str::trim)
-        .map(|entry| entry.trim_start_matches('.').to_ascii_lowercase())
+        .map(|entry| entry.trim_start_matches('.').to_lowercase())
         .filter(|entry| !entry.is_empty())
         .collect()
 }
 
-fn path_allowed(path: &str, scope: Option<&str>, extensions: &HashSet<String>) -> bool {
+fn indexed_case_policy(connection: &Connection) -> Result<CasePolicy, VaultSearchError> {
+    let record = tao_sdk_storage::IndexStateRepository::get_by_key(connection, "index_case_policy")
+        .map_err(|source| {
+            VaultSearchError::InvalidRequest(format!("read case policy: {source}"))
+        })?;
+    Ok(
+        if record.is_some_and(|row| row.value_json.trim_matches('"') == "insensitive") {
+            CasePolicy::Insensitive
+        } else {
+            CasePolicy::Sensitive
+        },
+    )
+}
+
+fn path_allowed(
+    path: &str,
+    scope: Option<&str>,
+    insensitive: bool,
+    extensions: &HashSet<String>,
+) -> bool {
+    let matched_path = if insensitive {
+        tao_sdk_vault::path_match_key(path, CasePolicy::Insensitive)
+    } else {
+        path.to_string()
+    };
     if let Some(scope) = scope
         && !scope.is_empty()
-        && path != scope
-        && !path.starts_with(&format!("{scope}/"))
+        && matched_path != scope
+        && !matched_path.starts_with(&format!("{scope}/"))
     {
         return false;
     }
@@ -1665,26 +1693,11 @@ fn path_allowed(path: &str, scope: Option<&str>, extensions: &HashSet<String>) -
 }
 
 fn extension_for_path(path: &str) -> String {
-    Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+    tao_sdk_vault::normalized_extension(Path::new(path)).unwrap_or_default()
 }
 
 fn normalize_text(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut last_space = true;
-    for ch in value.chars().flat_map(char::to_lowercase) {
-        if ch.is_alphanumeric() {
-            out.push(ch);
-            last_space = false;
-        } else if !last_space {
-            out.push(' ');
-            last_space = true;
-        }
-    }
-    out.trim().to_string()
+    tao_sdk_search::parser::normalize_query_text(value)
 }
 
 fn compact_text(value: &str) -> String {
@@ -1721,28 +1734,18 @@ fn text_match_score(value: &str, needle: &SearchNeedle) -> Option<i64> {
     None
 }
 
-const SEARCH_CONTACT_PATH_BOOST: i64 = 30;
-const SEARCH_COMPANY_PATH_BOOST: i64 = 25;
-const SEARCH_INTERACTION_PATH_BOOST: i64 = 15;
-const SEARCH_INDEX_PATH_PENALTY: i64 = -20;
-
-/// Prefer canonical CRM entity notes over hub/index pages when relevance ties.
-fn canonical_entity_path_boost(path: &str) -> i64 {
-    let lower = path.to_ascii_lowercase();
-    let mut boost = 0;
-    if lower.contains("contacts") || lower.contains("-con-") {
-        boost += SEARCH_CONTACT_PATH_BOOST;
+fn redact_base_values(
+    values: JsonMap<String, JsonValue>,
+    include_pii: bool,
+) -> JsonMap<String, JsonValue> {
+    if include_pii {
+        values
+    } else {
+        values
+            .into_iter()
+            .map(|(key, _)| (key, JsonValue::String("redacted".to_string())))
+            .collect()
     }
-    if lower.contains("companies") || lower.contains("-com-") {
-        boost += SEARCH_COMPANY_PATH_BOOST;
-    }
-    if lower.contains("meetings") || lower.contains("communications") {
-        boost += SEARCH_INTERACTION_PATH_BOOST;
-    }
-    if lower.contains("index") || lower.contains("contents") || lower.contains("hub") {
-        boost += SEARCH_INDEX_PATH_PENALTY;
-    }
-    boost
 }
 
 fn pii_value(raw: &str, include_pii: bool) -> JsonValue {
@@ -1753,14 +1756,116 @@ fn pii_value(raw: &str, include_pii: bool) -> JsonValue {
 }
 
 fn excerpt_for(content: &str, needle: &SearchNeedle) -> Option<String> {
-    let lower = content.to_ascii_lowercase();
+    let mut lower = String::new();
+    let mut offsets = Vec::new();
+    for (offset, ch) in content.char_indices() {
+        for folded in ch.to_lowercase() {
+            for _ in 0..folded.len_utf8() {
+                offsets.push(offset);
+            }
+            lower.push(folded);
+        }
+    }
     let index = lower
-        .find(&needle.raw.to_ascii_lowercase())
-        .or_else(|| lower.find(&needle.compact))
-        .or_else(|| needle.tokens.first().and_then(|token| lower.find(token)))?;
-    let start = previous_char_boundary(content, index.saturating_sub(120));
-    let end = next_char_boundary(content, (index + 240).min(content.len()));
+        .find(&needle.raw.to_lowercase())
+        .or_else(|| needle.tokens.iter().find_map(|token| lower.find(token)))?;
+    let original = *offsets.get(index)?;
+    let start = previous_char_boundary(content, original.saturating_sub(120));
+    let end = next_char_boundary(content, (original + 240).min(content.len()));
     Some(content[start..end].replace('\n', " "))
+}
+
+fn bound_result_content(result: &mut VaultSearchResult) {
+    const MAX_CONTENT_BYTES: usize = 128 * 1024;
+    fn text(value: &mut String, budget: &mut usize, changed: &mut bool) {
+        let max = (*budget).min(4096);
+        if value.len() > max {
+            let end = previous_char_boundary(value, max);
+            value.truncate(end);
+            *changed = true;
+        }
+        *budget = budget.saturating_sub(value.len());
+    }
+    fn value(v: &mut JsonValue, budget: &mut usize, changed: &mut bool, depth: usize) {
+        if depth >= 8 {
+            *v = JsonValue::String("truncated".to_string());
+            *changed = true;
+            return;
+        }
+        match v {
+            JsonValue::String(s) => text(s, budget, changed),
+            JsonValue::Array(rows) => {
+                if rows.len() > 64 {
+                    rows.truncate(64);
+                    *changed = true;
+                }
+                for row in rows {
+                    value(row, budget, changed, depth + 1);
+                }
+            }
+            JsonValue::Object(rows) => {
+                let keys = rows.keys().skip(64).cloned().collect::<Vec<_>>();
+                for key in keys {
+                    rows.remove(&key);
+                    *changed = true;
+                }
+                for row in rows.values_mut() {
+                    value(row, budget, changed, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut budget = MAX_CONTENT_BYTES;
+    let changed = &mut result.content_truncated;
+    if result.context.properties.len() > result.limit as usize {
+        result.context.properties.truncate(result.limit as usize);
+        *changed = true;
+    }
+    for doc in &mut result.docs {
+        if let Some(excerpt) = &mut doc.excerpt {
+            text(excerpt, &mut budget, changed);
+        }
+    }
+    for task in &mut result.tasks {
+        text(&mut task.text, &mut budget, changed);
+    }
+    for property in result
+        .properties
+        .iter_mut()
+        .chain(&mut result.context.properties)
+    {
+        value(&mut property.value, &mut budget, changed, 0);
+    }
+    for graph in result
+        .graph
+        .iter_mut()
+        .chain(&mut result.context.links.outgoing)
+        .chain(&mut result.context.links.incoming)
+    {
+        text(&mut graph.raw_target, &mut budget, changed);
+    }
+    for step in &mut result.context.walk {
+        text(&mut step.raw_target, &mut budget, changed);
+    }
+    for row in &mut result.context.base_rows {
+        let keys = row.values.keys().skip(64).cloned().collect::<Vec<_>>();
+        for key in keys {
+            row.values.remove(&key);
+            *changed = true;
+        }
+        for v in row.values.values_mut() {
+            value(v, &mut budget, changed, 0);
+        }
+    }
+    if let Some(root) = &mut result.context.root {
+        if let Some(front) = &mut root.front_matter {
+            text(front, &mut budget, changed);
+        }
+        if let Some(body) = &mut root.body_excerpt {
+            text(body, &mut budget, changed);
+        }
+    }
 }
 
 fn previous_char_boundary(content: &str, mut index: usize) -> usize {
@@ -1790,7 +1895,6 @@ fn sort_candidates(rows: &mut [SearchCandidate]) {
         right
             .score
             .cmp(&left.score)
-            .then_with(|| right.inbound_links.cmp(&left.inbound_links))
             .then_with(|| left.path.cmp(&right.path))
     });
 }
@@ -1820,6 +1924,7 @@ fn compare_score_source(left: &SearchGraphMatch, right: &SearchGraphMatch) -> Or
         .cmp(&left.score)
         .then_with(|| left.source_path.cmp(&right.source_path))
         .then_with(|| left.raw_target.cmp(&right.raw_target))
+        .then_with(|| left.link_id.cmp(&right.link_id))
 }
 
 trait SearchPathScore {
@@ -1979,23 +2084,35 @@ fn timeline_entries(
 }
 
 fn infer_date(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    if bytes.len() < 10 {
-        return None;
-    }
-    for index in 0..=(bytes.len() - 10) {
-        let year = &value[index..index + 4];
-        let sep1 = bytes[index + 4] as char;
-        let month = &value[index + 5..index + 7];
-        let sep2 = bytes[index + 7] as char;
-        let day = &value[index + 8..index + 10];
-        if year.chars().all(|ch| ch.is_ascii_digit())
-            && month.chars().all(|ch| ch.is_ascii_digit())
-            && day.chars().all(|ch| ch.is_ascii_digit())
-            && matches!(sep1, '-' | '_')
-            && matches!(sep2, '-' | '_')
+    for window in value.as_bytes().windows(10) {
+        if !matches!(window[4], b'-' | b'_')
+            || !window[9].is_ascii_digit()
+            || window[7] != window[4]
+            || !window[..4]
+                .iter()
+                .chain(&window[5..7])
+                .chain(&window[8..])
+                .all(u8::is_ascii_digit)
         {
-            return Some(format!("{year}-{month}-{day}"));
+            continue;
+        }
+        let year = u32::from(window[0] - b'0') * 1000
+            + u32::from(window[1] - b'0') * 100
+            + u32::from(window[2] - b'0') * 10
+            + u32::from(window[3] - b'0');
+        let month = (window[5] - b'0') * 10 + window[6] - b'0';
+        let day = (window[8] - b'0') * 10 + window[9] - b'0';
+        let leap =
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+        let days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => 0,
+        };
+        if year != 0 && day > 0 && day <= days {
+            return Some(format!("{year:04}-{month:02}-{day:02}"));
         }
     }
     None
@@ -2017,6 +2134,14 @@ fn ambiguous_candidates(candidates: &[SearchCandidate]) -> Vec<SearchCandidate> 
 /// Search operation failures.
 #[derive(Debug, Error)]
 pub enum VaultSearchError {
+    /// A stored payload does not satisfy its typed surface contract.
+    #[error(
+        "search segment '{segment_id}' has invalid typed fields; rebuild the derived search index"
+    )]
+    InvalidPayload {
+        /// Invalid derived record identifier.
+        segment_id: String,
+    },
     /// Search kind was invalid.
     #[error(
         "unsupported search kind '{value}'; expected auto|all|docs|files|bases|properties|tasks|graph"
@@ -2065,13 +2190,6 @@ pub enum VaultSearchError {
         #[source]
         source: serde_json::Error,
     },
-    /// FTS docs query failed.
-    #[error("docs search failed: {source}")]
-    Docs {
-        /// Source error.
-        #[source]
-        source: tao_sdk_search::SearchQueryError,
-    },
     /// Property repository failed.
     #[error("properties query failed: {source}")]
     Properties {
@@ -2085,20 +2203,6 @@ pub enum VaultSearchError {
         /// Source error.
         #[source]
         source: tao_sdk_storage::LinksRepositoryError,
-    },
-    /// Base repository failed.
-    #[error("bases query failed: {source}")]
-    Bases {
-        /// Source error.
-        #[source]
-        source: tao_sdk_storage::BasesRepositoryError,
-    },
-    /// Base execution failed.
-    #[error("base execution failed: {source}")]
-    BaseExecute {
-        /// Source error.
-        #[source]
-        source: Box<crate::BaseTableExecutorError>,
     },
     /// Graph service failed.
     #[error("graph context failed: {source}")]
@@ -2117,3 +2221,7 @@ pub enum VaultSearchError {
         source: rusqlite::Error,
     },
 }
+
+#[cfg(test)]
+#[path = "search/tests.rs"]
+mod tests;

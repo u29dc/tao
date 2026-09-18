@@ -29,6 +29,10 @@ pub struct CheckpointedIndexResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IncrementalCheckpointState {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    vault_root: String,
     pending_paths: Vec<String>,
     next_offset: usize,
     max_batch_size: usize,
@@ -82,6 +86,7 @@ impl CheckpointedIndexService {
                     });
                 };
                 let policy = parse_checkpoint_case_policy(&state.case_policy)?;
+                validate_checkpoint(&state, vault_root)?;
                 (state, true, policy)
             } else {
                 let mut seen = std::collections::BTreeSet::new();
@@ -102,6 +107,13 @@ impl CheckpointedIndexService {
                         source: Box::new(source),
                     })?;
                 let state = IncrementalCheckpointState {
+                    version: 1,
+                    vault_root: std::fs::canonicalize(vault_root)
+                        .map_err(|source| CheckpointedIndexError::InvalidCheckpoint {
+                            reason: source.to_string(),
+                        })?
+                        .to_string_lossy()
+                        .into_owned(),
                     pending_paths,
                     next_offset: 0,
                     max_batch_size,
@@ -129,7 +141,9 @@ impl CheckpointedIndexService {
             }
 
             let batch_end = std::cmp::min(
-                checkpoint.next_offset + checkpoint.max_batch_size,
+                checkpoint
+                    .next_offset
+                    .saturating_add(checkpoint.max_batch_size),
                 checkpoint.pending_paths.len(),
             );
             let batch_paths = checkpoint.pending_paths[checkpoint.next_offset..batch_end]
@@ -219,6 +233,37 @@ impl CheckpointedIndexService {
             checkpoint_completed,
         })
     }
+}
+
+fn validate_checkpoint(
+    state: &IncrementalCheckpointState,
+    vault_root: &Path,
+) -> Result<(), CheckpointedIndexError> {
+    let invalid = |reason: &str| CheckpointedIndexError::InvalidCheckpoint {
+        reason: reason.to_string(),
+    };
+    if state.version != 1 {
+        return Err(invalid(
+            "unsupported checkpoint format; start a fresh reconciliation",
+        ));
+    }
+    if state.max_batch_size == 0 || state.next_offset > state.pending_paths.len() {
+        return Err(invalid("invalid checkpoint batch size or offset"));
+    }
+    let canonical =
+        std::fs::canonicalize(vault_root).map_err(|source| invalid(&source.to_string()))?;
+    if canonical.to_string_lossy() != state.vault_root {
+        return Err(invalid("checkpoint belongs to a different vault"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for path in &state.pending_paths {
+        let normalized = normalize_changed_path(Path::new(path))
+            .map_err(|source| invalid(&source.to_string()))?;
+        if &normalized != path || !seen.insert(normalized) {
+            return Err(invalid("invalid or duplicate checkpoint path"));
+        }
+    }
+    Ok(())
 }
 
 fn load_checkpoint_state(

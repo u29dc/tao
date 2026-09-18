@@ -673,6 +673,19 @@ ORDER BY source_file_id ASC, target_file_id ASC
         if source_file_ids.is_empty() {
             return Ok(Vec::new());
         }
+        if source_file_ids.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut rows = Vec::new();
+            for chunk in source_file_ids.chunks(crate::SQL_PARAMETER_CHUNK) {
+                rows.extend(Self::list_outgoing_for_sources_with_paths(
+                    connection,
+                    chunk,
+                    include_unresolved,
+                )?);
+            }
+            rows.sort_by(|a, b| a.link_id.cmp(&b.link_id));
+            rows.dedup_by(|a, b| a.link_id == b.link_id);
+            return Ok(rows);
+        }
 
         let placeholders = in_clause_placeholders(source_file_ids.len(), 1);
         let unresolved_clause = if include_unresolved {
@@ -734,6 +747,17 @@ ORDER BY l.link_id ASC
     ) -> Result<Vec<LinkWithPaths>, LinksRepositoryError> {
         if target_file_ids.is_empty() {
             return Ok(Vec::new());
+        }
+        if target_file_ids.len() > crate::SQL_PARAMETER_CHUNK {
+            let mut rows = Vec::new();
+            for chunk in target_file_ids.chunks(crate::SQL_PARAMETER_CHUNK) {
+                rows.extend(Self::list_incoming_for_targets_with_paths(
+                    connection, chunk,
+                )?);
+            }
+            rows.sort_by(|a, b| a.link_id.cmp(&b.link_id));
+            rows.dedup_by(|a, b| a.link_id == b.link_id);
+            return Ok(rows);
         }
 
         let placeholders = in_clause_placeholders(target_file_ids.len(), 1);
@@ -1112,9 +1136,9 @@ fn scoped_filter_clause(
         let exact_index = parameters.len() + 1;
         parameters.push(Value::Text(scope.clone()));
         let nested_index = parameters.len() + 1;
-        parameters.push(Value::Text(format!("{scope}/%")));
+        parameters.push(Value::Text(format!("{scope}/")));
         clause_parts.push(format!(
-            "(f.normalized_path = ?{exact_index} OR f.normalized_path LIKE ?{nested_index})"
+            "(f.normalized_path = ?{exact_index} OR instr(f.normalized_path, ?{nested_index}) = 1)"
         ));
     }
 
@@ -1134,9 +1158,9 @@ fn scoped_filter_clause(
         let exact_index = parameters.len() + 1;
         parameters.push(Value::Text(normalized.clone()));
         let nested_index = parameters.len() + 1;
-        parameters.push(Value::Text(format!("{normalized}/%")));
+        parameters.push(Value::Text(format!("{normalized}/")));
         clause_parts.push(format!(
-            "(f.normalized_path != ?{exact_index} AND f.normalized_path NOT LIKE ?{nested_index})"
+            "(f.normalized_path != ?{exact_index} AND instr(f.normalized_path, ?{nested_index}) != 1)"
         ));
     }
 

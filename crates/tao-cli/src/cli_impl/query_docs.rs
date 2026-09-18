@@ -263,6 +263,31 @@ pub(crate) struct QueryPostFilterAccumulator {
     rows: Vec<serde_json::Map<String, JsonValue>>,
 }
 
+// General expression/sort fallback stays bounded even with a very large offset.
+// SQL-backed windows do not pay this materialization budget.
+const MAX_POST_FILTER_ROWS: usize = 100_000;
+const MAX_POST_FILTER_BYTES: usize = 32 * 1024 * 1024;
+
+fn row_owned_bytes(row: &serde_json::Map<String, JsonValue>) -> usize {
+    row.iter().fold(0usize, |total, (key, value)| {
+        total
+            .saturating_add(key.capacity())
+            .saturating_add(value_owned_bytes(value))
+    })
+}
+
+fn value_owned_bytes(value: &JsonValue) -> usize {
+    // Include conservative tree/container overhead as well as string capacity.
+    64usize.saturating_add(match value {
+        JsonValue::String(text) => text.capacity(),
+        JsonValue::Array(values) => values.iter().fold(0usize, |sum, value| {
+            sum.saturating_add(value_owned_bytes(value))
+        }),
+        JsonValue::Object(values) => row_owned_bytes(values),
+        _ => 0,
+    })
+}
+
 impl QueryPostFilterAccumulator {
     pub(crate) fn new(offset: u32, limit: u32, sort_keys: &[SortKey]) -> Self {
         Self {
@@ -274,7 +299,11 @@ impl QueryPostFilterAccumulator {
         }
     }
 
-    pub(crate) fn push_batch(&mut self, batch: Vec<serde_json::Map<String, JsonValue>>) {
+    pub(crate) fn push_batch(
+        &mut self,
+        batch: Vec<serde_json::Map<String, JsonValue>>,
+    ) -> Result<()> {
+        tao_sdk_vault::check_index_cancellation()?;
         if self.sort_keys.is_empty() {
             for row in batch {
                 let row_index = usize::try_from(self.total).unwrap_or(usize::MAX);
@@ -286,7 +315,7 @@ impl QueryPostFilterAccumulator {
                     self.rows.push(row);
                 }
             }
-            return;
+            return self.check_budget();
         }
 
         let window_size = self.offset.saturating_add(self.limit);
@@ -294,13 +323,31 @@ impl QueryPostFilterAccumulator {
             .total
             .saturating_add(u64::try_from(batch.len()).unwrap_or(u64::MAX));
         if window_size == 0 {
-            return;
+            return Ok(());
         }
         self.rows.extend(batch);
+        self.check_budget()?;
         apply_sort(&mut self.rows, &self.sort_keys);
         if self.rows.len() > window_size {
             self.rows.truncate(window_size);
         }
+        Ok(())
+    }
+
+    fn check_budget(&self) -> Result<()> {
+        let bytes = self
+            .rows
+            .iter()
+            .fold(0usize, |sum, row| sum.saturating_add(row_owned_bytes(row)));
+        if self.rows.len() > MAX_POST_FILTER_ROWS || bytes > MAX_POST_FILTER_BYTES {
+            return Err(CliContractError::blocked(
+                "query_work_limit",
+                "query expression/sort materialization exceeds its 100000-row or 32 MiB work budget",
+                Some("narrow the query or use an indexed path window before sorting".into()),
+                Some(serde_json::json!({"rows":self.rows.len(),"estimated_bytes":bytes,"complete":false})),
+            ).into());
+        }
+        Ok(())
     }
 
     pub(crate) fn finish(mut self) -> (u64, Vec<JsonValue>) {
@@ -401,20 +448,25 @@ pub(crate) fn collect_docs_rows_for_where_only(
 ) -> Result<(u64, Vec<JsonValue>)> {
     with_connection(runtime, resolved, |connection| {
         if query.trim().is_empty() {
-            let batch_rows = SearchSegmentRepository::list_docs(connection)?
-                .into_iter()
-                .map(query_docs_row_from_segment)
-                .collect::<Vec<_>>();
-            let filtered = apply_where_filter(batch_rows, Some(where_expr))
-                .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
-            let total = u64::try_from(filtered.len()).unwrap_or(u64::MAX);
-            let rows = filtered
-                .into_iter()
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(|row| JsonValue::Object(project_query_docs_row_map(&row, columns)))
-                .collect::<Vec<_>>();
-            return Ok((total, rows));
+            let mut accumulator = QueryPostFilterAccumulator::new(offset, limit, &[]);
+            let mut scan_offset = 0;
+            loop {
+                let records =
+                    SearchSegmentRepository::list_docs_page(connection, 512, scan_offset)?;
+                let count = records.len();
+                let batch_rows = records
+                    .into_iter()
+                    .map(query_docs_row_from_segment)
+                    .collect();
+                let filtered = apply_where_filter(batch_rows, Some(where_expr))
+                    .map_err(|source| anyhow!("evaluate --where failed: {source}"))?;
+                accumulator.push_batch(filtered)?;
+                scan_offset += count as u64;
+                if count < 512 {
+                    break;
+                }
+            }
+            return Ok(accumulator.finish_query_docs(columns));
         }
 
         let mut query_offset = 0_u64;

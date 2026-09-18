@@ -173,11 +173,17 @@ fn heading_fragment_links_only_resolve_when_target_heading_exists() {
         .iter()
         .find(|row| row.heading_slug.as_deref() == Some("missing-heading"))
         .expect("missing heading link");
-    assert!(missing_heading.is_unresolved);
-    assert_eq!(missing_heading.resolved_path, None);
+    assert!(!missing_heading.is_unresolved);
+    assert_eq!(missing_heading.resolved_path.as_deref(), Some("notes/b.md"));
     assert_eq!(
-        missing_heading.unresolved_reason.as_deref(),
-        Some("bad-anchor")
+        tao_sdk_storage::LinkEvidenceRepository::get_by_link_id(
+            &connection,
+            &missing_heading.link_id
+        )
+        .unwrap()
+        .unwrap()
+        .fragment_status,
+        "bad_anchor"
     );
 }
 
@@ -216,11 +222,17 @@ fn block_fragment_links_only_resolve_when_target_block_exists() {
         .iter()
         .find(|row| row.block_id.as_deref() == Some("missing-block"))
         .expect("missing block link");
-    assert!(missing_block.is_unresolved);
-    assert_eq!(missing_block.resolved_path, None);
+    assert!(!missing_block.is_unresolved);
+    assert_eq!(missing_block.resolved_path.as_deref(), Some("notes/b.md"));
     assert_eq!(
-        missing_block.unresolved_reason.as_deref(),
-        Some("bad-block")
+        tao_sdk_storage::LinkEvidenceRepository::get_by_link_id(
+            &connection,
+            &missing_block.link_id
+        )
+        .unwrap()
+        .unwrap()
+        .fragment_status,
+        "bad_block"
     );
 }
 
@@ -255,7 +267,7 @@ fn unresolved_links_include_reason_codes_and_provenance() {
         .iter()
         .filter(|row| row.is_unresolved)
         .collect::<Vec<_>>();
-    assert_eq!(unresolved.len(), 5);
+    assert_eq!(unresolved.len(), 3);
     assert!(unresolved.iter().any(|row| {
         row.unresolved_reason.as_deref() == Some("missing-note")
             && row.source_field == "body"
@@ -266,15 +278,15 @@ fn unresolved_links_include_reason_codes_and_provenance() {
             && row.source_field.starts_with("frontmatter:")
             && row.raw_target == "frontmatter-missing"
     }));
+    for expected in ["bad_anchor", "bad_block"] {
+        assert!(outgoing.iter().any(|row| {
+            tao_sdk_storage::LinkEvidenceRepository::get_by_link_id(&connection, &row.link_id)
+                .unwrap()
+                .is_some_and(|evidence| evidence.fragment_status == expected)
+        }));
+    }
     assert!(unresolved.iter().any(|row| {
-        row.unresolved_reason.as_deref() == Some("bad-anchor") && row.raw_target == "b"
-    }));
-    assert!(unresolved.iter().any(|row| {
-        row.unresolved_reason.as_deref() == Some("bad-block") && row.raw_target == "b"
-    }));
-    assert!(unresolved.iter().any(|row| {
-        row.unresolved_reason.as_deref() == Some("malformed-target")
-            && row.raw_target == "bad??target"
+        row.unresolved_reason.as_deref() == Some("missing-note") && row.raw_target == "bad??target"
     }));
 }
 
@@ -435,7 +447,8 @@ fn wikilink_attachments_resolve_from_frontmatter_and_body_with_ancestor_relative
     assert!(
         outgoing
             .iter()
-            .any(|row| row.source_field == "body" && row.raw_target == "Contents/Media/foo.jpg")
+            .any(|row| row.source_field == "body:embed"
+                && row.raw_target == "Contents/Media/foo.jpg")
     );
     assert!(outgoing.iter().any(|row| {
         row.source_field.starts_with("frontmatter:assets")
@@ -909,10 +922,19 @@ fn incremental_apply_changes_refreshes_anchor_links_when_target_heading_changes(
     let outgoing = LinksRepository::list_outgoing_with_paths(&connection, &source.file_id)
         .expect("list outgoing after heading change");
     assert_eq!(outgoing.len(), 1);
-    assert!(outgoing[0].is_unresolved);
-    assert_eq!(outgoing[0].resolved_path, None);
+    assert!(!outgoing[0].is_unresolved);
+    assert_eq!(
+        outgoing[0].resolved_path.as_deref(),
+        Some("notes/target.md")
+    );
     assert_eq!(outgoing[0].heading_slug.as_deref(), Some("known-heading"));
-    assert_eq!(outgoing[0].unresolved_reason.as_deref(), Some("bad-anchor"));
+    assert_eq!(
+        tao_sdk_storage::LinkEvidenceRepository::get_by_link_id(&connection, &outgoing[0].link_id)
+            .unwrap()
+            .unwrap()
+            .fragment_status,
+        "bad_anchor"
+    );
 }
 
 #[test]
@@ -1432,12 +1454,7 @@ fn consistency_checker_reports_orphans_and_broken_references() {
                 rusqlite::params!["prop_orphan_1", "file_missing_1", "status", "string", "\"draft\""],
             )
             .expect("insert orphan property");
-    connection
-            .execute(
-                "INSERT INTO render_cache (cache_key, file_id, html, content_hash) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["cache_orphan_1", "file_missing_2", "<p>x</p>", "abc123"],
-            )
-            .expect("insert orphan render cache");
+
     connection
             .execute(
                 "INSERT INTO links (link_id, source_file_id, raw_target, resolved_file_id, heading_slug, block_id, is_unresolved, unresolved_reason, source_field) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL, ?6)",
@@ -1462,12 +1479,7 @@ fn consistency_checker_reports_orphans_and_broken_references() {
             .iter()
             .any(|issue| issue.kind == ConsistencyIssueKind::OrphanProperty)
     );
-    assert!(
-        report
-            .issues
-            .iter()
-            .any(|issue| issue.kind == ConsistencyIssueKind::OrphanRenderCache)
-    );
+
     assert!(
         report
             .issues

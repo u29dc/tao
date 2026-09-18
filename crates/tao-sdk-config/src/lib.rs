@@ -20,8 +20,6 @@ pub struct TaoConfig {
     pub storage: StorageConfig,
     /// Vault root defaults.
     pub vault: VaultConfig,
-    /// Security policy toggles.
-    pub security: SecurityConfig,
 }
 
 /// Runtime configuration settings.
@@ -30,10 +28,6 @@ pub struct TaoConfig {
 pub struct RuntimeConfig {
     /// Case policy for path matching and canonicalization.
     pub case_policy: Option<PathCasePolicy>,
-    /// Toggle structured tracing hooks.
-    pub tracing_enabled: Option<bool>,
-    /// Optional feature flag allowlist.
-    pub feature_flags: Option<Vec<String>>,
 }
 
 /// Storage path overrides.
@@ -52,14 +46,6 @@ pub struct StorageConfig {
 pub struct VaultConfig {
     /// Optional default vault root.
     pub root: Option<PathBuf>,
-}
-
-/// Security policy settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct SecurityConfig {
-    /// Enforce read-only mode for write commands.
-    pub read_only: Option<bool>,
 }
 
 /// Case-sensitivity policy for path handling.
@@ -86,7 +72,6 @@ impl Merge for TaoConfig {
             runtime: self.runtime.merge(&overlay.runtime),
             storage: self.storage.merge(&overlay.storage),
             vault: self.vault.merge(&overlay.vault),
-            security: self.security.merge(&overlay.security),
         }
     }
 }
@@ -95,11 +80,6 @@ impl Merge for RuntimeConfig {
     fn merge(&self, overlay: &Self) -> Self {
         Self {
             case_policy: overlay.case_policy.or(self.case_policy),
-            tracing_enabled: overlay.tracing_enabled.or(self.tracing_enabled),
-            feature_flags: overlay
-                .feature_flags
-                .clone()
-                .or_else(|| self.feature_flags.clone()),
         }
     }
 }
@@ -121,44 +101,20 @@ impl Merge for VaultConfig {
     }
 }
 
-impl Merge for SecurityConfig {
-    fn merge(&self, overlay: &Self) -> Self {
-        Self {
-            read_only: overlay.read_only.or(self.read_only),
-        }
-    }
-}
-
 impl TaoConfig {
     /// Return canonical config defaults used for precedence resolution.
     pub fn defaults() -> Self {
         Self {
             runtime: RuntimeConfig {
                 case_policy: Some(PathCasePolicy::Sensitive),
-                tracing_enabled: Some(true),
-                feature_flags: Some(Vec::new()),
             },
             storage: StorageConfig::default(),
             vault: VaultConfig::default(),
-            security: SecurityConfig {
-                read_only: Some(true),
-            },
         }
     }
 
     /// Normalize and validate config values.
-    pub fn normalized(mut self) -> Result<Self, TaoConfigError> {
-        if let Some(flags) = self.runtime.feature_flags.take() {
-            let mut normalized = flags
-                .into_iter()
-                .map(|flag| flag.trim().to_ascii_lowercase())
-                .filter(|flag| !flag.is_empty())
-                .collect::<Vec<_>>();
-            normalized.sort();
-            normalized.dedup();
-            self.runtime.feature_flags = Some(normalized);
-        }
-
+    pub fn normalized(self) -> Result<Self, TaoConfigError> {
         if let Some(path) = &self.storage.db_path
             && !matches!(path.components().next_back(), Some(Component::Normal(_)))
         {
@@ -239,18 +195,14 @@ fn bootstrap_default_file_with_hook(
 pub fn default_template() -> &'static str {
     r#"[runtime]
 # case_policy = "sensitive"
-# tracing_enabled = true
-# feature_flags = []
 
 [storage]
 # data_dir = ".tao"
-# db_path = ".tao.sqlite"
+# db_path = ".tao/index.sqlite"
 
 [vault]
 # root = "/absolute/path/to/vault"
 
-[security]
-# read_only = true
 "#
 }
 
@@ -302,10 +254,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, SecurityConfig, StorageConfig,
-        TaoConfig, TaoConfigError, VaultConfig, bootstrap_default_file,
-        bootstrap_default_file_with_hook, config_path, default_template, load_from_path,
-        load_or_bootstrap, parse_toml,
+        CONFIG_FILE_NAME, Merge, PathCasePolicy, RuntimeConfig, StorageConfig, TaoConfig,
+        TaoConfigError, VaultConfig, bootstrap_default_file, bootstrap_default_file_with_hook,
+        config_path, default_template, load_from_path, load_or_bootstrap, parse_toml,
     };
 
     #[test]
@@ -314,50 +265,31 @@ mod tests {
             r#"
             [runtime]
             case_policy = "insensitive"
-            tracing_enabled = false
-            feature_flags = ["reconcile-auto-heal", "bridge-batching"]
-
             [storage]
             data_dir = ".tao"
-            db_path = ".tao.sqlite"
-
+            db_path = ".tao/index.sqlite"
             [vault]
             root = "/tmp/vault"
-
-            [security]
-            read_only = false
-            "#,
+        "#,
         )
         .expect("parse config");
-
         assert_eq!(
             config.runtime,
             RuntimeConfig {
-                case_policy: Some(PathCasePolicy::Insensitive),
-                tracing_enabled: Some(false),
-                feature_flags: Some(vec![
-                    "bridge-batching".to_string(),
-                    "reconcile-auto-heal".to_string()
-                ]),
+                case_policy: Some(PathCasePolicy::Insensitive)
             }
         );
         assert_eq!(
             config.storage,
             StorageConfig {
                 data_dir: Some(".tao".into()),
-                db_path: Some(".tao.sqlite".into()),
+                db_path: Some(".tao/index.sqlite".into())
             }
         );
         assert_eq!(
             config.vault,
             VaultConfig {
-                root: Some("/tmp/vault".into()),
-            }
-        );
-        assert_eq!(
-            config.security,
-            SecurityConfig {
-                read_only: Some(false),
+                root: Some("/tmp/vault".into())
             }
         );
     }
@@ -367,51 +299,51 @@ mod tests {
         let low = TaoConfig {
             runtime: RuntimeConfig {
                 case_policy: Some(PathCasePolicy::Sensitive),
-                tracing_enabled: Some(true),
-                feature_flags: Some(vec!["bridge-batching".to_string()]),
             },
             storage: StorageConfig {
                 data_dir: Some(".tao".into()),
-                db_path: Some(".tao.sqlite".into()),
+                db_path: Some(".tao/index.sqlite".into()),
             },
             vault: VaultConfig {
                 root: Some("/tmp/low-vault".into()),
             },
-            security: SecurityConfig {
-                read_only: Some(true),
-            },
         };
-
         let high = TaoConfig {
             runtime: RuntimeConfig {
                 case_policy: Some(PathCasePolicy::Insensitive),
-                tracing_enabled: None,
-                feature_flags: Some(vec!["reconcile-auto-heal".to_string()]),
             },
             storage: StorageConfig {
                 data_dir: None,
                 db_path: Some(".tao/custom.sqlite".into()),
             },
             vault: VaultConfig { root: None },
-            security: SecurityConfig {
-                read_only: Some(false),
-            },
         };
-
         let merged = low.merge(&high);
         assert_eq!(
             merged.runtime.case_policy,
             Some(PathCasePolicy::Insensitive)
         );
-        assert_eq!(merged.runtime.tracing_enabled, Some(true));
-        assert_eq!(
-            merged.runtime.feature_flags,
-            Some(vec!["reconcile-auto-heal".to_string()])
-        );
         assert_eq!(merged.storage.data_dir, Some(".tao".into()));
         assert_eq!(merged.storage.db_path, Some(".tao/custom.sqlite".into()));
         assert_eq!(merged.vault.root, Some("/tmp/low-vault".into()));
-        assert_eq!(merged.security.read_only, Some(false));
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_every_scope() {
+        for input in [
+            "unknown = true",
+            "[runtime]\ntracing_enabled = true",
+            "[runtime]\nfeature_flags = []",
+            "[security]\nread_only = false",
+            "[runtime]\ncase_polciy = 'sensitive'",
+            "[storage]\ndirectory = 'bad'",
+            "[vault]\npath = '/tmp/vault'",
+        ] {
+            assert!(
+                matches!(parse_toml(input), Err(TaoConfigError::Decode(_))),
+                "{input}"
+            );
+        }
     }
 
     #[test]
@@ -436,11 +368,15 @@ mod tests {
         let body = std::fs::read_to_string(&path).expect("read config");
         assert_eq!(body, default_template());
 
-        std::fs::write(&path, "[runtime]\ntracing_enabled = false\n").expect("overwrite config");
+        std::fs::write(&path, "[runtime]\ncase_policy = \"insensitive\"\n")
+            .expect("overwrite config");
         bootstrap_default_file(&path).expect("bootstrap should not overwrite existing file");
 
         let loaded = load_from_path(&path).expect("load existing config");
-        assert_eq!(loaded.runtime.tracing_enabled, Some(false));
+        assert_eq!(
+            loaded.runtime.case_policy,
+            Some(PathCasePolicy::Insensitive)
+        );
     }
 
     #[test]
@@ -449,13 +385,16 @@ mod tests {
         let path = temp.path().join(CONFIG_FILE_NAME);
 
         bootstrap_default_file_with_hook(&path, || {
-            std::fs::write(&path, "[runtime]\ntracing_enabled = false\n")
+            std::fs::write(&path, "[runtime]\ncase_policy = \"insensitive\"\n")
                 .expect("create raced config");
         })
         .expect("bootstrap should treat raced create as success");
 
         let loaded = load_from_path(&path).expect("load raced config");
-        assert_eq!(loaded.runtime.tracing_enabled, Some(false));
+        assert_eq!(
+            loaded.runtime.case_policy,
+            Some(PathCasePolicy::Insensitive)
+        );
     }
 
     #[test]
@@ -465,11 +404,8 @@ mod tests {
             defaults.runtime.case_policy,
             Some(PathCasePolicy::Sensitive)
         );
-        assert_eq!(defaults.runtime.tracing_enabled, Some(true));
-        assert_eq!(defaults.runtime.feature_flags, Some(Vec::new()));
         assert_eq!(defaults.storage, StorageConfig::default());
         assert_eq!(defaults.vault, VaultConfig::default());
-        assert_eq!(defaults.security.read_only, Some(true));
     }
 
     #[test]

@@ -13,9 +13,6 @@ const ENV_CONFIG_PATH: &str = "TAO_CONFIG_PATH";
 const ENV_DATA_DIR: &str = "TAO_DATA_DIR";
 const ENV_DB_PATH: &str = "TAO_DB_PATH";
 const ENV_CASE_POLICY: &str = "TAO_CASE_POLICY";
-const ENV_TRACING_ENABLED: &str = "TAO_TRACING_ENABLED";
-const ENV_FEATURE_FLAGS: &str = "TAO_FEATURE_FLAGS";
-const ENV_READ_ONLY: &str = "TAO_READ_ONLY";
 
 /// Runtime SDK configuration loaded from defaults, environment, and explicit overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,12 +25,6 @@ pub struct SdkConfig {
     pub db_path: PathBuf,
     /// Path case policy for vault operations.
     pub case_policy: CasePolicy,
-    /// Toggle for service-level tracing hooks.
-    pub tracing_enabled: bool,
-    /// Enabled feature flags by canonical key.
-    pub feature_flags: Vec<String>,
-    /// Effective write policy gate.
-    pub read_only: bool,
 }
 
 /// Explicit override values with highest precedence.
@@ -47,12 +38,6 @@ pub struct SdkConfigOverrides {
     pub db_path: Option<PathBuf>,
     /// Override path case policy.
     pub case_policy: Option<CasePolicy>,
-    /// Override tracing toggle.
-    pub tracing_enabled: Option<bool>,
-    /// Override enabled feature flags.
-    pub feature_flags: Option<Vec<String>>,
-    /// Override read-only gate.
-    pub read_only: Option<bool>,
 }
 
 /// Diagnostic view of SDK config resolution.
@@ -88,12 +73,6 @@ pub struct SdkConfigFieldSources {
     pub db_path: &'static str,
     /// Source for case policy.
     pub case_policy: &'static str,
-    /// Source for tracing toggle.
-    pub tracing_enabled: &'static str,
-    /// Source for feature flags.
-    pub feature_flags: &'static str,
-    /// Source for read-only policy.
-    pub read_only: &'static str,
 }
 
 /// Loader for SDK configuration with deterministic precedence.
@@ -218,38 +197,11 @@ impl SdkConfigLoader {
                 .unwrap_or(CasePolicy::Sensitive)
         };
 
-        let tracing_enabled = if let Some(value) = overrides.tracing_enabled {
-            value
-        } else if let Some(value) = env.get(ENV_TRACING_ENABLED) {
-            parse_bool(ENV_TRACING_ENABLED, value)?
-        } else {
-            effective_config.runtime.tracing_enabled.unwrap_or(true)
-        };
-
-        let feature_flags = if let Some(value) = overrides.feature_flags {
-            normalize_feature_flags(value)
-        } else if let Some(value) = env.get(ENV_FEATURE_FLAGS) {
-            parse_feature_flags(value)
-        } else {
-            normalize_feature_flags(effective_config.runtime.feature_flags.unwrap_or_default())
-        };
-
-        let read_only = if let Some(value) = overrides.read_only {
-            value
-        } else if let Some(value) = env.get(ENV_READ_ONLY) {
-            parse_bool(ENV_READ_ONLY, value)?
-        } else {
-            effective_config.security.read_only.unwrap_or(true)
-        };
-
         Ok(SdkConfig {
             vault_root,
             data_dir,
             db_path,
             case_policy,
-            tracing_enabled,
-            feature_flags,
-            read_only,
         })
     }
 }
@@ -300,27 +252,6 @@ impl SdkConfigInspectionService {
             ),
             case_policy: source_for_runtime_case_policy(
                 overrides.case_policy.is_some(),
-                env,
-                &vault_config,
-                &root_config,
-                &global_config,
-            ),
-            tracing_enabled: source_for_runtime_tracing_enabled(
-                overrides.tracing_enabled.is_some(),
-                env,
-                &vault_config,
-                &root_config,
-                &global_config,
-            ),
-            feature_flags: source_for_runtime_feature_flags(
-                overrides.feature_flags.is_some(),
-                env,
-                &vault_config,
-                &root_config,
-                &global_config,
-            ),
-            read_only: source_for_security_read_only(
-                overrides.read_only.is_some(),
                 env,
                 &vault_config,
                 &root_config,
@@ -428,72 +359,6 @@ fn source_for_runtime_case_policy(
     } else if root_config.runtime.case_policy.is_some() {
         "root_config"
     } else if global_config.runtime.case_policy.is_some() {
-        "global_config"
-    } else {
-        "default"
-    }
-}
-
-fn source_for_runtime_tracing_enabled(
-    has_override: bool,
-    env: &HashMap<String, String>,
-    vault_config: &TaoConfig,
-    root_config: &TaoConfig,
-    global_config: &TaoConfig,
-) -> &'static str {
-    if has_override {
-        "override"
-    } else if env.contains_key(ENV_TRACING_ENABLED) {
-        "env:TAO_TRACING_ENABLED"
-    } else if vault_config.runtime.tracing_enabled.is_some() {
-        "vault_config"
-    } else if root_config.runtime.tracing_enabled.is_some() {
-        "root_config"
-    } else if global_config.runtime.tracing_enabled.is_some() {
-        "global_config"
-    } else {
-        "default"
-    }
-}
-
-fn source_for_runtime_feature_flags(
-    has_override: bool,
-    env: &HashMap<String, String>,
-    vault_config: &TaoConfig,
-    root_config: &TaoConfig,
-    global_config: &TaoConfig,
-) -> &'static str {
-    if has_override {
-        "override"
-    } else if env.contains_key(ENV_FEATURE_FLAGS) {
-        "env:TAO_FEATURE_FLAGS"
-    } else if vault_config.runtime.feature_flags.is_some() {
-        "vault_config"
-    } else if root_config.runtime.feature_flags.is_some() {
-        "root_config"
-    } else if global_config.runtime.feature_flags.is_some() {
-        "global_config"
-    } else {
-        "default"
-    }
-}
-
-fn source_for_security_read_only(
-    has_override: bool,
-    env: &HashMap<String, String>,
-    vault_config: &TaoConfig,
-    root_config: &TaoConfig,
-    global_config: &TaoConfig,
-) -> &'static str {
-    if has_override {
-        "override"
-    } else if env.contains_key(ENV_READ_ONLY) {
-        "env:TAO_READ_ONLY"
-    } else if vault_config.security.read_only.is_some() {
-        "vault_config"
-    } else if root_config.security.read_only.is_some() {
-        "root_config"
-    } else if global_config.security.read_only.is_some() {
         "global_config"
     } else {
         "default"
@@ -722,35 +587,6 @@ fn parse_case_policy(value: &str) -> Result<CasePolicy, SdkConfigError> {
     }
 }
 
-fn parse_bool(key: &'static str, value: &str) -> Result<bool, SdkConfigError> {
-    if value.eq_ignore_ascii_case("true") || value == "1" {
-        Ok(true)
-    } else if value.eq_ignore_ascii_case("false") || value == "0" {
-        Ok(false)
-    } else {
-        Err(SdkConfigError::InvalidBool {
-            key,
-            value: value.to_string(),
-        })
-    }
-}
-
-fn parse_feature_flags(value: &str) -> Vec<String> {
-    let parsed: Vec<String> = value
-        .split(',')
-        .map(|segment| segment.trim().to_ascii_lowercase())
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    normalize_feature_flags(parsed)
-}
-
-fn normalize_feature_flags(mut flags: Vec<String>) -> Vec<String> {
-    flags.retain(|flag| !flag.trim().is_empty());
-    flags.sort();
-    flags.dedup();
-    flags
-}
-
 /// SDK config loading failures.
 #[derive(Debug, Error)]
 pub enum SdkConfigError {
@@ -841,14 +677,6 @@ pub enum SdkConfigError {
         /// Raw env value.
         value: String,
     },
-    /// Invalid boolean-like environment value.
-    #[error("invalid boolean value for '{key}': '{value}'")]
-    InvalidBool {
-        /// Env key.
-        key: &'static str,
-        /// Raw env value.
-        value: String,
-    },
     /// Vault root was not configured through any supported source.
     #[error(
         "vault root is not configured; pass --vault-root, set TAO_VAULT_ROOT, or set [vault].root in ~/.tools/tao/config.toml"
@@ -936,18 +764,11 @@ mod tests {
             env_vault.to_string_lossy().to_string(),
         );
         env.insert("TAO_CASE_POLICY".to_string(), "insensitive".to_string());
-        env.insert("TAO_TRACING_ENABLED".to_string(), "0".to_string());
-        env.insert(
-            "TAO_FEATURE_FLAGS".to_string(),
-            "bridge-batching,reconcile-auto-heal".to_string(),
-        );
 
         let config = SdkConfigLoader::load_from_map(
             SdkConfigOverrides {
                 vault_root: Some(override_vault.clone()),
                 case_policy: Some(CasePolicy::Sensitive),
-                tracing_enabled: Some(true),
-                feature_flags: Some(vec!["tui-preview".to_string()]),
                 ..SdkConfigOverrides::default()
             },
             &env,
@@ -960,8 +781,6 @@ mod tests {
             fs::canonicalize(override_vault).expect("canonical vault")
         );
         assert_eq!(config.case_policy, CasePolicy::Sensitive);
-        assert!(config.tracing_enabled);
-        assert_eq!(config.feature_flags, vec!["tui-preview".to_string()]);
     }
 
     #[test]
@@ -976,10 +795,6 @@ mod tests {
             env_vault.to_string_lossy().to_string(),
         );
         env.insert("TAO_CASE_POLICY".to_string(), "insensitive".to_string());
-        env.insert(
-            "TAO_FEATURE_FLAGS".to_string(),
-            "bridge-batching,reconcile-auto-heal".to_string(),
-        );
 
         let config =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
@@ -987,17 +802,6 @@ mod tests {
 
         assert_eq!(config.case_policy, CasePolicy::Insensitive);
         assert!(config.db_path.ends_with("index.sqlite"));
-        assert!(
-            config.read_only,
-            "default security policy should be read-only"
-        );
-        assert_eq!(
-            config.feature_flags,
-            vec![
-                "bridge-batching".to_string(),
-                "reconcile-auto-heal".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -1162,8 +966,6 @@ mod tests {
             temp.path().join("config.toml"),
             r#"[runtime]
 case_policy = "insensitive"
-tracing_enabled = false
-feature_flags = ["root-flag"]
 
 [storage]
 data_dir = "root-data"
@@ -1175,8 +977,6 @@ db_path = "root.sqlite"
         fs::write(
             vault.join("config.toml"),
             r#"[runtime]
-tracing_enabled = true
-feature_flags = ["vault-flag"]
 
 [storage]
 data_dir = ".vault-data"
@@ -1197,8 +997,6 @@ db_path = ".vault.sqlite"
 
         let canonical_vault = fs::canonicalize(&vault).expect("canonical vault");
         assert_eq!(loaded.case_policy, CasePolicy::Insensitive);
-        assert!(loaded.tracing_enabled);
-        assert_eq!(loaded.feature_flags, vec!["vault-flag".to_string()]);
         assert_eq!(loaded.data_dir, canonical_vault.join(".vault-data"));
         assert_eq!(loaded.db_path, canonical_vault.join(".vault.sqlite"));
     }
@@ -1226,9 +1024,7 @@ data_dir = "root-data"
         .expect("write root config");
         fs::write(
             vault.join("config.toml"),
-            r#"[security]
-read_only = false
-
+            r#"
 [storage]
 db_path = ".vault.sqlite"
 "#,
@@ -1247,7 +1043,6 @@ db_path = ".vault.sqlite"
         assert_eq!(inspected.sources.data_dir, "root_config");
         assert_eq!(inspected.sources.db_path, "vault_config");
         assert_eq!(inspected.sources.case_policy, "root_config");
-        assert_eq!(inspected.sources.read_only, "vault_config");
         assert!(
             inspected
                 .config_files
@@ -1269,8 +1064,6 @@ db_path = ".vault.sqlite"
                 r#"[vault]
 root = "{}"
 
-[security]
-read_only = true
 "#,
                 vault.display()
             ),
@@ -1279,7 +1072,6 @@ read_only = true
 
         let mut env = HashMap::new();
         env.insert("HOME".to_string(), home.to_string_lossy().to_string());
-        env.insert("TAO_READ_ONLY".to_string(), "0".to_string());
 
         let loaded =
             SdkConfigLoader::load_from_map(SdkConfigOverrides::default(), &env, temp.path())
@@ -1289,10 +1081,6 @@ read_only = true
             loaded.vault_root,
             fs::canonicalize(vault).expect("canonical vault")
         );
-        assert!(
-            !loaded.read_only,
-            "TAO_READ_ONLY=0 should override global read_only=true"
-        );
         assert!(loaded.db_path.ends_with("index.sqlite"));
     }
 
@@ -1301,6 +1089,10 @@ read_only = true
         let temp = tempdir().expect("tempdir");
         let vault = temp.path().join("vault");
         fs::create_dir_all(&vault).expect("create vault");
+        let probed_root_config = super::resolve_root_config_dir(temp.path())
+            .map(|root| tao_sdk_config::config_path(&root))
+            .unwrap_or_else(|| temp.path().join("config.toml"));
+        let original_config = fs::read(&probed_root_config).ok();
 
         let mut env = HashMap::new();
         env.insert(
@@ -1320,10 +1112,13 @@ read_only = true
         assert_eq!(snapshot.pending_migrations, 0);
         assert_eq!(snapshot.applied_migrations, known_migrations().len() as u64);
         assert_eq!(snapshot.db_path, snapshot.config.db_path);
-        assert!(
-            !snapshot.root_config_path.exists(),
-            "root config is probe-only and should not be created implicitly"
+        assert_eq!(snapshot.root_config_path, probed_root_config);
+        assert_eq!(
+            fs::read(&snapshot.root_config_path).ok(),
+            original_config,
+            "root config is probe-only: an existing ancestor config must remain unchanged"
         );
+        assert!(!temp.path().join("config.toml").exists());
         assert!(
             !snapshot.vault_config_path.exists(),
             "vault config should remain absent until explicitly created"

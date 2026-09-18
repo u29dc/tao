@@ -11,12 +11,12 @@ pub mod validation;
 pub use ast::{
     BaseAggregateOp, BaseAggregateSpec, BaseColumnConfig, BaseDocument, BaseFilterClause,
     BaseFilterOp, BaseNullOrder, BaseRelationSpec, BaseRollupOp, BaseRollupSpec, BaseSortClause,
-    BaseSortDirection, BaseViewDefinition, BaseViewKind, BaseViewRegistryEntry,
-    PropertyQueryPlanRequest, PropertyQuerySortHint, TableQueryPlan, TableQueryPlanRequest,
+    BaseSortDirection, BaseViewDefinition, BaseViewKind, BaseViewRegistryEntry, TableQueryPlan,
+    TableQueryPlanRequest,
 };
 pub use evaluator::{
-    BaseEvalError, compare_json_values, compare_optional_json_values, evaluate_filter,
-    json_scalar_to_string,
+    BaseEvalError, compare_json_values, compare_optional_json_values, compare_predicate_values,
+    evaluate_filter, json_scalar_to_string, json_values_equal, validate_filter_operand,
 };
 pub use parser::{BaseParseError, parse_base_document};
 pub use planner::{
@@ -37,8 +37,8 @@ mod tests {
         BaseFilterClause, BaseFilterOp, BaseNullOrder, BaseParseError, BaseRelationSpec,
         BaseRollupOp, BaseRollupSpec, BaseSortClause, BaseSortDirection, BaseTableQueryPlanError,
         BaseTableQueryPlanner, BaseViewKind, BaseViewRegistry, BaseViewRegistryError,
-        PropertyQuerySortHint, TableQueryPlanRequest, parse_base_document,
-        validate_base_config_json, validate_base_document, validate_base_yaml,
+        TableQueryPlanRequest, parse_base_document, validate_base_config_json,
+        validate_base_document, validate_base_yaml,
     };
 
     #[test]
@@ -188,8 +188,8 @@ views:
             table.filters,
             vec![BaseFilterClause {
                 key: "prod_folder".to_string(),
-                op: BaseFilterOp::Exists,
-                value: json!(true),
+                op: BaseFilterOp::IsEmpty,
+                value: json!(false),
             }]
         );
         assert_eq!(
@@ -386,16 +386,6 @@ views:
         );
         assert_eq!(plan.limit, 25);
         assert_eq!(plan.offset, 25);
-        assert_eq!(plan.property_queries.len(), 3);
-        assert_eq!(plan.property_queries[1].key, "assignee");
-        assert_eq!(
-            plan.property_queries[1].value_contains.as_deref(),
-            Some("han")
-        );
-        assert_eq!(
-            plan.property_queries[2].sort,
-            PropertyQuerySortHint::ValueDesc
-        );
     }
 
     #[test]

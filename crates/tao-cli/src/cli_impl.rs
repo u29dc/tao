@@ -39,8 +39,8 @@ use tao_sdk_service::{
 #[cfg(test)]
 use tao_sdk_service::{CURRENT_LINK_RESOLUTION_VERSION, LINK_RESOLUTION_VERSION_STATE_KEY};
 use tao_sdk_storage::{
-    BasesRepository, PropertiesRepository, SearchSegmentMatch, SearchSegmentRepository,
-    TasksRepository, preflight_migrations, run_migrations,
+    BasesRepository, SearchSegmentMatch, SearchSegmentRepository, TasksRepository,
+    preflight_migrations, run_migrations,
 };
 use tao_sdk_vault::{
     CasePolicy, PathCanonicalizationService, VaultScanService, validate_relative_vault_path,
@@ -49,19 +49,27 @@ use tao_sdk_watch::{VaultChangeMonitor, WatchReconcileService};
 
 mod args;
 mod commands;
+mod continuation;
 mod contract;
 mod daemon;
+#[cfg(unix)]
+mod daemon_server;
+#[cfg(unix)]
+mod daemon_socket;
 mod helpers;
 mod query_docs;
 mod registry;
 mod runtime;
+mod runtime_context;
 
 use args::*;
+use continuation::*;
 use contract::*;
 use daemon::*;
 use helpers::*;
 use query_docs::*;
 use runtime::*;
+use runtime_context::*;
 
 const DEFAULT_DAEMON_STARTUP_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_DAEMON_SOCKET_DIR: &str = ".tools/tao/daemons";
@@ -72,11 +80,15 @@ pub fn run() -> i32 {
     if let Some(clap_output) = result.clap_output {
         emit_clap_output(clap_output);
     } else {
-        if let Some(stdout) = result.stdout.as_deref() {
-            emit_output(stdout, false);
+        if let Some(stdout) = result.stdout.as_deref()
+            && emit_output(stdout, false).is_err()
+        {
+            return ExitKind::Failure.code();
         }
-        if let Some(stderr) = result.stderr.as_deref() {
-            emit_output(stderr, true);
+        if let Some(stderr) = result.stderr.as_deref()
+            && emit_output(stderr, true).is_err()
+        {
+            return ExitKind::Failure.code();
         }
     }
     result.exit_kind.code()
@@ -96,17 +108,27 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
         OutputFormat::Json
     };
     let run = || -> Result<String> {
+        validate_continuation_usage(&cli.command, cli.continuation.as_deref())?;
+        if let Commands::Query(args) = &cli.command {
+            commands::query::validate_capabilities(args)?;
+        }
+        if let Commands::Doc { command } = &cli.command {
+            commands::doc::validate_args(command)?;
+        }
+        // Resolve once in the caller before routing. Every subsequent resolver,
+        // including fallback execution, sees the same owned settings snapshot.
+        let context = resolve_command_vault_paths(&cli.command)?;
+        let _routing_scope = RequestScope::new(
+            context,
+            false,
+            started_at + Duration::from_millis(cli.timeout_ms),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .enter();
         if let Some(output) = maybe_forward_to_daemon(&cli)? {
             return Ok(output);
         }
-        if cli.json
-            && let Some(output) = maybe_render_streaming_output(&cli)?
-        {
-            return Ok(output);
-        }
-
-        let result = dispatch(cli.command.clone())?;
-        render_output_with_format(output_format, &result, started_at.elapsed())
+        execute_direct_cli(&cli, started_at, output_format)
     };
 
     match run() {
@@ -152,6 +174,88 @@ fn run_from_args(raw_args: Vec<OsString>) -> RunResult {
     }
 }
 
+fn execute_direct_cli(
+    cli: &Cli,
+    started_at: Instant,
+    output_format: OutputFormat,
+) -> Result<String> {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let resolved = resolve_command_vault_paths(&cli.command)?;
+    let deadline = started_at + Duration::from_millis(cli.timeout_ms);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let policy = daemon_execution_policy(&cli.command);
+    let write_scope =
+        RequestScope::new(resolved.clone(), false, deadline, Arc::clone(&cancelled)).enter();
+    if policy.refreshes_runtime()
+        && let Some(resolved) = &resolved
+    {
+        let mut runtime = RuntimeMode::OneShot;
+        with_connection(&mut runtime, resolved, |connection| {
+            IndexRefreshService.refresh(
+                Path::new(&resolved.vault_root),
+                connection,
+                resolved.case_policy,
+                IndexRefreshOptions::default(),
+            )?;
+            Ok(())
+        })?;
+    }
+    drop(write_scope);
+    let observational = policy != DaemonExecutionPolicy::ExplicitWork;
+    let _scope = RequestScope::new(resolved.clone(), observational, deadline, cancelled).enter();
+    let mut runtime = if observational {
+        RuntimeMode::Snapshot(Box::<RuntimeCache>::default())
+    } else {
+        RuntimeMode::OneShot
+    };
+    let continuation = prepare_continuation(
+        &mut runtime,
+        resolved.as_ref(),
+        &cli.command,
+        cli.continuation.as_deref(),
+        cli.toon,
+        cli.json_stream,
+    )?;
+    let output = if let Some(output) =
+        maybe_render_streaming_output_for_command(&cli.command, cli.json_stream, &mut runtime)?
+    {
+        output
+    } else {
+        let result = dispatch_with_runtime(cli.command.clone(), &mut runtime)?;
+        render_output_with_format(OutputFormat::Json, &result, started_at.elapsed())?
+    };
+    if !matches!(
+        &cli.command,
+        Commands::Vault {
+            command: VaultCommands::DaemonServe(_)
+                | VaultCommands::Daemon {
+                    command: DaemonCommands::Start(DaemonStartArgs {
+                        foreground: true,
+                        ..
+                    })
+                }
+        }
+    ) {
+        check_request_deadline()?;
+    }
+    if output.len() as u64 > MAX_DAEMON_RESPONSE_BYTES {
+        return Err(runtime_error(
+            "response_too_large",
+            "response exceeds 16 MiB; request a smaller window",
+        ));
+    }
+    let output = decorate_runtime_output(output, "direct", "bypass", false, &new_request_id())?;
+    let output = decorate_continuation(output, continuation.as_ref())?;
+    match output_format {
+        OutputFormat::Json => Ok(output),
+        OutputFormat::Toon => Ok(toon_format::encode_default(&serde_json::from_str::<
+            JsonValue,
+        >(&output)?)?),
+    }
+}
+
+#[cfg(test)]
 fn maybe_render_streaming_output(cli: &Cli) -> Result<Option<String>> {
     let mut runtime = RuntimeMode::OneShot;
     maybe_render_streaming_output_for_command(&cli.command, cli.json_stream, &mut runtime)
@@ -169,6 +273,10 @@ fn maybe_render_streaming_output_for_command(
     let Commands::Query(args) = command else {
         return Ok(None);
     };
+    commands::query::validate_capabilities(args)?;
+    if args.explain {
+        return Ok(None);
+    }
     if !args.from.trim().eq_ignore_ascii_case("docs") {
         return Ok(None);
     }
@@ -202,6 +310,7 @@ fn maybe_render_streaming_output_for_command(
     Ok(Some(rendered))
 }
 
+#[cfg(test)]
 fn dispatch(command: Commands) -> Result<CommandResult> {
     let mut runtime = RuntimeMode::OneShot;
     dispatch_with_runtime(command, &mut runtime)
@@ -224,10 +333,6 @@ fn dispatch_with_runtime(command: Commands, runtime: &mut RuntimeMode) -> Result
     }
 }
 
-fn handle_base(command: BaseCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
-    commands::base::handle(command, runtime)
-}
-
 fn handle_graph(command: GraphCommands, runtime: &mut RuntimeMode) -> Result<CommandResult> {
     commands::graph::handle(command, runtime)
 }
@@ -241,5 +346,5 @@ fn handle_task(command: TaskCommands, runtime: &mut RuntimeMode) -> Result<Comma
 }
 
 #[cfg(test)]
-#[path = "cli_impl/tests.rs"]
+#[path = "cli_impl/tests/mod.rs"]
 mod tests;

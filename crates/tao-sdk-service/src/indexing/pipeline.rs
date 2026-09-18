@@ -1,38 +1,43 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tao_sdk_links::{
-    LinkCasePolicy, LinkResolutionIndex, WikiLink, extract_block_ids, extract_markdown_links,
-    extract_wikilinks, resolve_block_target, resolve_heading_target, slugify_heading,
+    LinkCasePolicy, LinkFragment, LinkKind, LinkResolutionIndex, LinkTarget, WikiLink,
+    extract_wikilinks, parse_link_occurrence, parse_link_target, slugify_heading,
+    validate_fragment,
 };
-use tao_sdk_markdown::{MarkdownParseError, MarkdownParseRequest, MarkdownParser};
+use tao_sdk_markdown::{
+    LinkSyntax, MarkdownParseError, MarkdownParseRequest, MarkdownParseResult, MarkdownParser,
+    SourceSpan,
+};
 use tao_sdk_properties::{
     FrontMatterStatus, MAX_FRONT_MATTER_DEPTH, PropertyProjectionError, TypedPropertyValue,
-    extract_front_matter, project_typed_properties,
+    project_typed_properties,
 };
 use tao_sdk_storage::{
-    BaseRecordInput, BasesRepository, FileRecordInput, FilesRepository, IndexStateRecordInput,
-    IndexStateRepository, LinkRecordInput, LinkWithPaths, PropertiesRepository,
-    PropertyRecordInput, TaskRecordInput, TasksRepository,
+    BaseRecordInput, BasesRepository, DiagnosticsRepository, DocumentRecordInput,
+    DocumentsRepository, FileDiagnosticInput, FileRecordInput, FilesRepository,
+    IndexStateRecordInput, IndexStateRepository, LinkEvidenceInput, LinkEvidenceRepository,
+    LinkRecordInput, LinkWithPaths, PropertyRecordInput, TaskRecordInput, TasksRepository,
 };
 use tao_sdk_vault::{
-    CasePolicy, FileFingerprintError, FileFingerprintService, PathCanonicalizationError,
-    VaultManifestEntry, VaultScanError, VaultScanService,
+    CapturedFile, CasePolicy, FileFingerprintError, FileFingerprintService, FileKind,
+    PathCanonicalizationError, VaultManifestEntry, VaultScanError, VaultScanService, file_kind,
 };
 use thiserror::Error;
 
 const CHECKPOINT_STATE_KEY: &str = "checkpoint.incremental_index";
 const CHECKPOINT_SUMMARY_KEY: &str = "last_checkpointed_index_summary";
 pub const LINK_RESOLUTION_VERSION_STATE_KEY: &str = "link_resolution_version";
-pub const CURRENT_LINK_RESOLUTION_VERSION: u32 = 2;
+pub const CURRENT_LINK_RESOLUTION_VERSION: u32 = 3;
+const CANONICAL_STRUCTURE_VERSION: u32 = 1;
 
+mod apply;
+mod budget;
 mod checkpoint;
 mod consistency;
 mod errors;
@@ -54,6 +59,7 @@ pub use incremental::{
     CoalescedBatchIndexResult, CoalescedBatchIndexService, IncrementalIndexResult,
     IncrementalIndexService, SearchCorpusRefreshMode, StaleCleanupResult, StaleCleanupService,
 };
+pub(crate) use reconcile_scan::IndexChange;
 pub use reconcile_scan::{
     ReconciliationScanMode, ReconciliationScanResult, ReconciliationScannerService,
 };
@@ -64,8 +70,6 @@ struct MarkdownIndexDocument {
     file_id: String,
     source_path: String,
     links: Vec<IndexedWikiLink>,
-    heading_slugs: Vec<String>,
-    block_ids: Vec<String>,
     properties: Vec<PropertyRecordInput>,
     tasks: Vec<TaskRecordInput>,
 }
@@ -75,22 +79,34 @@ struct PreparedIndexEntry {
     file_record: FileRecordInput,
     markdown_doc: Option<MarkdownIndexDocument>,
     base_record: Option<BaseRecordInput>,
+    document_record: Option<DocumentRecordInput>,
+    diagnostic: Option<FileDiagnosticInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CanonicalStructure {
+    version: u32,
+    links: Vec<IndexedWikiLink>,
+    heading_slugs: Vec<String>,
+    block_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedLinkBatch {
     records: Vec<LinkRecordInput>,
-    unresolved_total: u64,
+    evidence: Vec<LinkEvidenceInput>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IndexedWikiLink {
     link: WikiLink,
     source: String,
     kind: IndexedLinkKind,
+    target: LinkTarget,
+    span: Option<SourceSpan>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 enum IndexedLinkKind {
     Wikilink,
     Markdown,
@@ -112,98 +128,6 @@ fn link_case_policy(case_policy: CasePolicy) -> LinkCasePolicy {
         CasePolicy::Sensitive => LinkCasePolicy::Sensitive,
         CasePolicy::Insensitive => LinkCasePolicy::Insensitive,
     }
-}
-
-fn hash_file_blake3(path: &Path) -> Result<String, std::io::Error> {
-    const HASH_BUFFER_BYTES: usize = 64 * 1024;
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::with_capacity(HASH_BUFFER_BYTES, file);
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0_u8; HASH_BUFFER_BYTES];
-
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn metadata_modified_unix_ms(metadata: &fs::Metadata, path: &Path) -> Result<i64, FullIndexError> {
-    let modified_unix_ms = metadata
-        .modified()
-        .map_err(|source| FullIndexError::ReadFile {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|source| FullIndexError::Clock {
-            source: Box::new(source),
-        })?
-        .as_millis();
-
-    i64::try_from(modified_unix_ms).map_err(|_| FullIndexError::TimestampOverflow {
-        value: modified_unix_ms,
-    })
-}
-
-fn upsert_files_batch(
-    connection: &Connection,
-    records: &[FileRecordInput],
-) -> Result<(), FullIndexError> {
-    let mut statement = connection
-        .prepare_cached(
-            r#"
-INSERT INTO files (
-  file_id,
-  normalized_path,
-  match_key,
-  absolute_path,
-  size_bytes,
-  modified_unix_ms,
-  hash_blake3,
-  is_markdown
-)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-ON CONFLICT(file_id)
-DO UPDATE SET
-  normalized_path = excluded.normalized_path,
-  match_key = excluded.match_key,
-  absolute_path = excluded.absolute_path,
-  size_bytes = excluded.size_bytes,
-  modified_unix_ms = excluded.modified_unix_ms,
-  hash_blake3 = excluded.hash_blake3,
-  is_markdown = excluded.is_markdown,
-  indexed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-"#,
-        )
-        .map_err(|source| FullIndexError::ExecuteSql {
-            operation: "prepare_bulk_upsert_files",
-            source: Box::new(source),
-        })?;
-
-    for record in records {
-        statement
-            .execute(params![
-                record.file_id,
-                record.normalized_path,
-                record.match_key,
-                record.absolute_path,
-                record.size_bytes,
-                record.modified_unix_ms,
-                record.hash_blake3,
-                i64::from(record.is_markdown)
-            ])
-            .map_err(|source| FullIndexError::ExecuteSql {
-                operation: "bulk_upsert_files",
-                source: Box::new(source),
-            })?;
-    }
-
-    Ok(())
 }
 
 fn upsert_properties_batch(
@@ -353,56 +277,18 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
     Ok(())
 }
 
-fn upsert_bases_batch(
-    connection: &Connection,
-    records: &[BaseRecordInput],
-) -> Result<(), FullIndexError> {
-    let mut statement = connection
-        .prepare_cached(
-            r#"
-INSERT INTO bases (
-  base_id,
-  file_id,
-  config_json
-)
-VALUES (?1, ?2, ?3)
-ON CONFLICT(base_id)
-DO UPDATE SET
-  file_id = excluded.file_id,
-  config_json = excluded.config_json,
-  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-"#,
-        )
-        .map_err(|source| FullIndexError::ExecuteSql {
-            operation: "prepare_bulk_upsert_bases",
-            source: Box::new(source),
-        })?;
-
-    for record in records {
-        statement
-            .execute(params![record.base_id, record.file_id, record.config_json])
-            .map_err(|source| FullIndexError::ExecuteSql {
-                operation: "bulk_upsert_bases",
-                source: Box::new(source),
-            })?;
-    }
-
-    Ok(())
-}
-
 fn build_property_records(
     file_id: &str,
     source_path: &str,
-    markdown: &str,
+    status: &FrontMatterStatus,
     absolute_path: &Path,
 ) -> Result<Vec<PropertyRecordInput>, FullIndexError> {
-    let extraction = extract_front_matter(markdown);
-    let front_matter = match extraction.status {
+    let front_matter = match status {
         FrontMatterStatus::Parsed { value } => value,
         FrontMatterStatus::Malformed { .. } | FrontMatterStatus::Missing => return Ok(Vec::new()),
     };
 
-    let projected = project_typed_properties(&front_matter).map_err(|source| {
+    let projected = project_typed_properties(front_matter).map_err(|source| {
         FullIndexError::ProjectProperties {
             path: absolute_path.to_path_buf(),
             source: Box::new(source),
@@ -431,240 +317,51 @@ fn build_property_records(
     Ok(records)
 }
 
-fn build_task_records(file_id: &str, source_path: &str, markdown: &str) -> Vec<TaskRecordInput> {
-    markdown
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let (state, text) = parse_task_line(line)?;
-            let line_number = (index + 1) as i64;
-            Some(TaskRecordInput {
+fn build_task_records(
+    file_id: &str,
+    source_path: &str,
+    parsed: &MarkdownParseResult,
+) -> Vec<TaskRecordInput> {
+    parsed
+        .tasks
+        .iter()
+        .map(|task| {
+            let line_number = task.line as i64;
+            TaskRecordInput {
                 task_id: deterministic_id("task", &format!("{file_id}:{line_number}")),
                 file_id: file_id.to_string(),
                 file_path: source_path.to_string(),
                 file_path_lc: source_path.to_lowercase(),
                 line_number,
-                state: state.to_string(),
-                text: text.to_string(),
-                text_lc: text.to_lowercase(),
-            })
+                state: task.state.clone(),
+                text: task.text.clone(),
+                text_lc: task.text.to_lowercase(),
+            }
         })
         .collect()
 }
 
-struct LinkResolutionContext<'a> {
-    resolution_index: &'a LinkResolutionIndex,
-    file_id_by_path: &'a HashMap<String, String>,
-    heading_index: &'a HashMap<String, Vec<String>>,
-    block_index: &'a HashMap<String, Vec<String>>,
-}
-
-fn build_incremental_link_records(
-    context: &LinkResolutionContext<'_>,
-    file_id: &str,
-    source_path: &str,
-    markdown: &str,
-    parsed_body: &str,
-) -> Vec<LinkRecordInput> {
-    let mut records = Vec::new();
-    for (index, indexed_link) in extract_index_links(markdown, parsed_body)
+fn extract_index_links(parsed: &MarkdownParseResult) -> Vec<IndexedWikiLink> {
+    let mut links = parsed
+        .links
         .iter()
-        .enumerate()
-    {
-        let link = &indexed_link.link;
-        let resolution = context
-            .resolution_index
-            .resolve(&link.target, Some(source_path));
-        let mut resolved_file_id = resolution
-            .resolved_path
-            .as_ref()
-            .and_then(|path| context.file_id_by_path.get(path).cloned());
-        let mut heading_slug = link.heading.as_deref().map(slugify_heading);
-        let mut block_id = link.block.clone();
-        let heading_resolution = resolve_heading_target(
-            link.heading.as_deref(),
-            resolution.resolved_path.as_deref(),
-            context.heading_index,
-        );
-        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
-            heading_slug = Some(resolved_heading_slug);
-        }
-        if link.heading.is_some() && !heading_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-        let block_resolution = resolve_block_target(
-            link.block.as_deref(),
-            resolution.resolved_path.as_deref(),
-            context.block_index,
-        );
-        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
-            block_id = Some(resolved_block_id);
-        }
-        if link.block.is_some() && !block_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-
-        let is_unresolved = resolved_file_id.is_none();
-        let unresolved_reason = if is_unresolved {
-            classify_unresolved_reason(
-                link,
-                resolution.resolved_path.as_deref(),
-                heading_resolution.is_resolved,
-                block_resolution.is_resolved,
-            )
-        } else {
-            None
-        };
-
-        records.push(LinkRecordInput {
-            link_id: deterministic_id(
-                "link",
-                &format!("{file_id}:{index}:{}:{}", indexed_link.source, link.raw),
-            ),
-            source_file_id: file_id.to_string(),
-            raw_target: link.target.clone(),
-            resolved_file_id,
-            heading_slug,
-            block_id,
-            is_unresolved,
-            unresolved_reason,
-            source_field: indexed_link.kind.source_field(&indexed_link.source),
-        });
-    }
-    records
-}
-
-fn stored_link_requires_refresh(
-    link: &LinkWithPaths,
-    resolution_index: &LinkResolutionIndex,
-    file_id_by_path: &HashMap<String, String>,
-    heading_index: &HashMap<String, Vec<String>>,
-    block_index: &HashMap<String, Vec<String>>,
-) -> bool {
-    let resolution = resolution_index.resolve(&link.raw_target, Some(&link.source_path));
-    let mut resolved_file_id = resolution
-        .resolved_path
-        .as_ref()
-        .and_then(|path| file_id_by_path.get(path).cloned());
-    let mut heading_slug = link.heading_slug.clone();
-    let mut block_id = link.block_id.clone();
-
-    if heading_slug.is_some() {
-        let heading_resolution = resolve_heading_target(
-            heading_slug.as_deref(),
-            resolution.resolved_path.as_deref(),
-            heading_index,
-        );
-        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
-            heading_slug = Some(resolved_heading_slug);
-        }
-        if !heading_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-    }
-
-    if block_id.is_some() {
-        let block_resolution = resolve_block_target(
-            block_id.as_deref(),
-            resolution.resolved_path.as_deref(),
-            block_index,
-        );
-        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
-            block_id = Some(resolved_block_id);
-        }
-        if !block_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-    }
-
-    let is_unresolved = resolved_file_id.is_none();
-    resolved_file_id != link.resolved_file_id
-        || heading_slug != link.heading_slug
-        || block_id != link.block_id
-        || is_unresolved != link.is_unresolved
-}
-
-fn parse_task_line(line: &str) -> Option<(&'static str, &str)> {
-    let trimmed = line.trim_start();
-    let (state, remainder) = if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-        ("open", rest)
-    } else if let Some(rest) = trimmed
-        .strip_prefix("- [x] ")
-        .or_else(|| trimmed.strip_prefix("- [X] "))
-    {
-        ("done", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("- [-] ") {
-        ("cancelled", rest)
-    } else {
-        return None;
-    };
-
-    Some((state, remainder.trim()))
-}
-
-fn extract_index_links(markdown: &str, body: &str) -> Vec<IndexedWikiLink> {
-    let mut links = Vec::new();
-
-    for link in extract_wikilinks(body) {
-        links.push(IndexedWikiLink {
-            link,
+        .filter_map(parse_link_occurrence)
+        .map(|occurrence| IndexedWikiLink {
+            link: occurrence.link,
             source: "body".to_string(),
-            kind: IndexedLinkKind::Wikilink,
-        });
-    }
-
-    for markdown_link in extract_markdown_links(body) {
-        links.push(IndexedWikiLink {
-            link: WikiLink {
-                raw: markdown_link.raw_target,
-                target: markdown_link.target,
-                display: None,
-                heading: None,
-                block: None,
-                has_explicit_path: true,
+            kind: match occurrence.kind {
+                LinkKind::Wikilink => IndexedLinkKind::Wikilink,
+                LinkKind::Markdown => IndexedLinkKind::Markdown,
+                LinkKind::Embed => IndexedLinkKind::Embed,
             },
-            source: "body".to_string(),
-            kind: if markdown_link.is_embed {
-                IndexedLinkKind::Embed
-            } else {
-                IndexedLinkKind::Markdown
-            },
-        });
+            target: occurrence.target,
+            span: Some(occurrence.span),
+        })
+        .collect::<Vec<_>>();
+    if let FrontMatterStatus::Parsed { value } = &parsed.front_matter_status {
+        collect_frontmatter_links(value, "", &mut links);
     }
-
-    let extraction = extract_front_matter(markdown);
-    if let FrontMatterStatus::Parsed { value } = extraction.status {
-        collect_frontmatter_links(&value, "", &mut links);
-    }
-
-    // Deterministic dedupe across body and frontmatter paths.
-    links.sort_by(|left, right| {
-        (
-            left.source.as_str(),
-            left.kind,
-            left.link.raw.as_str(),
-            left.link.target.as_str(),
-            left.link.heading.as_deref().unwrap_or(""),
-            left.link.block.as_deref().unwrap_or(""),
-        )
-            .cmp(&(
-                right.source.as_str(),
-                right.kind,
-                right.link.raw.as_str(),
-                right.link.target.as_str(),
-                right.link.heading.as_deref().unwrap_or(""),
-                right.link.block.as_deref().unwrap_or(""),
-            ))
-    });
-    links.dedup_by(|left, right| {
-        left.source == right.source
-            && left.kind == right.kind
-            && left.link.raw == right.link.raw
-            && left.link.target == right.link.target
-            && left.link.heading == right.link.heading
-            && left.link.block == right.link.block
-    });
-
+    // Occurrences retain source order and duplicates; IDs include occurrence ordinals.
     links
 }
 
@@ -689,11 +386,15 @@ fn collect_frontmatter_links_at_depth(
     match value {
         serde_yaml::Value::String(raw) => {
             for link in extract_wikilinks(raw) {
-                links.push(IndexedWikiLink {
-                    link,
-                    source: format!("frontmatter:{path}"),
-                    kind: IndexedLinkKind::Wikilink,
-                });
+                if let Some(target) = parse_link_target(&link.raw, LinkSyntax::Wiki) {
+                    links.push(IndexedWikiLink {
+                        link,
+                        target,
+                        span: None,
+                        source: format!("frontmatter:{path}"),
+                        kind: IndexedLinkKind::Wikilink,
+                    });
+                }
             }
         }
         serde_yaml::Value::Sequence(items) => {
@@ -734,101 +435,143 @@ fn collect_frontmatter_links_at_depth(
 fn build_prepared_index_entry(
     entry: &VaultManifestEntry,
     parser: MarkdownParser,
+    fingerprints: &FileFingerprintService,
+    captured: Option<CapturedFile>,
 ) -> Result<PreparedIndexEntry, FullIndexError> {
-    let hash_blake3 =
-        hash_file_blake3(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
-            path: entry.absolute.clone(),
-            source,
-        })?;
-
-    let file_id = deterministic_id("file", &entry.normalized);
-    let file_record = FileRecordInput {
-        file_id: file_id.clone(),
-        normalized_path: entry.normalized.clone(),
-        match_key: entry.match_key.clone(),
-        absolute_path: entry.absolute.to_string_lossy().to_string(),
-        size_bytes: entry.size_bytes,
-        modified_unix_ms: entry.modified_unix_ms,
-        hash_blake3,
-        is_markdown: entry.normalized.ends_with(".md"),
-    };
-
-    if entry.normalized.ends_with(".md") {
-        let markdown =
-            fs::read_to_string(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
-                path: entry.absolute.clone(),
-                source,
-            })?;
-
-        let parsed = parser
-            .parse(MarkdownParseRequest {
-                normalized_path: entry.normalized.clone(),
-                raw: markdown.clone(),
-            })
-            .map_err(|source| FullIndexError::ParseMarkdown {
-                path: entry.absolute.clone(),
-                source: Box::new(source),
-            })?;
-
-        let property_records =
-            build_property_records(&file_id, &entry.normalized, &markdown, &entry.absolute)?;
-        let task_records = build_task_records(&file_id, &entry.normalized, &markdown);
-        let links = extract_index_links(&markdown, &parsed.body);
-        let mut heading_slugs = parsed
-            .headings
-            .iter()
-            .map(|heading| slugify_heading(&heading.text))
-            .filter(|slug| !slug.is_empty())
-            .collect::<Vec<_>>();
-        heading_slugs.sort();
-        heading_slugs.dedup();
-        let block_ids = extract_block_ids(&parsed.body);
-        let markdown_doc = MarkdownIndexDocument {
-            file_id,
-            source_path: entry.normalized.clone(),
-            links,
-            heading_slugs,
-            block_ids,
-            properties: property_records,
-            tasks: task_records,
-        };
-
+    let kind = file_kind(&entry.relative);
+    let mut file_record = inventory_record(entry);
+    if !matches!(kind, FileKind::Markdown | FileKind::Base) {
         return Ok(PreparedIndexEntry {
             file_record,
-            markdown_doc: Some(markdown_doc),
+            markdown_doc: None,
             base_record: None,
+            document_record: None,
+            diagnostic: None,
         });
     }
-
-    if entry.normalized.ends_with(".base") {
-        let raw =
-            fs::read_to_string(&entry.absolute).map_err(|source| FullIndexError::ReadFile {
-                path: entry.absolute.clone(),
-                source,
-            })?;
+    let captured = captured
+        .map_or_else(|| fingerprints.capture(&entry.absolute), Ok)
+        .map_err(|source| FullIndexError::Fingerprint {
+            path: entry.absolute.clone(),
+            source: Box::new(source),
+        })?;
+    file_record.size_bytes = captured.fingerprint.size_bytes;
+    file_record.modified_unix_ms =
+        i64::try_from(captured.fingerprint.modified_unix_ms).map_err(|_| {
+            FullIndexError::TimestampOverflow {
+                value: captured.fingerprint.modified_unix_ms,
+            }
+        })?;
+    file_record.hash_blake3 = captured.fingerprint.hash_blake3;
+    let raw = String::from_utf8(captured.bytes).map_err(|source| FullIndexError::ReadFile {
+        path: entry.absolute.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+    })?;
+    if kind == FileKind::Base {
         let config_json = serde_json::to_string(&json!({ "raw": raw })).map_err(|source| {
             FullIndexError::SerializeBaseConfig {
                 path: entry.absolute.clone(),
                 source,
             }
         })?;
-
         return Ok(PreparedIndexEntry {
-            file_record,
-            markdown_doc: None,
             base_record: Some(BaseRecordInput {
                 base_id: deterministic_id("base", &entry.normalized),
-                file_id,
+                file_id: file_record.file_id.clone(),
                 config_json,
             }),
+            file_record,
+            markdown_doc: None,
+            document_record: None,
+            diagnostic: None,
         });
     }
-
+    let parsed = parser
+        .parse(MarkdownParseRequest {
+            normalized_path: entry.normalized.clone(),
+            raw: raw.clone(),
+        })
+        .map_err(|source| FullIndexError::ParseMarkdown {
+            path: entry.absolute.clone(),
+            source: Box::new(source),
+        })?;
+    let diagnostic = if matches!(
+        parsed.front_matter_status,
+        FrontMatterStatus::Malformed { .. }
+    ) {
+        Some(FileDiagnosticInput {
+            path: entry.normalized.clone(),
+            file_id: Some(file_record.file_id.clone()),
+            kind: "frontmatter_invalid".to_string(),
+            message: format!("{:?}", parsed.front_matter_status),
+        })
+    } else {
+        None
+    };
+    let properties = build_property_records(
+        &file_record.file_id,
+        &entry.normalized,
+        &parsed.front_matter_status,
+        &entry.absolute,
+    )?;
+    let tasks = build_task_records(&file_record.file_id, &entry.normalized, &parsed);
+    let links = extract_index_links(&parsed);
+    let mut heading_slugs = parsed
+        .headings
+        .iter()
+        .map(|heading| slugify_heading(&heading.text))
+        .filter(|slug| !slug.is_empty())
+        .collect::<Vec<_>>();
+    heading_slugs.sort();
+    heading_slugs.dedup();
+    let block_ids = parsed.block_ids.clone();
+    let structure = CanonicalStructure {
+        version: CANONICAL_STRUCTURE_VERSION,
+        links: links.clone(),
+        heading_slugs: heading_slugs.clone(),
+        block_ids: block_ids.clone(),
+    };
+    let document_record = DocumentRecordInput {
+        file_id: file_record.file_id.clone(),
+        source_hash: file_record.hash_blake3.clone(),
+        parser_version: CANONICAL_STRUCTURE_VERSION,
+        raw_text: raw,
+        body_text: parsed.body,
+        title: parsed.title,
+        structure_json: serde_json::to_string(&structure).map_err(|source| {
+            FullIndexError::CanonicalState {
+                operation: "serialize_document_structure",
+                message: source.to_string(),
+            }
+        })?,
+    };
     Ok(PreparedIndexEntry {
+        markdown_doc: Some(MarkdownIndexDocument {
+            file_id: file_record.file_id.clone(),
+            source_path: entry.normalized.clone(),
+            links,
+            properties,
+            tasks,
+        }),
         file_record,
-        markdown_doc: None,
         base_record: None,
+        document_record: Some(document_record),
+        diagnostic,
     })
+}
+
+fn inventory_record(entry: &VaultManifestEntry) -> FileRecordInput {
+    FileRecordInput {
+        file_id: deterministic_id("file", &entry.normalized),
+        normalized_path: entry.normalized.clone(),
+        match_key: entry.match_key.clone(),
+        absolute_path: entry.absolute.to_string_lossy().into_owned(),
+        size_bytes: entry.size_bytes,
+        modified_unix_ms: entry.modified_unix_ms,
+        // Empty is explicitly an uncomputed content digest for inventory-only files.
+        hash_blake3: String::new(),
+        is_markdown: file_kind(&entry.relative) == FileKind::Markdown,
+    }
 }
 
 fn resolve_document_link_records(
@@ -839,197 +582,96 @@ fn resolve_document_link_records(
     block_index: &HashMap<String, Vec<String>>,
 ) -> ResolvedLinkBatch {
     let mut records = Vec::with_capacity(document.links.len());
-    let mut unresolved_total = 0_u64;
-
-    for (index, indexed_link) in document.links.iter().enumerate() {
-        let link = &indexed_link.link;
-        let resolution = resolution_index.resolve(&link.target, Some(&document.source_path));
-
-        let mut resolved_file_id = resolution
+    let mut evidence = Vec::with_capacity(document.links.len());
+    for (index, indexed) in document.links.iter().enumerate() {
+        let resolution =
+            resolution_index.resolve_link(&indexed.target, Some(&document.source_path));
+        let resolved_file_id = resolution
             .resolved_path
             .as_ref()
-            .and_then(|path| file_id_by_path.get(path).cloned());
-        let mut heading_slug = link.heading.as_deref().map(slugify_heading);
-        let mut block_id = link.block.clone();
-        let heading_resolution = resolve_heading_target(
-            link.heading.as_deref(),
+            .and_then(|path| file_id_by_path.get(path))
+            .cloned();
+        let fragment_status = validate_fragment(
+            indexed.target.fragment.as_ref(),
             resolution.resolved_path.as_deref(),
             heading_index,
-        );
-        if let Some(resolved_heading_slug) = heading_resolution.resolved_heading_slug {
-            heading_slug = Some(resolved_heading_slug);
-        }
-        if link.heading.is_some() && !heading_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-        let block_resolution = resolve_block_target(
-            link.block.as_deref(),
-            resolution.resolved_path.as_deref(),
             block_index,
+            None,
         );
-        if let Some(resolved_block_id) = block_resolution.resolved_block_id {
-            block_id = Some(resolved_block_id);
-        }
-        if link.block.is_some() && !block_resolution.is_resolved {
-            resolved_file_id = None;
-        }
-
+        let heading_slug = match &indexed.target.fragment {
+            Some(LinkFragment::Heading(value)) => Some(slugify_heading(value)),
+            _ => None,
+        };
+        let block_id = match &indexed.target.fragment {
+            Some(LinkFragment::Block(value)) => Some(value.clone()),
+            _ => None,
+        };
         let is_unresolved = resolved_file_id.is_none();
         let unresolved_reason = if is_unresolved {
-            classify_unresolved_reason(
-                link,
-                resolution.resolved_path.as_deref(),
-                heading_resolution.is_resolved,
-                block_resolution.is_resolved,
+            Some(
+                if indexed.target.invalid_reason.is_some() {
+                    "malformed-target"
+                } else {
+                    "missing-note"
+                }
+                .to_string(),
             )
         } else {
             None
         };
-        if is_unresolved {
-            unresolved_total += 1;
-        }
-        records.push(LinkRecordInput {
-            link_id: deterministic_id(
-                "link",
-                &format!(
-                    "{}:{}:{}:{}",
-                    document.file_id, index, indexed_link.source, link.raw
-                ),
+        let link_id = deterministic_id(
+            "link",
+            &format!(
+                "{}:{index}:{}:{}",
+                document.file_id, indexed.source, indexed.link.raw
             ),
+        );
+        evidence.push(LinkEvidenceInput {
+            link_id: link_id.clone(),
+            raw_expression: indexed.link.raw.clone(),
+            source_start: indexed.span.as_ref().map_or(0, |span| span.start as u64),
+            source_end: indexed.span.as_ref().map_or(0, |span| span.end as u64),
+            line: indexed.span.as_ref().map_or(0, |span| span.line as u64),
+            end_line: indexed.span.as_ref().map_or(0, |span| span.end_line as u64),
+            syntax: match indexed.target.syntax {
+                LinkSyntax::Wiki => "wiki",
+                LinkSyntax::Markdown => "markdown",
+            }
+            .to_string(),
+            fragment_json: serde_json::to_string(&indexed.target.fragment)
+                .unwrap_or_else(|_| "null".to_string()),
+            fragment_status: serde_json::to_value(fragment_status)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            resolution_rule: serde_json::to_value(resolution.rule)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            candidates_json: serde_json::to_string(&resolution.matched_candidates)
+                .unwrap_or_else(|_| "[]".to_string()),
+        });
+        records.push(LinkRecordInput {
+            link_id,
             source_file_id: document.file_id.clone(),
-            raw_target: link.target.clone(),
+            raw_target: indexed.target.path.clone(),
             resolved_file_id,
             heading_slug,
             block_id,
             is_unresolved,
             unresolved_reason,
-            source_field: indexed_link.kind.source_field(&indexed_link.source),
+            source_field: indexed.kind.source_field(&indexed.source),
         });
     }
-
-    ResolvedLinkBatch {
-        records,
-        unresolved_total,
-    }
-}
-
-fn classify_unresolved_reason(
-    link: &WikiLink,
-    resolved_path: Option<&str>,
-    heading_is_resolved: bool,
-    block_is_resolved: bool,
-) -> Option<String> {
-    if link.block.is_some() && !block_is_resolved {
-        return Some("bad-block".to_string());
-    }
-    if link.heading.is_some() && !heading_is_resolved {
-        return Some("bad-anchor".to_string());
-    }
-    if resolved_path.is_none() {
-        if is_malformed_link_target(&link.target) {
-            return Some("malformed-target".to_string());
-        }
-        return Some("missing-note".to_string());
-    }
-    None
-}
-
-fn is_malformed_link_target(target: &str) -> bool {
-    let trimmed = target.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-
-    trimmed
-        .chars()
-        .any(|ch| !(ch.is_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ' ' | '(' | ')')))
-}
-
-fn build_heading_index(
-    vault_root: &Path,
-    candidates: &[String],
-    parser: &MarkdownParser,
-) -> Result<HashMap<String, Vec<String>>, FullIndexError> {
-    let mut heading_index = HashMap::new();
-
-    for normalized in candidates {
-        let absolute = vault_root.join(normalized);
-        let markdown = match fs::read_to_string(&absolute) {
-            Ok(markdown) => markdown,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(FullIndexError::ReadFile {
-                    path: absolute,
-                    source,
-                });
-            }
-        };
-
-        let parsed = parser
-            .parse(MarkdownParseRequest {
-                normalized_path: normalized.clone(),
-                raw: markdown,
-            })
-            .map_err(|source| FullIndexError::ParseMarkdown {
-                path: absolute.clone(),
-                source: Box::new(source),
-            })?;
-
-        let mut heading_slugs = parsed
-            .headings
-            .iter()
-            .map(|heading| slugify_heading(&heading.text))
-            .filter(|slug| !slug.is_empty())
-            .collect::<Vec<_>>();
-        heading_slugs.sort();
-        heading_slugs.dedup();
-
-        heading_index.insert(normalized.clone(), heading_slugs);
-    }
-
-    Ok(heading_index)
-}
-
-fn build_block_index(
-    vault_root: &Path,
-    candidates: &[String],
-    parser: &MarkdownParser,
-) -> Result<HashMap<String, Vec<String>>, FullIndexError> {
-    let mut block_index = HashMap::new();
-
-    for normalized in candidates {
-        let absolute = vault_root.join(normalized);
-        let markdown = match fs::read_to_string(&absolute) {
-            Ok(markdown) => markdown,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(FullIndexError::ReadFile {
-                    path: absolute,
-                    source,
-                });
-            }
-        };
-
-        let parsed = parser
-            .parse(MarkdownParseRequest {
-                normalized_path: normalized.clone(),
-                raw: markdown,
-            })
-            .map_err(|source| FullIndexError::ParseMarkdown {
-                path: absolute.clone(),
-                source: Box::new(source),
-            })?;
-
-        block_index.insert(normalized.clone(), extract_block_ids(&parsed.body));
-    }
-
-    Ok(block_index)
+    ResolvedLinkBatch { records, evidence }
 }
 
 fn typed_value_kind(value: &TypedPropertyValue) -> &'static str {
     match value {
         TypedPropertyValue::Bool(_) => "bool",
-        TypedPropertyValue::Number(_) => "number",
+        TypedPropertyValue::Number(_)
+        | TypedPropertyValue::Integer(_)
+        | TypedPropertyValue::UnsignedInteger(_) => "number",
         TypedPropertyValue::Date(_) => "date",
         TypedPropertyValue::String(_) => "string",
         TypedPropertyValue::List(_) => "list",
@@ -1040,6 +682,8 @@ fn typed_value_kind(value: &TypedPropertyValue) -> &'static str {
 fn typed_value_to_json(value: &TypedPropertyValue) -> serde_json::Value {
     match value {
         TypedPropertyValue::Bool(value) => serde_json::Value::Bool(*value),
+        TypedPropertyValue::Integer(value) => serde_json::Value::Number((*value).into()),
+        TypedPropertyValue::UnsignedInteger(value) => serde_json::Value::Number((*value).into()),
         TypedPropertyValue::Number(value) => serde_json::Number::from_f64(*value)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
@@ -1059,43 +703,29 @@ fn deterministic_id(prefix: &str, input: &str) -> String {
 }
 
 fn normalize_changed_path(path: &Path) -> Result<String, FullIndexError> {
-    if path.is_absolute() {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return Err(FullIndexError::InvalidChangedPath {
             path: path.to_path_buf(),
-            reason: "path must be relative".to_string(),
+            reason: "path must be relative without parent traversal".to_string(),
         });
     }
-
-    let mut segments = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(segment) => {
-                let segment =
-                    segment
-                        .to_str()
-                        .ok_or_else(|| FullIndexError::InvalidChangedPath {
-                            path: path.to_path_buf(),
-                            reason: "path component is not utf-8".to_string(),
-                        })?;
-                segments.push(segment.to_string());
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                return Err(FullIndexError::InvalidChangedPath {
-                    path: path.to_path_buf(),
-                    reason: "path must not contain parent traversal".to_string(),
-                });
-            }
-            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                return Err(FullIndexError::InvalidChangedPath {
-                    path: path.to_path_buf(),
-                    reason: "unsupported path component".to_string(),
-                });
-            }
+    let normalized = tao_sdk_vault::normalize_relative_path(path).map_err(|source| {
+        FullIndexError::InvalidChangedPath {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
         }
+    })?;
+    if normalized.is_empty() {
+        return Err(FullIndexError::InvalidChangedPath {
+            path: path.to_path_buf(),
+            reason: "path must identify a file".to_string(),
+        });
     }
-
-    Ok(segments.join("/"))
+    Ok(normalized)
 }
 
 fn current_unix_ms() -> Result<u128, FullIndexError> {
@@ -1111,3 +741,11 @@ fn current_unix_ms_raw() -> Result<u128, std::time::SystemTimeError> {
 #[cfg(test)]
 #[path = "pipeline/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "pipeline/regression_tests.rs"]
+mod regression_tests;
+
+#[cfg(test)]
+#[path = "pipeline/work_tests.rs"]
+mod work_tests;

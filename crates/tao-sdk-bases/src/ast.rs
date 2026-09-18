@@ -95,6 +95,8 @@ pub enum BaseFilterOp {
     NotIn,
     /// Field existence check.
     Exists,
+    /// Missing, null, or empty string/collection check.
+    IsEmpty,
     /// String starts with prefix.
     StartsWith,
     /// String does not start with prefix.
@@ -222,39 +224,6 @@ pub struct TableQueryPlanRequest {
     pub page_size: u32,
 }
 
-/// Property query request hint derived from a base table plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PropertyQueryPlanRequest {
-    /// Property key to query.
-    pub key: String,
-    /// Optional substring filter.
-    pub value_contains: Option<String>,
-    /// Sort strategy.
-    pub sort: PropertyQuerySortHint,
-    /// Optional row limit.
-    pub limit: Option<usize>,
-    /// Pagination row offset.
-    pub offset: usize,
-}
-
-/// Sort hints that map to service-level property query sorts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PropertyQuerySortHint {
-    /// File path ascending.
-    FilePathAsc,
-    /// File path descending.
-    FilePathDesc,
-    /// Updated timestamp ascending.
-    UpdatedAtAsc,
-    /// Updated timestamp descending.
-    UpdatedAtDesc,
-    /// Value ascending.
-    ValueAsc,
-    /// Value descending.
-    ValueDesc,
-}
-
 /// Compiled table query plan for one base view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableQueryPlan {
@@ -282,6 +251,4 @@ pub struct TableQueryPlan {
     pub limit: usize,
     /// Query offset.
     pub offset: usize,
-    /// Per-key property query hints for executor layer wiring.
-    pub property_queries: Vec<PropertyQueryPlanRequest>,
 }
